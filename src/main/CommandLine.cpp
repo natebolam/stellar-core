@@ -629,9 +629,11 @@ int
 runDumpXDR(CommandLineArgs const& args)
 {
     std::string xdr;
+    bool json = false;
+    auto jsonOption = clara::Opt{json}["--json"]("dump json");
 
-    return runWithHelp(args, {fileNameParser(xdr)}, [&] {
-        dumpXdrStream(xdr);
+    return runWithHelp(args, {jsonOption, fileNameParser(xdr)}, [&] {
+        dumpXdrStream(xdr, json);
         return 0;
     });
 }
@@ -937,6 +939,8 @@ runSimulate(CommandLineArgs const& args)
         [&] {
             auto config = configOption.getConfig();
             config.setNoListen();
+            LOG(INFO) << "Publishing is disabled in `simulate` mode";
+            config.setNoPublish();
 
             VirtualClock clock(VirtualClock::REAL_TIME);
             auto app = Application::create(clock, config, false);
@@ -1071,7 +1075,7 @@ handleCommandLine(int argc, char* const* argv)
          {"sign-transaction",
           "add signature to transaction envelope, then quit",
           runSignTransaction},
-         {"upgrade-db", "upgade database schema to current version",
+         {"upgrade-db", "upgrade database schema to current version",
           runUpgradeDB},
 #ifdef BUILD_TESTS
          {"load-xdr", "load an XDR bucket file, for testing", runLoadXDR},

@@ -85,8 +85,6 @@ class OverlayManagerImpl : public OverlayManager
 
     // NOTE: bool is used here as a placeholder, since no ValueType is needed.
     cache::lru_cache<uint64_t, bool> mMessageCache;
-    uint32_t mCheckPerfLogLevelCounter;
-    el::Level mPerfLogLevel;
 
     void tick();
     VirtualTimer mTimer;
@@ -103,7 +101,9 @@ class OverlayManagerImpl : public OverlayManager
     ~OverlayManagerImpl();
 
     void ledgerClosed(uint32_t lastClosedledgerSeq) override;
-    bool recvFloodedMsg(StellarMessage const& msg, Peer::pointer peer) override;
+    bool recvFloodedMsgID(StellarMessage const& msg, Peer::pointer peer,
+                          Hash& msgID) override;
+    void forgetFloodedMsg(Hash const& msgID) override;
     void broadcastMessage(StellarMessage const& msg, bool force = false,
                           uint32_t minOverlayVersion = 0) override;
     void connectTo(PeerBareAddress const& address) override;
@@ -149,8 +149,8 @@ class OverlayManagerImpl : public OverlayManager
 
     bool isShuttingDown() const override;
 
-    void recordDuplicateMessageMetric(StellarMessage const& stellarMsg,
-                                      Peer::pointer peer) override;
+    void recordMessageMetric(StellarMessage const& stellarMsg,
+                             Peer::pointer peer) override;
 
   private:
     struct ResolvedPeers

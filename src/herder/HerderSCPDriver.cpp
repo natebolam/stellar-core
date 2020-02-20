@@ -3,6 +3,7 @@
 // of this distribution or at http://www.apache.org/licenses/LICENSE-2.0
 
 #include "herder/HerderSCPDriver.h"
+#include "HerderUtils.h"
 #include "crypto/Hex.h"
 #include "crypto/SHA.h"
 #include "crypto/SecretKey.h"
@@ -100,6 +101,53 @@ HerderSCPDriver::restoreSCPState(uint64_t index, StellarValue const& value)
 }
 
 // envelope handling
+
+class SCPHerderEnvelopeWrapper : public SCPEnvelopeWrapper
+{
+    HerderImpl& mHerder;
+
+    SCPQuorumSetPtr mQSet;
+    std::vector<TxSetFramePtr> mTxSets;
+
+  public:
+    explicit SCPHerderEnvelopeWrapper(SCPEnvelope const& e, HerderImpl& herder)
+        : SCPEnvelopeWrapper(e), mHerder(herder)
+    {
+        // attach everything we can to the wrapper
+        auto qSetH = Slot::getCompanionQuorumSetHashFromStatement(e.statement);
+        mQSet = mHerder.getQSet(qSetH);
+        if (!mQSet)
+        {
+            throw std::runtime_error(
+                fmt::format("SCPHerderEnvelopeWrapper: Wrapping an unknown "
+                            "qset {} from envelope",
+                            hexAbbrev(qSetH)));
+        }
+        auto txSets = getTxSetHashes(e);
+        for (auto const& txSetH : txSets)
+        {
+            auto txSet = mHerder.getTxSet(txSetH);
+            if (txSet)
+            {
+                mTxSets.emplace_back(txSet);
+            }
+            else
+            {
+                throw std::runtime_error(
+                    fmt::format("SCPHerderEnvelopeWrapper: Wrapping an unknown "
+                                "tx set {} from envelope",
+                                hexAbbrev(txSetH)));
+            }
+        }
+    }
+};
+
+SCPEnvelopeWrapperPtr
+HerderSCPDriver::wrapEnvelope(SCPEnvelope const& envelope)
+{
+    auto r = std::make_shared<SCPHerderEnvelopeWrapper>(envelope, mHerder);
+    return r;
+}
 
 void
 HerderSCPDriver::signEnvelope(SCPEnvelope& envelope)
@@ -390,7 +438,7 @@ HerderSCPDriver::validateValue(uint64_t slotIndex, Value const& value,
     return res;
 }
 
-Value
+ValueWrapperPtr
 HerderSCPDriver::extractValidValue(uint64_t slotIndex, Value const& value)
 {
     StellarValue b;
@@ -400,9 +448,9 @@ HerderSCPDriver::extractValidValue(uint64_t slotIndex, Value const& value)
     }
     catch (...)
     {
-        return Value();
+        return nullptr;
     }
-    Value res;
+    ValueWrapperPtr res;
     if (validateValueHelper(slotIndex, b, true) ==
         SCPDriver::kFullyValidatedValue)
     {
@@ -423,7 +471,7 @@ HerderSCPDriver::extractValidValue(uint64_t slotIndex, Value const& value)
             }
         }
 
-        res = xdr::xdr_to_opaque(b);
+        res = wrapStellarValue(b);
     }
 
     return res;
@@ -569,9 +617,9 @@ compareTxSets(TxSetFramePtr l, TxSetFramePtr r, Hash const& lh, Hash const& rh,
     return lessThanXored(lh, rh, s);
 }
 
-Value
+ValueWrapperPtr
 HerderSCPDriver::combineCandidates(uint64_t slotIndex,
-                                   std::set<Value> const& candidates)
+                                   ValueWrapperPtrSet const& candidates)
 {
     CLOG(DEBUG, "Herder") << "Combining " << candidates.size() << " candidates";
     mSCPMetrics.mCombinedCandidates.Mark(candidates.size());
@@ -595,8 +643,8 @@ HerderSCPDriver::combineCandidates(uint64_t slotIndex,
         candidateValues.emplace_back();
         StellarValue& sv = candidateValues.back();
 
-        xdr::xdr_from_opaque(c, sv);
-        candidatesHash ^= sha256(c);
+        xdr::xdr_from_opaque(c->getValue(), sv);
+        candidatesHash ^= sha256(c->getValue());
 
         // max closeTime
         if (comp.closeTime < sv.closeTime)
@@ -686,6 +734,10 @@ HerderSCPDriver::combineCandidates(uint64_t slotIndex,
         CLOG(WARNING, "Herder") << "Candidate set had " << removed.size()
                                 << " invalid transactions";
 
+        // learn the updated tx set
+        bestTxSet = mPendingEnvelopes.putTxSet(bestTxSet->getContentsHash(),
+                                               slotIndex, bestTxSet);
+
         // post to avoid triggering SCP handling code recursively
         mApp.postOnMainThreadWithDelay(
             [this, bestTxSet]() {
@@ -697,7 +749,8 @@ HerderSCPDriver::combineCandidates(uint64_t slotIndex,
 
     // Ballot Protocol uses BASIC values
     comp.ext.v(STELLAR_VALUE_BASIC);
-    return xdr::xdr_to_opaque(comp);
+    auto res = wrapStellarValue(comp);
+    return res;
 }
 
 bool
@@ -758,7 +811,7 @@ HerderSCPDriver::valueExternalized(uint64_t slotIndex, Value const& value)
         logQuorumInformation(slotIndex - 2);
     }
 
-    if (!mCurrentValue.empty())
+    if (mCurrentValue)
     {
         // stop nomination
         // this may or may not be the ledger that is currently externalizing
@@ -766,7 +819,7 @@ HerderSCPDriver::valueExternalized(uint64_t slotIndex, Value const& value)
         // either we're closing the current ledger (typical case)
         // or we're going to trigger catchup from history
         mSCP.stopNomination(mLedgerSeqNominating);
-        mCurrentValue.clear();
+        mCurrentValue.reset();
     }
 
     if (!mTrackingSCP)
@@ -805,10 +858,10 @@ HerderSCPDriver::nominate(uint64_t slotIndex, StellarValue const& value,
                           TxSetFramePtr proposedSet,
                           StellarValue const& previousValue)
 {
-    mCurrentValue = xdr::xdr_to_opaque(value);
+    mCurrentValue = wrapStellarValue(value);
     mLedgerSeqNominating = static_cast<uint32_t>(slotIndex);
 
-    auto valueHash = sha256(xdr::xdr_to_opaque(mCurrentValue));
+    auto valueHash = sha256(xdr::xdr_to_opaque(mCurrentValue->getValue()));
     CLOG(DEBUG, "Herder") << "HerderSCPDriver::triggerNextLedger"
                           << " txSet.size: "
                           << proposedSet->mTransactions.size()
@@ -961,5 +1014,49 @@ void
 HerderSCPDriver::clearSCPExecutionEvents()
 {
     mSCPExecutionTimes.clear();
+}
+
+// Value handling
+class SCPHerderValueWrapper : public ValueWrapper
+{
+    HerderImpl& mHerder;
+
+    TxSetFramePtr mTxSet;
+
+  public:
+    explicit SCPHerderValueWrapper(StellarValue const& sv, Value const& value,
+                                   HerderImpl& herder)
+        : ValueWrapper(value), mHerder(herder)
+    {
+        mTxSet = mHerder.getTxSet(sv.txSetHash);
+        if (!mTxSet)
+        {
+            throw std::runtime_error(fmt::format(
+                "SCPHerderValueWrapper tried to bind an unknown tx set {}",
+                hexAbbrev(sv.txSetHash)));
+        }
+    }
+};
+
+ValueWrapperPtr
+HerderSCPDriver::wrapValue(Value const& val)
+{
+    StellarValue sv;
+    auto b = mHerder.getHerderSCPDriver().toStellarValue(val, sv);
+    if (!b)
+    {
+        throw std::runtime_error(fmt::format(
+            "Invalid value in SCPHerderValueWrapper {}", binToHex(val)));
+    }
+    auto res = std::make_shared<SCPHerderValueWrapper>(sv, val, mHerder);
+    return res;
+}
+
+ValueWrapperPtr
+HerderSCPDriver::wrapStellarValue(StellarValue const& sv)
+{
+    auto val = xdr::xdr_to_opaque(sv);
+    auto res = std::make_shared<SCPHerderValueWrapper>(sv, val, mHerder);
+    return res;
 }
 }

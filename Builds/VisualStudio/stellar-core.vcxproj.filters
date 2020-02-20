@@ -687,9 +687,6 @@
     <ClCompile Include="..\..\src\ledger\test\SyncingLedgerChainTests.cpp">
       <Filter>ledger\tests</Filter>
     </ClCompile>
-    <ClCompile Include="..\..\src\main\test\ApplicationTests.cpp">
-      <Filter>main\tests</Filter>
-    </ClCompile>
     <ClCompile Include="..\..\src\main\test\ConfigTests.cpp">
       <Filter>main\tests</Filter>
     </ClCompile>
@@ -1886,9 +1883,6 @@
     <None Include="..\..\docs\software\security-protocol-release-notes.md">
       <Filter>docs\software</Filter>
     </None>
-    <None Include="..\..\docs\stellar-core.1.md">
-      <Filter>docs</Filter>
-    </None>
     <None Include="..\..\docs\stellar-core_testnet_legacy.cfg">
       <Filter>docs</Filter>
     </None>
@@ -1906,6 +1900,9 @@
     </None>
     <None Include="..\..\.github\PULL_REQUEST_TEMPLATE.md">
       <Filter>github</Filter>
+    </None>
+    <None Include="..\..\docs\quick-reference.md">
+      <Filter>docs</Filter>
     </None>
   </ItemGroup>
   <ItemGroup>

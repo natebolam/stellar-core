@@ -13,6 +13,10 @@ OverlayMetrics::OverlayMetrics(Application& app)
           app.getMetrics().NewMeter({"overlay", "message", "read"}, "message"))
     , mMessageWrite(
           app.getMetrics().NewMeter({"overlay", "message", "write"}, "message"))
+    , mAsyncRead(
+          app.getMetrics().NewMeter({"overlay", "async", "read"}, "call"))
+    , mAsyncWrite(
+          app.getMetrics().NewMeter({"overlay", "async", "write"}, "call"))
     , mByteRead(app.getMetrics().NewMeter({"overlay", "byte", "read"}, "byte"))
     , mByteWrite(
           app.getMetrics().NewMeter({"overlay", "byte", "write"}, "byte"))
@@ -24,6 +28,9 @@ OverlayMetrics::OverlayMetrics(Application& app)
           app.getMetrics().NewMeter({"overlay", "timeout", "idle"}, "timeout"))
     , mTimeoutStraggler(app.getMetrics().NewMeter(
           {"overlay", "timeout", "straggler"}, "timeout"))
+
+    , mItemFetcherNextPeer(app.getMetrics().NewMeter(
+          {"overlay", "item-fetcher", "next-peer"}, "item-fetcher"))
 
     , mRecvErrorTimer(app.getMetrics().NewTimer({"overlay", "recv", "error"}))
     , mRecvHelloTimer(app.getMetrics().NewTimer({"overlay", "recv", "hello"}))
@@ -60,6 +67,11 @@ OverlayMetrics::OverlayMetrics(Application& app)
           app.getMetrics().NewTimer({"overlay", "recv", "survey-request"}))
     , mRecvSurveyResponseTimer(
           app.getMetrics().NewTimer({"overlay", "recv", "survey-response"}))
+
+    , mMessageDelayInWriteQueueTimer(
+          app.getMetrics().NewTimer({"overlay", "delay", "write-queue"}))
+    , mMessageDelayInAsyncWriteTimer(
+          app.getMetrics().NewTimer({"overlay", "delay", "async-write"}))
 
     , mSendErrorMeter(
           app.getMetrics().NewMeter({"overlay", "send", "error"}, "message"))

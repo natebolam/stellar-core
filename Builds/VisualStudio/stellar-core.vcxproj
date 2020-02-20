@@ -462,7 +462,6 @@ exit /b 0
     <ClCompile Include="..\..\src\main\Maintainer.cpp" />
     <ClCompile Include="..\..\src\main\PersistentState.cpp" />
     <ClCompile Include="..\..\src\main\StellarCoreVersion.cpp" />
-    <ClCompile Include="..\..\src\main\test\ApplicationTests.cpp" />
     <ClCompile Include="..\..\src\main\test\ConfigTests.cpp" />
     <ClCompile Include="..\..\src\main\test\ExternalQueueTests.cpp" />
     <ClCompile Include="..\..\src\overlay\BanManagerImpl.cpp" />
@@ -846,6 +845,7 @@ exit /b 0
     <None Include="..\..\docs\integration.md" />
     <None Include="..\..\docs\ledger.md" />
     <None Include="..\..\docs\metrics.md" />
+    <None Include="..\..\docs\quick-reference.md" />
     <None Include="..\..\docs\readme.md" />
     <None Include="..\..\docs\software\admin.md" />
     <None Include="..\..\docs\software\commands.md" />
@@ -853,7 +853,6 @@ exit /b 0
     <None Include="..\..\docs\software\performance.md" />
     <None Include="..\..\docs\software\security-protocol-release-notes.md" />
     <None Include="..\..\docs\software\testnet.md" />
-    <None Include="..\..\docs\stellar-core.1.md" />
     <None Include="..\..\docs\stellar-core_example.cfg" />
     <None Include="..\..\docs\stellar-core_example_validators.cfg" />
     <None Include="..\..\docs\stellar-core_standalone.cfg" />

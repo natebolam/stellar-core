@@ -24,7 +24,7 @@ ItemFetcher::ItemFetcher(Application& app, AskPeer askPeer)
 }
 
 void
-ItemFetcher::fetch(Hash itemHash, const SCPEnvelope& envelope)
+ItemFetcher::fetch(Hash const& itemHash, const SCPEnvelope& envelope)
 {
     CLOG(TRACE, "Overlay") << "fetch " << hexAbbrev(itemHash);
     auto entryIt = mTrackers.find(itemHash);
@@ -44,7 +44,7 @@ ItemFetcher::fetch(Hash itemHash, const SCPEnvelope& envelope)
 }
 
 void
-ItemFetcher::stopFetch(Hash itemHash, const SCPEnvelope& envelope)
+ItemFetcher::stopFetch(Hash const& itemHash, SCPEnvelope const& envelope)
 {
     CLOG(TRACE, "Overlay") << "stopFetch " << hexAbbrev(itemHash);
     const auto& iter = mTrackers.find(itemHash);
@@ -65,7 +65,7 @@ ItemFetcher::stopFetch(Hash itemHash, const SCPEnvelope& envelope)
 }
 
 uint64
-ItemFetcher::getLastSeenSlotIndex(Hash itemHash) const
+ItemFetcher::getLastSeenSlotIndex(Hash const& itemHash) const
 {
     auto iter = mTrackers.find(itemHash);
     if (iter == mTrackers.end())
@@ -77,7 +77,7 @@ ItemFetcher::getLastSeenSlotIndex(Hash itemHash) const
 }
 
 std::vector<SCPEnvelope>
-ItemFetcher::fetchingFor(Hash itemHash) const
+ItemFetcher::fetchingFor(Hash const& itemHash) const
 {
     auto result = std::vector<SCPEnvelope>{};
     auto iter = mTrackers.find(itemHash);
@@ -130,9 +130,8 @@ ItemFetcher::doesntHave(Hash const& itemHash, Peer::pointer peer)
 }
 
 void
-ItemFetcher::recv(Hash itemHash)
+ItemFetcher::recv(Hash itemHash, medida::Timer& timer)
 {
-    CLOG(TRACE, "Overlay") << "Recv " << hexAbbrev(itemHash);
     const auto& iter = mTrackers.find(itemHash);
 
     if (iter != mTrackers.end())
@@ -144,6 +143,7 @@ ItemFetcher::recv(Hash itemHash)
         CLOG(TRACE, "Overlay")
             << "Recv " << hexAbbrev(itemHash) << " : " << tracker->size();
 
+        timer.Update(tracker->getDuration());
         while (!tracker->empty())
         {
             mApp.getHerder().recvSCPEnvelope(tracker->pop());
@@ -151,6 +151,10 @@ ItemFetcher::recv(Hash itemHash)
         // stop the timer, stop requesting the item as we have it
         tracker->resetLastSeenSlotIndex();
         tracker->cancel();
+    }
+    else
+    {
+        CLOG(TRACE, "Overlay") << "Recv " << hexAbbrev(itemHash);
     }
 }
 }

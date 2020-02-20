@@ -26,12 +26,16 @@ struct OverlayMetrics
     OverlayMetrics(Application& app);
     medida::Meter& mMessageRead;
     medida::Meter& mMessageWrite;
+    medida::Meter& mAsyncRead;
+    medida::Meter& mAsyncWrite;
     medida::Meter& mByteRead;
     medida::Meter& mByteWrite;
     medida::Meter& mErrorRead;
     medida::Meter& mErrorWrite;
     medida::Meter& mTimeoutIdle;
     medida::Meter& mTimeoutStraggler;
+
+    medida::Meter& mItemFetcherNextPeer;
 
     medida::Timer& mRecvErrorTimer;
     medida::Timer& mRecvHelloTimer;
@@ -54,6 +58,9 @@ struct OverlayMetrics
 
     medida::Timer& mRecvSurveyRequestTimer;
     medida::Timer& mRecvSurveyResponseTimer;
+
+    medida::Timer& mMessageDelayInWriteQueueTimer;
+    medida::Timer& mMessageDelayInAsyncWriteTimer;
 
     medida::Meter& mSendErrorMeter;
     medida::Meter& mSendHelloMeter;

@@ -99,7 +99,7 @@ Config::Config() : NODE_SEED(SecretKey::random())
     MAXIMUM_LEDGER_CLOSETIME_DRIFT = 50;
 
     OVERLAY_PROTOCOL_MIN_VERSION = 10;
-    OVERLAY_PROTOCOL_VERSION = 11;
+    OVERLAY_PROTOCOL_VERSION = 12;
 
     VERSION_STR = STELLAR_CORE_VERSION;
 
@@ -1434,6 +1434,15 @@ Config::setNoListen()
     RUN_STANDALONE = true;
     HTTP_PORT = 0;
     MANUAL_CLOSE = true;
+}
+
+void
+Config::setNoPublish()
+{
+    for (auto& item : HISTORY)
+    {
+        item.second.mPutCmd = "";
+    }
 }
 
 SCPQuorumSet

@@ -786,6 +786,43 @@ TEST_CASE("surge pricing", "[herder][txset]")
         // (1+..+4) + (1+2) = 10+3 = 13
         surgeTest(Config::CURRENT_LEDGER_PROTOCOL_VERSION, 5, 15, 13);
     }
+    SECTION("max 0 ops per ledger")
+    {
+        Config cfg(getTestConfig());
+        cfg.TESTING_UPGRADE_MAX_TX_SET_SIZE = 0;
+
+        VirtualClock clock;
+        Application::pointer app = createTestApplication(clock, cfg);
+
+        app->start();
+
+        auto root = TestAccount::createRoot(*app);
+
+        auto destAccount = root.create("destAccount", 500000000);
+        auto accountB = root.create("accountB", 5000000000);
+        auto accountC = root.create("accountC", 5000000000);
+
+        TxSetFramePtr txSet = std::make_shared<TxSetFrame>(
+            app->getLedgerManager().getLastClosedLedgerHeader().hash);
+
+        auto tx = makeMultiPayment(destAccount, root, 1, 100, 0, 1);
+        txSet->add(tx);
+        txSet->sortForHash();
+
+        // txSet contains a valid transaction
+        auto inv = txSet->trimInvalid(*app);
+        REQUIRE(inv.empty());
+
+        REQUIRE(txSet->sizeOp() == 1);
+        // txSet is itself invalid as it's over the limit
+        REQUIRE(!txSet->checkValid(*app));
+        txSet->surgePricingFilter(*app);
+
+        REQUIRE(txSet->sizeOp() == 0);
+        txSet->surgePricingFilter(*app);
+        REQUIRE(txSet->sizeOp() == 0);
+        REQUIRE(txSet->checkValid(*app));
+    }
 }
 
 static void
@@ -820,7 +857,6 @@ testSCPDriver(uint32 protocolVersion, uint32_t maxTxSize, size_t expectedOps,
             herder.signStellarValue(root.getSecretKey(), sv);
         }
         auto v = xdr::xdr_to_opaque(sv);
-
         return TxPair{v, txSet};
     };
     auto makeEnvelope = [&s](HerderImpl& herder, TxPair const& p, Hash qSetHash,
@@ -867,25 +903,26 @@ testSCPDriver(uint32 protocolVersion, uint32_t maxTxSize, size_t expectedOps,
     {
         auto& herder = static_cast<HerderImpl&>(app->getHerder());
 
-        std::set<Value> candidates;
+        ValueWrapperPtrSet candidates;
 
         auto addToCandidates = [&](TxPair const& p) {
-            candidates.emplace(p.first);
             auto envelope = makeEnvelope(
                 herder, p, {}, herder.getCurrentLedgerSeq() + 1, true);
             REQUIRE(herder.recvSCPEnvelope(envelope) ==
                     Herder::ENVELOPE_STATUS_FETCHING);
             REQUIRE(herder.recvTxSet(p.second->getContentsHash(), *p.second));
+            auto v = herder.getHerderSCPDriver().wrapValue(p.first);
+            candidates.emplace(v);
         };
 
         TxSetFramePtr txSet0 = makeTransactions(lcl.hash, 0, 1, 100);
         addToCandidates(makeTxPair(herder, txSet0, 10, withSCPsignature));
 
-        Value v;
+        ValueWrapperPtr v;
         StellarValue sv;
 
         v = herder.getHerderSCPDriver().combineCandidates(1, candidates);
-        xdr::xdr_from_opaque(v, sv);
+        xdr::xdr_from_opaque(v->getValue(), sv);
         REQUIRE(sv.ext.v() == STELLAR_VALUE_BASIC);
         REQUIRE(sv.closeTime == 10);
         REQUIRE(sv.txSetHash == txSet0->getContentsHash());
@@ -894,7 +931,7 @@ testSCPDriver(uint32 protocolVersion, uint32_t maxTxSize, size_t expectedOps,
 
         addToCandidates(makeTxPair(herder, txSet1, 5, withSCPsignature));
         v = herder.getHerderSCPDriver().combineCandidates(1, candidates);
-        xdr::xdr_from_opaque(v, sv);
+        xdr::xdr_from_opaque(v->getValue(), sv);
         REQUIRE(sv.ext.v() == STELLAR_VALUE_BASIC);
         REQUIRE(sv.closeTime == 10);
         REQUIRE(sv.txSetHash == txSet1->getContentsHash());
@@ -910,7 +947,7 @@ testSCPDriver(uint32 protocolVersion, uint32_t maxTxSize, size_t expectedOps,
 
         // picks the biggest set, highest time
         v = herder.getHerderSCPDriver().combineCandidates(1, candidates);
-        xdr::xdr_from_opaque(v, sv);
+        xdr::xdr_from_opaque(v->getValue(), sv);
         REQUIRE(sv.ext.v() == STELLAR_VALUE_BASIC);
         REQUIRE(sv.closeTime == 20);
         REQUIRE(sv.txSetHash == biggestTxSet->getContentsHash());
@@ -925,7 +962,7 @@ testSCPDriver(uint32 protocolVersion, uint32_t maxTxSize, size_t expectedOps,
                 makeTransactions(lcl.hash, maxTxSize, 1, 1000);
             addToCandidates(makeTxPair(herder, txSetL2, 20, withSCPsignature));
             v = herder.getHerderSCPDriver().combineCandidates(1, candidates);
-            xdr::xdr_from_opaque(v, sv);
+            xdr::xdr_from_opaque(v->getValue(), sv);
             REQUIRE(sv.ext.v() == STELLAR_VALUE_BASIC);
             REQUIRE(sv.txSetHash == txSetL2->getContentsHash());
         }
@@ -1508,31 +1545,26 @@ TEST_CASE("In quorum filtering", "[quorum][herder][acceptance]")
                     std::chrono::seconds(20), false);
 
     // process scp messages for each core node
-    auto checkCoreNodes =
-        [&](std::function<void(std::vector<SCPEnvelope> const&)> proc) {
-            for (auto const& k : qSetBase.validators)
-            {
-                auto c = sim->getNode(k);
-                HerderImpl& herder = *static_cast<HerderImpl*>(&c->getHerder());
+    auto checkCoreNodes = [&](std::function<bool(SCPEnvelope const&)> proc) {
+        for (auto const& k : qSetBase.validators)
+        {
+            auto c = sim->getNode(k);
+            HerderImpl& herder = *static_cast<HerderImpl*>(&c->getHerder());
 
-                auto const& lcl =
-                    c->getLedgerManager().getLastClosedLedgerHeader();
-                auto state =
-                    herder.getSCP().getCurrentState(lcl.header.ledgerSeq);
-                proc(state);
-            }
-        };
+            auto const& lcl = c->getLedgerManager().getLastClosedLedgerHeader();
+            herder.getSCP().processCurrentState(lcl.header.ledgerSeq, proc,
+                                                true);
+        }
+    };
 
     // none of the messages from the extra nodes should be present
-    checkCoreNodes([&](std::vector<SCPEnvelope> const& envs) {
-        for (auto const& e : envs)
-        {
-            bool r = std::find_if(
-                         extraK.begin(), extraK.end(), [&](SecretKey const& s) {
-                             return e.statement.nodeID == s.getPublicKey();
-                         }) != extraK.end();
-            REQUIRE(!r);
-        }
+    checkCoreNodes([&](SCPEnvelope const& e) {
+        bool r =
+            std::find_if(extraK.begin(), extraK.end(), [&](SecretKey const& s) {
+                return e.statement.nodeID == s.getPublicKey();
+            }) != extraK.end();
+        REQUIRE(!r);
+        return true;
     });
 
     // then, change the quorum set of node Core3 to also include "E_2" and "E_3"
@@ -1560,22 +1592,21 @@ TEST_CASE("In quorum filtering", "[quorum][herder][acceptance]")
     sim->crankUntil([&]() { return sim->haveAllExternalized(6, 3); },
                     std::chrono::seconds(20), true);
 
-    checkCoreNodes([&](std::vector<SCPEnvelope> const& envs) {
+    std::vector<bool> found;
+    found.resize(extraK.size(), false);
+
+    checkCoreNodes([&](SCPEnvelope const& e) {
         // messages for E1..E3 are present, E0 is still filtered
-        std::vector<bool> found;
-        found.resize(extraK.size(), false);
-        for (auto const& e : envs)
+        for (int i = 0; i <= 3; i++)
         {
-            for (int i = 0; i <= 3; i++)
-            {
-                found[i] = found[i] ||
-                           (e.statement.nodeID == extraK[i].getPublicKey());
-            }
+            found[i] =
+                found[i] || (e.statement.nodeID == extraK[i].getPublicKey());
         }
-        int actual =
-            static_cast<int>(std::count(++found.begin(), found.end(), true));
-        int expected = static_cast<int>(extraK.size() - 1);
-        REQUIRE(actual == expected);
-        REQUIRE(!found[0]);
+        return true;
     });
+    int actual =
+        static_cast<int>(std::count(++found.begin(), found.end(), true));
+    int expected = static_cast<int>(extraK.size() - 1);
+    REQUIRE(actual == expected);
+    REQUIRE(!found[0]);
 }

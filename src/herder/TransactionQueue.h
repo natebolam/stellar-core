@@ -28,7 +28,7 @@ namespace stellar
 class Application;
 
 /**
- * This class keeps recevied transaction that were not yet added into ledger
+ * This class keeps received transaction that were not yet added into ledger
  * and that are valid.
  *
  * Each account has an associated queue of transactions (with increasing
@@ -36,13 +36,13 @@ class Application;
  * an age used to determine how long transaction should be kept before banning.
  *
  * After receiving transaction from network it should be added to this queue
- * by tryAdd operation. If that succeds, it can be later removed from it in one
+ * by tryAdd operation. If that succeeds, it can be later removed from it in one
  * of three ways:
- * * removeAndReset() should be called after transaction is successully
+ * * removeAndReset() should be called after transaction is successfully
  *   included into some leger. It preserves the other pending transactions for
  *   accounts and resets the TTL for banning
- * * ban() should be called after transaction became invalid for some reason
- *   (i.e. its source account cannot afford it anymore)
+ * * ban() bans a transactions (which may or may not be in the queue) and its
+ *   descendants, if any, for the next few ledgers.
  * * shift() should be called after each ledger close, it bans transactions
  *   that have associated age greater or equal to pendingDepth and removes
  *   transactions that were banned for more than banDepth ledgers
@@ -71,6 +71,7 @@ class TransactionQueue
     {
         SequenceNumber mMaxSeq{0};
         int64_t mTotalFees{0};
+        size_t mQueueSizeOps{0};
         int mAge{0};
 
         friend bool operator==(AccountTxQueueInfo const& x,
@@ -87,11 +88,13 @@ class TransactionQueue
         using Transactions = std::vector<TransactionFramePtr>;
 
         int64_t mTotalFees{0};
+        size_t mQueueSizeOps{0};
         int mAge{0};
         Transactions mTransactions;
     };
 
-    explicit TransactionQueue(Application& app, int pendingDepth, int banDepth);
+    explicit TransactionQueue(Application& app, int pendingDepth, int banDepth,
+                              int poolLedgerMultiplier);
 
     AddResult tryAdd(TransactionFramePtr tx);
     void removeAndReset(std::vector<TransactionFramePtr> const& txs);
@@ -124,12 +127,12 @@ class TransactionQueue
         std::unordered_map<AccountID, AccountTransactions>;
     /**
      * Banned transactions are stored in deque of depth banDepth, so it is easy
-     * to unban all transactions that were banned for long enoug.
+     * to unban all transactions that were banned for long enough.
      */
     using BannedTransactions = std::deque<std::unordered_set<Hash>>;
 
     Application& mApp;
-    int mPendingDepth;
+    int const mPendingDepth;
     std::vector<medida::Counter*> mSizeByAge;
     PendingTransactions mPendingTransactions;
     BannedTransactions mBannedTransactions;
@@ -141,8 +144,24 @@ class TransactionQueue
     FindResult find(TransactionFramePtr const& tx);
     using ExtractResult = std::pair<PendingTransactions::iterator,
                                     std::vector<TransactionFramePtr>>;
-    // keepBacklog: keeps transactions succeding tx in the account's backlog
+    // keepBacklog: keeps transactions succeeding tx in the account's backlog
     ExtractResult extract(TransactionFramePtr const& tx, bool keepBacklog);
+
+    // size of the transaction queue, in operations
+    size_t mQueueSizeOps{0};
+    // number of ledgers we can pool in memory
+    int const mPoolLedgerMultiplier;
+
+    size_t maxQueueSizeOps() const;
+
+#ifdef BUILD_TESTS
+  public:
+    size_t
+    getQueueSizeOps() const
+    {
+        return mQueueSizeOps;
+    }
+#endif
 };
 
 static const char* TX_STATUS_STRING[static_cast<int>(

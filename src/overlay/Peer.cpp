@@ -53,7 +53,7 @@ Peer::Peer(Application& app, PeerRole role)
     , mIdleTimer(app)
     , mLastRead(app.getClock().now())
     , mLastWrite(app.getClock().now())
-    , mLastEmpty(app.getClock().now())
+    , mEnqueueTimeOfLastWrite(app.getClock().now())
     , mPeerMetrics(app.getClock().now())
 {
     auto bytes = randomBytes(mSendNonce.size());
@@ -159,7 +159,7 @@ Peer::idleTimerExpired(asio::error_code const& error)
             drop("idle timeout", Peer::DropDirection::WE_DROPPED_REMOTE,
                  Peer::DropMode::IGNORE_WRITE_QUEUE);
         }
-        else if (((now - mLastEmpty) >= stragglerTimeout))
+        else if (((now - mEnqueueTimeOfLastWrite) >= stragglerTimeout))
         {
             getOverlayMetrics().mTimeoutStraggler.Mark();
             drop("straggling (cannot keep up)",
@@ -313,8 +313,8 @@ Peer::sendErrorAndDrop(ErrorCode error, std::string const& message,
     drop(message, DropDirection::WE_DROPPED_REMOTE, dropMode);
 }
 
-static std::string
-msgSummary(StellarMessage const& msg)
+std::string
+Peer::msgSummary(StellarMessage const& msg)
 {
     switch (msg.type())
     {
@@ -369,10 +369,12 @@ void
 Peer::sendMessage(StellarMessage const& msg)
 {
     if (Logging::logTrace("Overlay"))
+    {
         CLOG(TRACE, "Overlay")
             << "send: " << msgSummary(msg)
             << " to : " << mApp.getConfig().toShortString(mPeerID) << " @"
             << mApp.getConfig().PEER_PORT;
+    }
 
     switch (msg.type())
     {
@@ -528,12 +530,6 @@ Peer::recvMessage(StellarMessage const& stellarMsg)
         return;
     }
 
-    if (Logging::logTrace("Overlay"))
-        CLOG(TRACE, "Overlay")
-            << "recv: " << msgSummary(stellarMsg)
-            << " from:" << mApp.getConfig().toShortString(mPeerID) << " @"
-            << mApp.getConfig().PEER_PORT;
-
     if (!isAuthenticated() && (stellarMsg.type() != HELLO) &&
         (stellarMsg.type() != AUTH) && (stellarMsg.type() != ERROR_MSG))
     {
@@ -546,8 +542,8 @@ Peer::recvMessage(StellarMessage const& stellarMsg)
 
     assert(isAuthenticated() || stellarMsg.type() == HELLO ||
            stellarMsg.type() == AUTH || stellarMsg.type() == ERROR_MSG);
-    mApp.getOverlayManager().recordDuplicateMessageMetric(stellarMsg,
-                                                          shared_from_this());
+    mApp.getOverlayManager().recordMessageMetric(stellarMsg,
+                                                 shared_from_this());
 
     switch (stellarMsg.type())
     {
@@ -762,10 +758,15 @@ Peer::recvSCPMessage(StellarMessage const& msg)
                                 : (getOverlayMetrics()
                                        .mRecvSCPNominateTimer.TimeScope()))));
 
+    // add it to the floodmap so that this peer gets credit for it
+    Hash msgID;
+    mApp.getOverlayManager().recvFloodedMsgID(msg, shared_from_this(), msgID);
+
     auto res = mApp.getHerder().recvSCPEnvelope(envelope);
-    if (res != Herder::ENVELOPE_STATUS_DISCARDED)
+    if (res == Herder::ENVELOPE_STATUS_DISCARDED)
     {
-        mApp.getOverlayManager().recvFloodedMsg(msg, shared_from_this());
+        // the message was discarded, remove it from the floodmap as well
+        mApp.getOverlayManager().forgetFloodedMsg(msgID);
     }
 }
 
