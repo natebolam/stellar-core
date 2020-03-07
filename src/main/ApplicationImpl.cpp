@@ -487,6 +487,10 @@ ApplicationImpl::gracefulStop()
     {
         mBucketManager->shutdown();
     }
+    if (mHerder)
+    {
+        mHerder->shutdown();
+    }
 
     mStoppingTimer.expires_from_now(
         std::chrono::seconds(SHUTDOWN_DELAY_SECONDS));
@@ -683,6 +687,7 @@ ApplicationImpl::syncAllMetrics()
 {
     mHerder->syncMetrics();
     mLedgerManager->syncMetrics();
+    mCatchupManager->syncMetrics();
     syncOwnMetrics();
 }
 
