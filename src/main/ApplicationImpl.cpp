@@ -53,9 +53,10 @@
 #include "simulation/LoadGenerator.h"
 #endif
 
+#include <Tracy.hpp>
+#include <fmt/format.h>
 #include <set>
 #include <string>
-#include <util/format.h>
 
 static const int SHUTDOWN_DELAY_SECONDS = 1;
 
@@ -76,11 +77,9 @@ ApplicationImpl::ApplicationImpl(VirtualClock& clock, Config const& cfg)
     , mAppStateCurrent(mMetrics->NewCounter({"app", "state", "current"}))
     , mPostOnMainThreadDelay(
           mMetrics->NewTimer({"app", "post-on-main-thread", "delay"}))
-    , mPostOnMainThreadWithDelayDelay(mMetrics->NewTimer(
-          {"app", "post-on-main-thread-with-delay", "delay"}))
     , mPostOnBackgroundThreadDelay(
           mMetrics->NewTimer({"app", "post-on-background-thread", "delay"}))
-    , mStartedOn(clock.now())
+    , mStartedOn(clock.system_now())
 {
 #ifdef SIGQUIT
     mStopSignals.add(SIGQUIT);
@@ -92,6 +91,16 @@ ApplicationImpl::ApplicationImpl(VirtualClock& clock, Config const& cfg)
     std::srand(static_cast<uint32>(clock.now().time_since_epoch().count()));
 
     mNetworkID = sha256(mConfig.NETWORK_PASSPHRASE);
+
+    TracyAppInfo(STELLAR_CORE_VERSION.c_str(), STELLAR_CORE_VERSION.size());
+    TracyAppInfo(mConfig.NETWORK_PASSPHRASE.c_str(),
+                 mConfig.NETWORK_PASSPHRASE.size());
+    std::string nodeStr("Node: ");
+    nodeStr += mConfig.NODE_SEED.getStrKeyPublic();
+    TracyAppInfo(nodeStr.c_str(), nodeStr.size());
+    std::string homeStr("HomeDomain: ");
+    homeStr += mConfig.NODE_HOME_DOMAIN;
+    TracyAppInfo(homeStr.c_str(), homeStr.size());
 
     mStopSignals.async_wait([this](asio::error_code const& ec, int sig) {
         if (!ec)
@@ -266,7 +275,7 @@ ApplicationImpl::getJsonInfo()
     info["build"] = STELLAR_CORE_VERSION;
     info["protocol_version"] = getConfig().LEDGER_PROTOCOL_VERSION;
     info["state"] = getStateHuman();
-    info["startedOn"] = VirtualClock::pointToISOString(mStartedOn);
+    info["startedOn"] = VirtualClock::systemPointToISOString(mStartedOn);
     auto const& lcl = lm.getLastClosedLedgerHeader();
     info["ledger"]["num"] = (int)lcl.header.ledgerSeq;
     info["ledger"]["hash"] = binToHex(lcl.hash);
@@ -353,7 +362,7 @@ ApplicationImpl::~ApplicationImpl()
 uint64_t
 ApplicationImpl::timeNow()
 {
-    return VirtualClock::to_time_t(getClock().now());
+    return VirtualClock::to_time_t(getClock().system_now());
 }
 
 void
@@ -560,11 +569,13 @@ ApplicationImpl::manualClose()
 void
 ApplicationImpl::generateLoad(bool isCreate, uint32_t nAccounts,
                               uint32_t offset, uint32_t nTxs, uint32_t txRate,
-                              uint32_t batchSize)
+                              uint32_t batchSize,
+                              std::chrono::seconds spikeInterval,
+                              uint32_t spikeSize)
 {
     getMetrics().NewMeter({"loadgen", "run", "start"}, "run").Mark();
     getLoadGenerator().generateLoad(isCreate, nAccounts, offset, nTxs, txRate,
-                                    batchSize);
+                                    batchSize, spikeInterval, spikeSize);
 }
 
 LoadGenerator&
@@ -680,6 +691,13 @@ ApplicationImpl::syncOwnMetrics()
     // Similarly, flush global process-table stats.
     mMetrics->NewCounter({"process", "memory", "handles"})
         .set_count(mProcessManager->getNumRunningProcesses());
+
+    // Update action-queue related metrics
+    int64_t qsize = static_cast<int64_t>(getClock().getActionQueueSize());
+    mMetrics->NewCounter({"process", "action", "queue"}).set_count(qsize);
+    TracyPlot("process.action.queue", qsize);
+    mMetrics->NewCounter({"process", "action", "overloaded"})
+        .set_count(static_cast<int64_t>(getClock().actionQueueIsOverloaded()));
 }
 
 void
@@ -820,27 +838,16 @@ ApplicationImpl::getWorkerIOContext()
 }
 
 void
-ApplicationImpl::postOnMainThread(std::function<void()>&& f,
-                                  std::string jobName)
+ApplicationImpl::postOnMainThread(std::function<void()>&& f, std::string&& name,
+                                  Scheduler::ActionType type)
 {
-    LogSlowExecution isSlow{std::move(jobName), LogSlowExecution::Mode::MANUAL,
+    LogSlowExecution isSlow{name, LogSlowExecution::Mode::MANUAL,
                             "executed after"};
-    mVirtualClock.postToCurrentCrank([ this, f = std::move(f), isSlow ]() {
+    mVirtualClock.postAction([ this, f = std::move(f), isSlow ]() {
         mPostOnMainThreadDelay.Update(isSlow.checkElapsedTime());
         f();
-    });
-}
-
-void
-ApplicationImpl::postOnMainThreadWithDelay(std::function<void()>&& f,
-                                           std::string jobName)
-{
-    LogSlowExecution isSlow{std::move(jobName), LogSlowExecution::Mode::MANUAL,
-                            "executed after"};
-    mVirtualClock.postToNextCrank([ this, f = std::move(f), isSlow ]() {
-        mPostOnMainThreadWithDelayDelay.Update(isSlow.checkElapsedTime());
-        f();
-    });
+    },
+                             std::move(name), type);
 }
 
 void

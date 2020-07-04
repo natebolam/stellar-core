@@ -17,6 +17,7 @@
 #include "util/types.h"
 #include "xdr/Stellar-ledger-entries.h"
 #include "xdrpp/marshal.h"
+#include <Tracy.hpp>
 #include <soci.h>
 
 namespace stellar
@@ -32,15 +33,14 @@ populateLoadedEntries(std::unordered_set<LedgerKey> const& keys,
     {
         auto key = LedgerEntryKey(le);
 
-        // Check that the key associated to this entry
-        // - appears in keys
-        // - does not appear in res (which implies it has not already appeared
-        //   in entries)
-        // These conditions imply that the keys associated with entries are
-        // unique and constitute a subset of keys
-        assert(keys.find(key) != keys.end());
+        // Abort if two entries for the same key appear.
         assert(res.find(key) == res.end());
-        res.emplace(key, std::make_shared<LedgerEntry const>(le));
+
+        // Only return entries for keys that were actually requested.
+        if (keys.find(key) != keys.end())
+        {
+            res.emplace(key, std::make_shared<LedgerEntry const>(le));
+        }
     }
 
     for (auto const& key : keys)
@@ -2080,26 +2080,34 @@ LedgerTxnRoot::Impl::bulkApply(BulkLedgerEntryChangeAccumulator& bleca,
 void
 LedgerTxnRoot::Impl::commitChild(EntryIterator iter, LedgerTxnConsistency cons)
 {
+    ZoneScoped;
     // Assignment of xdrpp objects does not have the strong exception safety
     // guarantee, so use std::unique_ptr<...>::swap to achieve it
     auto childHeader = std::make_unique<LedgerHeader>(mChild->getHeader());
 
     auto bleca = BulkLedgerEntryChangeAccumulator();
+    int64_t counter{0};
     try
     {
         while ((bool)iter)
         {
             bleca.accumulate(iter);
             ++iter;
+            ++counter;
             size_t bufferThreshold =
                 (bool)iter ? LEDGER_ENTRY_BATCH_COMMIT_SIZE : 0;
             bulkApply(bleca, bufferThreshold, cons);
         }
+        // FIXME: there is no medida historgram for this presently,
+        // but maybe we would like one?
+        TracyPlot("ledger.entry.commit", counter);
+
         // NB: we want to clear the prepared statement cache _before_
         // committing; on postgres this doesn't matter but on SQLite the passive
         // WAL-auto-checkpointing-at-commit behaviour will starve if there are
         // still prepared statements open at commit time.
         mDatabase.clearPreparedStatementCache();
+        ZoneNamedN(commitZone, "SOCI commit", true);
         mTransaction->commit();
     }
     catch (std::exception& e)
@@ -2123,6 +2131,9 @@ LedgerTxnRoot::Impl::commitChild(EntryIterator iter, LedgerTxnConsistency cons)
     // std::unique_ptr<...>::swap does not throw
     mHeader.swap(childHeader);
     mChild = nullptr;
+
+    mPrefetchHits = 0;
+    mPrefetchMisses = 0;
 }
 
 std::string
@@ -2178,11 +2189,11 @@ LedgerTxnRoot::Impl::countObjects(LedgerEntryType let,
 
     std::string query = "SELECT COUNT(*) FROM " +
                         tableFromLedgerEntryType(let) +
-                        " WHERE lastmodified >= :v1 AND lastmodified <= :v2;";
+                        " WHERE lastmodified >= :v1 AND lastmodified < :v2;";
     uint64_t count = 0;
     int first = static_cast<int>(ledgers.mFirst);
-    int last = static_cast<int>(ledgers.mLast);
-    mDatabase.getSession() << query, into(count), use(first), use(last);
+    int limit = static_cast<int>(ledgers.limit());
+    mDatabase.getSession() << query, into(count), use(first), use(limit);
     return count;
 }
 
@@ -2241,6 +2252,7 @@ LedgerTxnRoot::prefetch(std::unordered_set<LedgerKey> const& keys)
 uint32_t
 LedgerTxnRoot::Impl::prefetch(std::unordered_set<LedgerKey> const& keys)
 {
+    ZoneScoped;
     uint32_t total = 0;
 
     std::unordered_set<LedgerKey> accounts;
@@ -2329,13 +2341,12 @@ LedgerTxnRoot::getPrefetchHitRate() const
 double
 LedgerTxnRoot::Impl::getPrefetchHitRate() const
 {
-    auto totalMisses = mEntryCache.getCounters().mMisses;
-    if (totalMisses == 0 && mTotalPrefetchHits == 0)
+    if (mPrefetchMisses == 0 && mPrefetchHits == 0)
     {
         return 0;
     }
-    return static_cast<double>(mTotalPrefetchHits) /
-           (totalMisses + mTotalPrefetchHits);
+    return static_cast<double>(mPrefetchHits) /
+           (mPrefetchMisses + mPrefetchHits);
 }
 
 std::unordered_map<LedgerKey, LedgerEntry>
@@ -2347,6 +2358,7 @@ LedgerTxnRoot::getAllOffers()
 std::unordered_map<LedgerKey, LedgerEntry>
 LedgerTxnRoot::Impl::getAllOffers()
 {
+    ZoneScoped;
     std::vector<LedgerEntry> offers;
     try
     {
@@ -2381,6 +2393,7 @@ LedgerTxnRoot::getBestOffer(Asset const& buying, Asset const& selling)
 std::shared_ptr<LedgerEntry const>
 LedgerTxnRoot::Impl::getBestOffer(Asset const& buying, Asset const& selling)
 {
+    ZoneScoped;
     // Note: Elements of mBestOffersCache are properly sorted lists of the best
     // offers for a certain asset pair. This function maintaints the invariant
     // that the lists of best offers remain properly sorted. The sort order is
@@ -2430,6 +2443,7 @@ std::shared_ptr<LedgerEntry const>
 LedgerTxnRoot::Impl::getBestOffer(Asset const& buying, Asset const& selling,
                                   OfferDescriptor const& worseThan)
 {
+    ZoneScoped;
     // Note: Elements of mBestOffersCache are properly sorted lists of the best
     // offers for a certain asset pair. This function maintaints the invariant
     // that the lists of best offers remain properly sorted. The sort order is
@@ -2504,6 +2518,7 @@ std::unordered_map<LedgerKey, LedgerEntry>
 LedgerTxnRoot::Impl::getOffersByAccountAndAsset(AccountID const& account,
                                                 Asset const& asset)
 {
+    ZoneScoped;
     std::vector<LedgerEntry> offers;
     try
     {
@@ -2576,9 +2591,18 @@ LedgerTxnRoot::getNewestVersion(LedgerKey const& key) const
 std::shared_ptr<LedgerEntry const>
 LedgerTxnRoot::Impl::getNewestVersion(LedgerKey const& key) const
 {
+    ZoneScoped;
     if (mEntryCache.exists(key))
     {
+        std::string zoneTxt("hit");
+        ZoneText(zoneTxt.c_str(), zoneTxt.size());
         return getFromEntryCache(key);
+    }
+    else
+    {
+        std::string zoneTxt("miss");
+        ZoneText(zoneTxt.c_str(), zoneTxt.size());
+        ++mPrefetchMisses;
     }
 
     std::shared_ptr<LedgerEntry const> entry;
@@ -2644,6 +2668,8 @@ LedgerTxnRoot::Impl::rollbackChild()
     }
 
     mChild = nullptr;
+    mPrefetchHits = 0;
+    mPrefetchMisses = 0;
 }
 
 std::shared_ptr<LedgerEntry const>
@@ -2654,7 +2680,7 @@ LedgerTxnRoot::Impl::getFromEntryCache(LedgerKey const& key) const
         auto cached = mEntryCache.get(key);
         if (cached.type == LoadType::PREFETCH)
         {
-            ++mTotalPrefetchHits;
+            ++mPrefetchHits;
         }
         return cached.entry;
     }

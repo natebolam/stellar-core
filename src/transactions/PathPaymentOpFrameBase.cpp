@@ -20,27 +20,22 @@ PathPaymentOpFrameBase::PathPaymentOpFrameBase(Operation const& op,
 {
 }
 
+AccountID
+PathPaymentOpFrameBase::getDestID() const
+{
+    return toAccountID(getDestMuxedAccount());
+}
+
 void
 PathPaymentOpFrameBase::insertLedgerKeysToPrefetch(
     std::unordered_set<LedgerKey>& keys) const
 {
-    keys.emplace(accountKey(getDestID()));
-
-    auto processAsset = [&](Asset const& asset) {
-        if (asset.type() != ASSET_TYPE_NATIVE)
-        {
-            auto issuer = getIssuer(asset);
-            keys.emplace(accountKey(issuer));
-        }
-    };
-
-    processAsset(getSourceAsset());
-    processAsset(getDestAsset());
-    std::for_each(getPath().begin(), getPath().end(), processAsset);
+    auto destID = getDestID();
+    keys.emplace(accountKey(destID));
 
     if (getDestAsset().type() != ASSET_TYPE_NATIVE)
     {
-        keys.emplace(trustlineKey(getDestID(), getDestAsset()));
+        keys.emplace(trustlineKey(destID, getDestAsset()));
     }
     if (getSourceAsset().type() != ASSET_TYPE_NATIVE)
     {
@@ -53,7 +48,9 @@ PathPaymentOpFrameBase::checkIssuer(AbstractLedgerTxn& ltx, Asset const& asset)
 {
     if (asset.type() != ASSET_TYPE_NATIVE)
     {
-        if (!stellar::loadAccountWithoutRecord(ltx, getIssuer(asset)))
+        uint32_t ledgerVersion = ltx.loadHeader().current().ledgerVersion;
+        if (ledgerVersion < 13 &&
+            !stellar::loadAccountWithoutRecord(ltx, getIssuer(asset)))
         {
             setResultNoIssuer(asset);
             return false;
@@ -204,11 +201,12 @@ PathPaymentOpFrameBase::updateDestBalance(AbstractLedgerTxn& ltx,
                                           int64_t amount,
                                           bool bypassIssuerCheck)
 {
+    auto destID = getDestID();
     auto const& asset = getDestAsset();
 
     if (asset.type() == ASSET_TYPE_NATIVE)
     {
-        auto destination = stellar::loadAccount(ltx, getDestID());
+        auto destination = stellar::loadAccount(ltx, destID);
         if (!addBalance(ltx.loadHeader(), destination, amount))
         {
             if (ltx.loadHeader().current().ledgerVersion >= 11)
@@ -229,7 +227,7 @@ PathPaymentOpFrameBase::updateDestBalance(AbstractLedgerTxn& ltx,
             return false;
         }
 
-        auto destLine = stellar::loadTrustLine(ltx, getDestID(), asset);
+        auto destLine = stellar::loadTrustLine(ltx, destID, asset);
         if (!destLine)
         {
             setResultDestNoTrust();

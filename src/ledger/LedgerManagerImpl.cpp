@@ -16,8 +16,6 @@
 #include "herder/TxSetFrame.h"
 #include "herder/Upgrades.h"
 #include "history/HistoryManager.h"
-#include "invariant/InvariantDoesNotHold.h"
-#include "invariant/InvariantManager.h"
 #include "ledger/LedgerHeaderUtils.h"
 #include "ledger/LedgerRange.h"
 #include "ledger/LedgerTxn.h"
@@ -28,19 +26,22 @@
 #include "main/ErrorMessages.h"
 #include "overlay/OverlayManager.h"
 #include "transactions/OperationFrame.h"
+#include "transactions/TransactionSQL.h"
 #include "transactions/TransactionUtils.h"
 #include "util/GlobalChecks.h"
 #include "util/LogSlowExecution.h"
 #include "util/Logging.h"
 #include "util/XDROperators.h"
-#include "util/format.h"
+#include <fmt/format.h>
 
+#include "medida/buckets.h"
 #include "medida/counter.h"
 #include "medida/meter.h"
 #include "medida/metrics_registry.h"
 #include "medida/timer.h"
 #include "xdrpp/printer.h"
 #include "xdrpp/types.h"
+#include <Tracy.hpp>
 
 #include <chrono>
 #include <numeric>
@@ -116,14 +117,14 @@ LedgerManagerImpl::LedgerManagerImpl(Application& app)
           app.getMetrics().NewHistogram({"ledger", "transaction", "count"}))
     , mOperationCount(
           app.getMetrics().NewHistogram({"ledger", "operation", "count"}))
-    , mInternalErrorCount(app.getMetrics().NewCounter(
-          {"ledger", "transaction", "internal-error"}))
+    , mPrefetchHitRate(
+          app.getMetrics().NewHistogram({"ledger", "prefetch", "hit-rate"},
+                                        medida::SamplingInterface::kSliding))
     , mLedgerClose(app.getMetrics().NewTimer({"ledger", "ledger", "close"}))
-    , mLedgerAgeClosed(app.getMetrics().NewTimer({"ledger", "age", "closed"}))
+    , mLedgerAgeClosed(app.getMetrics().NewBuckets(
+          {"ledger", "age", "closed"}, {5000.0, 7000.0, 10000.0, 20000.0}))
     , mLedgerAge(
           app.getMetrics().NewCounter({"ledger", "age", "current-seconds"}))
-    , mPrefetchHitRate(
-          app.getMetrics().NewCounter({"ledger", "prefetch", "hit-rate"}))
     , mLastClose(mApp.getClock().now())
     , mCatchupDuration(
           app.getMetrics().NewTimer({"ledger", "catchup", "duration"}))
@@ -246,6 +247,7 @@ void
 LedgerManagerImpl::loadLastKnownLedger(
     function<void(asio::error_code const& ec)> handler)
 {
+    ZoneScoped;
     DBTimeExcluder qtExclude(mApp);
     auto ledgerTime = mLedgerClose.TimeScope();
 
@@ -370,7 +372,7 @@ LedgerManagerImpl::getLastMinBalance(uint32_t ownerCount) const
     if (lh.ledgerVersion <= 8)
         return (2 + ownerCount) * lh.baseReserve;
     else
-        return (2 + ownerCount) * int64_t(lh.baseReserve);
+        return (2LL + ownerCount) * int64_t(lh.baseReserve);
 }
 
 uint32_t
@@ -411,6 +413,7 @@ LedgerManagerImpl::getLastClosedLedgerNum() const
 void
 LedgerManagerImpl::valueExternalized(LedgerCloseData const& ledgerData)
 {
+    ZoneScoped;
     CLOG(INFO, "Ledger")
         << "Got consensus: "
         << "[seq=" << ledgerData.getLedgerSeq()
@@ -427,46 +430,36 @@ LedgerManagerImpl::valueExternalized(LedgerCloseData const& ledgerData)
         assert(false);
     }
 
-    switch (closeLedgerIf(ledgerData))
-    {
-    case CloseLedgerIfResult::CLOSED:
-    {
-        setState(LM_SYNCED_STATE);
-        mApp.getCatchupManager().processLedger(ledgerData);
-    }
-    break;
-    case CloseLedgerIfResult::TOO_OLD:
-        // nothing to do
-        break;
-    case CloseLedgerIfResult::TOO_NEW:
-    {
-        setState(LM_CATCHING_UP_STATE);
-        mApp.getCatchupManager().processLedger(ledgerData);
-    }
-    break;
-    }
+    closeLedgerIf(ledgerData);
+
+    mApp.getCatchupManager().processLedger(ledgerData);
+    FrameMark;
 }
 
-LedgerManagerImpl::CloseLedgerIfResult
+void
 LedgerManagerImpl::closeLedgerIf(LedgerCloseData const& ledgerData)
 {
+    ZoneScoped;
     if (mLastClosedLedger.header.ledgerSeq + 1 == ledgerData.getLedgerSeq())
     {
-        if (mLastClosedLedger.hash ==
-            ledgerData.getTxSet()->previousLedgerHash())
+        auto& cm = mApp.getCatchupManager();
+        // if catchup work is running, we don't want ledger manager to close
+        // this ledger and potentially cause issues.
+        if (cm.isCatchupInitialized() && !cm.catchupWorkIsDone())
         {
-            closeLedger(ledgerData);
             CLOG(INFO, "Ledger")
-                << "Closed ledger: " << ledgerAbbrev(mLastClosedLedger);
-            return CloseLedgerIfResult::CLOSED;
+                << "Can't close ledger: " << ledgerAbbrev(mLastClosedLedger)
+                << "  in LM because catchup is running";
+            return;
         }
-        else
+
+        closeLedger(ledgerData);
+        CLOG(INFO, "Ledger")
+            << "Closed ledger: " << ledgerAbbrev(mLastClosedLedger);
+
+        if (!cm.hasBufferedLedger())
         {
-            CLOG(FATAL, "Ledger") << "Network consensus for ledger "
-                                  << mLastClosedLedger.header.ledgerSeq
-                                  << " changed; this should never happen";
-            CLOG(FATAL, "Ledger") << POSSIBLY_CORRUPTED_QUORUM_SET;
-            throw std::runtime_error("Network consensus inconsistency");
+            setState(LM_SYNCED_STATE);
         }
     }
     else if (ledgerData.getLedgerSeq() <= mLastClosedLedger.header.ledgerSeq)
@@ -475,7 +468,6 @@ LedgerManagerImpl::closeLedgerIf(LedgerCloseData const& ledgerData)
             << "Skipping close ledger: local state is "
             << mLastClosedLedger.header.ledgerSeq << ", more recent than "
             << ledgerData.getLedgerSeq();
-        return CloseLedgerIfResult::TOO_OLD;
     }
     else
     {
@@ -487,7 +479,8 @@ LedgerManagerImpl::closeLedgerIf(LedgerCloseData const& ledgerData)
                 << mLastClosedLedger.header.ledgerSeq
                 << ", network closed ledger " << ledgerData.getLedgerSeq();
         }
-        return CloseLedgerIfResult::TOO_NEW;
+
+        setState(LM_CATCHING_UP_STATE);
     }
 }
 
@@ -495,6 +488,7 @@ void
 LedgerManagerImpl::startCatchup(CatchupConfiguration configuration,
                                 std::shared_ptr<HistoryArchive> archive)
 {
+    ZoneScoped;
     setState(LM_CATCHING_UP_STATE);
     mApp.getCatchupManager().startCatchup(configuration, archive);
 }
@@ -511,8 +505,6 @@ void
 LedgerManagerImpl::syncMetrics()
 {
     mLedgerAge.set_count(secondsSinceLastLedgerClose());
-    mPrefetchHitRate.set_count(
-        std::llround(mApp.getLedgerTxnRoot().getPrefetchHitRate() * 100));
     mApp.syncOwnMetrics();
 }
 
@@ -525,6 +517,7 @@ during replays.
 void
 LedgerManagerImpl::closeLedger(LedgerCloseData const& ledgerData)
 {
+    ZoneScoped;
     auto ledgerTime = mLedgerClose.TimeScope();
     DBTimeExcluder qtExclude(mApp);
     LogSlowExecution closeLedgerTime{"closeLedger",
@@ -537,6 +530,8 @@ LedgerManagerImpl::closeLedger(LedgerCloseData const& ledgerData)
     header.current().previousLedgerHash = mLastClosedLedger.hash;
     CLOG(DEBUG, "Ledger") << "starting closeLedger() on ledgerSeq="
                           << header.current().ledgerSeq;
+
+    ZoneValue(static_cast<int64_t>(header.current().ledgerSeq));
 
     auto now = mApp.getClock().now();
     mLedgerAgeClosed.Update(now - mLastClose);
@@ -601,7 +596,7 @@ LedgerManagerImpl::closeLedger(LedgerCloseData const& ledgerData)
     // the transaction set that was agreed upon by consensus
     // was sorted by hash; we reorder it so that transactions are
     // sorted such that sequence numbers are respected
-    vector<TransactionFramePtr> txs = ledgerData.getTxSet()->sortForApply();
+    vector<TransactionFrameBasePtr> txs = ledgerData.getTxSet()->sortForApply();
 
     // first, prefetch source accounts fot txset, then charge fees
     prefetchTxSourceIds(txs);
@@ -735,10 +730,11 @@ void
 LedgerManagerImpl::deleteOldEntries(Database& db, uint32_t ledgerSeq,
                                     uint32_t count)
 {
+    ZoneScoped;
     soci::transaction txscope(db.getSession());
     db.clearPreparedStatementCache();
     LedgerHeaderUtils::deleteOldEntries(db, ledgerSeq, count);
-    TransactionFrame::deleteOldEntries(db, ledgerSeq, count);
+    deleteOldTransactionHistoryEntries(db, ledgerSeq, count);
     HerderPersistence::deleteOldEntries(db, ledgerSeq, count);
     Upgrades::deleteOldEntries(db, ledgerSeq, count);
     db.clearPreparedStatementCache();
@@ -749,8 +745,7 @@ void
 LedgerManagerImpl::setLastClosedLedger(
     LedgerHeaderHistoryEntry const& lastClosed)
 {
-    assert(mState == LM_CATCHING_UP_STATE);
-
+    ZoneScoped;
     LedgerTxn ltx(mApp.getLedgerTxnRoot());
     auto header = ltx.loadHeader();
     header.current() = lastClosed.header;
@@ -772,8 +767,9 @@ LedgerManagerImpl::setupLedgerCloseMetaStream()
     {
         // We can't be sure we're writing to a stream that supports fsync;
         // pipes typically error when you try. So we don't do it.
-        mMetaStream =
-            std::make_unique<XDROutputFileStream>(/*fsyncOnClose=*/false);
+        mMetaStream = std::make_unique<XDROutputFileStream>(
+            mApp.getClock().getIOContext(),
+            /*fsyncOnClose=*/false);
         std::regex fdrx("^fd:([0-9]+)$");
         std::smatch sm;
         if (std::regex_match(cfg.METADATA_OUTPUT_STREAM, sm, fdrx))
@@ -806,9 +802,10 @@ LedgerManagerImpl::advanceLedgerPointers(LedgerHeader const& header)
 
 void
 LedgerManagerImpl::processFeesSeqNums(
-    std::vector<TransactionFramePtr>& txs, AbstractLedgerTxn& ltxOuter,
+    std::vector<TransactionFrameBasePtr>& txs, AbstractLedgerTxn& ltxOuter,
     int64_t baseFee, std::unique_ptr<LedgerCloseMeta> const& ledgerCloseMeta)
 {
+    ZoneScoped;
     CLOG(DEBUG, "Ledger")
         << "processing fees and sequence numbers with base fee " << baseFee;
     int index = 0;
@@ -836,8 +833,8 @@ LedgerManagerImpl::processFeesSeqNums(
             ++index;
             if (mApp.getConfig().MODE_STORES_HISTORY)
             {
-                tx->storeTransactionFee(mApp.getDatabase(), ledgerSeq, changes,
-                                        index);
+                storeTransactionFee(mApp.getDatabase(), ledgerSeq, tx, changes,
+                                    index);
             }
             ltxTx.commit();
         }
@@ -853,49 +850,44 @@ LedgerManagerImpl::processFeesSeqNums(
 }
 
 void
-LedgerManagerImpl::prefetchTxSourceIds(std::vector<TransactionFramePtr>& txs)
+LedgerManagerImpl::prefetchTxSourceIds(
+    std::vector<TransactionFrameBasePtr>& txs)
 {
+    ZoneScoped;
     if (mApp.getConfig().PREFETCH_BATCH_SIZE > 0)
     {
         std::unordered_set<LedgerKey> keys;
         for (auto const& tx : txs)
         {
-            keys.emplace(accountKey(tx->getSourceID()));
+            tx->insertKeysForFeeProcessing(keys);
         }
-        auto& root = mApp.getLedgerTxnRoot();
-        root.prefetch(keys);
+        mApp.getLedgerTxnRoot().prefetch(keys);
     }
 }
 
 void
 LedgerManagerImpl::prefetchTransactionData(
-    std::vector<TransactionFramePtr>& txs)
+    std::vector<TransactionFrameBasePtr>& txs)
 {
+    ZoneScoped;
     if (mApp.getConfig().PREFETCH_BATCH_SIZE > 0)
     {
-        auto& root = mApp.getLedgerTxnRoot();
-        std::unordered_set<LedgerKey> keysToPrefetch;
+        std::unordered_set<LedgerKey> keys;
         for (auto const& tx : txs)
         {
-            for (auto const& op : tx->getOperations())
-            {
-                if (!(tx->getSourceID() == op->getSourceID()))
-                {
-                    keysToPrefetch.emplace(accountKey(op->getSourceID()));
-                }
-                op->insertLedgerKeysToPrefetch(keysToPrefetch);
-            }
+            tx->insertKeysForTxApply(keys);
         }
-        root.prefetch(keysToPrefetch);
+        mApp.getLedgerTxnRoot().prefetch(keys);
     }
 }
 
 void
 LedgerManagerImpl::applyTransactions(
-    std::vector<TransactionFramePtr>& txs, AbstractLedgerTxn& ltx,
+    std::vector<TransactionFrameBasePtr>& txs, AbstractLedgerTxn& ltx,
     TransactionResultSet& txResultSet,
     std::unique_ptr<LedgerCloseMeta> const& ledgerCloseMeta)
 {
+    ZoneNamedN(txsZone, "applyTransactions", true);
     int index = 0;
 
     // Record counts
@@ -904,11 +896,14 @@ LedgerManagerImpl::applyTransactions(
     if (numTxs > 0)
     {
         mTransactionCount.Update(static_cast<int64_t>(numTxs));
-        numOps = std::accumulate(txs.begin(), txs.end(), size_t(0),
-                                 [](size_t s, TransactionFramePtr const& v) {
-                                     return s + v->getNumOperations();
-                                 });
+        TracyPlot("ledger.transaction.count", static_cast<int64_t>(numTxs));
+        numOps =
+            std::accumulate(txs.begin(), txs.end(), size_t(0),
+                            [](size_t s, TransactionFrameBasePtr const& v) {
+                                return s + v->getNumOperations();
+                            });
         mOperationCount.Update(static_cast<int64_t>(numOps));
+        TracyPlot("ledger.operation.count", static_cast<int64_t>(numOps));
         CLOG(INFO, "Tx") << fmt::format("applying ledger {} (txs:{}, ops:{})",
                                         ltx.loadHeader().current().ledgerSeq,
                                         numTxs, numOps);
@@ -918,40 +913,20 @@ LedgerManagerImpl::applyTransactions(
 
     for (auto tx : txs)
     {
+        ZoneNamedN(txZone, "applyTransaction", true);
         auto txTime = mTransactionApply.TimeScope();
-        TransactionMeta tm(mApp.getConfig().SUPPORTED_META_VERSION);
-        try
-        {
-            CLOG(DEBUG, "Tx")
-                << " tx#" << index << " = " << hexAbbrev(tx->getFullHash())
-                << " ops=" << tx->getNumOperations()
-                << " txseq=" << tx->getSeqNum() << " (@ "
-                << mApp.getConfig().toShortString(tx->getSourceID()) << ")";
-            tx->apply(mApp, ltx, tm);
-        }
-        catch (InvariantDoesNotHold&)
-        {
-            CLOG(ERROR, "Ledger")
-                << "Invariant failure during tx->apply for tx "
-                << tx->getFullHash();
-            throw;
-        }
-        catch (std::runtime_error& e)
-        {
-            CLOG(ERROR, "Ledger") << "Exception during tx->apply for tx "
-                                  << tx->getFullHash() << " : " << e.what();
-            mInternalErrorCount.inc();
-            tx->getResult().result.code(txINTERNAL_ERROR);
-        }
-        catch (...)
-        {
-            CLOG(ERROR, "Ledger")
-                << "Unknown exception during tx->apply for tx "
-                << tx->getFullHash();
-            mInternalErrorCount.inc();
-            tx->getResult().result.code(txINTERNAL_ERROR);
-        }
-        TransactionResultPair results = tx->getResultPair();
+        TransactionMeta tm(2);
+        CLOG(DEBUG, "Tx") << " tx#" << index << " = "
+                          << hexAbbrev(tx->getContentsHash())
+                          << " ops=" << tx->getNumOperations()
+                          << " txseq=" << tx->getSeqNum() << " (@ "
+                          << mApp.getConfig().toShortString(tx->getSourceID())
+                          << ")";
+        tx->apply(mApp, ltx, tm);
+
+        TransactionResultPair results;
+        results.transactionHash = tx->getContentsHash();
+        results.result = tx->getResult();
 
         // First gather the TransactionResultPair into the TxResultSet for
         // hashing into the ledger header.
@@ -980,8 +955,8 @@ LedgerManagerImpl::applyTransactions(
         if (mApp.getConfig().MODE_STORES_HISTORY)
         {
             auto ledgerSeq = ltx.loadHeader().current().ledgerSeq;
-            tx->storeTransaction(mApp.getDatabase(), ledgerSeq, tm, index,
-                                 txResultSet);
+            storeTransaction(mApp.getDatabase(), ledgerSeq, tx, tm,
+                             txResultSet);
         }
     }
 
@@ -1000,12 +975,14 @@ LedgerManagerImpl::logTxApplyMetrics(AbstractLedgerTxn& ltx, size_t numTxs,
                           << ", prefetch hit rate (%): " << hitRate;
 
     // We lose a bit of precision here, as medida only accepts int64_t
-    mPrefetchHitRate.set_count(std::llround(hitRate));
+    mPrefetchHitRate.Update(std::llround(hitRate));
+    TracyPlot("ledger.prefetch.hit-rate", hitRate);
 }
 
 void
 LedgerManagerImpl::storeCurrentLedger(LedgerHeader const& header)
 {
+    ZoneScoped;
     if (mApp.getConfig().MODE_STORES_HISTORY)
     {
         LedgerHeaderUtils::storeInDatabase(mApp.getDatabase(), header);
@@ -1035,6 +1012,7 @@ LedgerManagerImpl::transferLedgerEntriesToBucketList(AbstractLedgerTxn& ltx,
                                                      uint32_t ledgerSeq,
                                                      uint32_t ledgerVers)
 {
+    ZoneScoped;
     std::vector<LedgerEntry> initEntries, liveEntries;
     std::vector<LedgerKey> deadEntries;
     ltx.getAllEntries(initEntries, liveEntries, deadEntries);
@@ -1048,6 +1026,7 @@ LedgerManagerImpl::transferLedgerEntriesToBucketList(AbstractLedgerTxn& ltx,
 void
 LedgerManagerImpl::ledgerClosed(AbstractLedgerTxn& ltx)
 {
+    ZoneScoped;
     auto ledgerSeq = ltx.loadHeader().current().ledgerSeq;
     auto ledgerVers = ltx.loadHeader().current().ledgerVersion;
     CLOG(TRACE, "Ledger") << fmt::format(

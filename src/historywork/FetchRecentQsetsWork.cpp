@@ -12,6 +12,7 @@
 #include "util/FileSystemException.h"
 #include "util/TmpDir.h"
 #include "util/XDRStream.h"
+#include <Tracy.hpp>
 
 namespace stellar
 {
@@ -37,6 +38,7 @@ FetchRecentQsetsWork::doReset()
 BasicWork::State
 FetchRecentQsetsWork::doWork()
 {
+    ZoneScoped;
     // Phase 1: fetch remote history archive state
     if (!mGetHistoryArchiveStateWork)
     {
@@ -62,7 +64,7 @@ FetchRecentQsetsWork::doWork()
     {
         CLOG(INFO, "History") << "Downloading historical SCP messages: ["
                               << firstSeq << ", " << lastSeq << "]";
-        auto range = CheckpointRange{firstSeq, lastSeq, step};
+        auto range = CheckpointRange::inclusive(firstSeq, lastSeq, step);
         mDownloadSCPMessagesWork = addWork<BatchDownloadWork>(
             range, HISTORY_FILE_TYPE_SCP, *mDownloadDir);
         return State::WORK_RUNNING;

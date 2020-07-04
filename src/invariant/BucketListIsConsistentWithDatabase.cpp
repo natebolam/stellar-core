@@ -10,9 +10,9 @@
 #include "ledger/LedgerRange.h"
 #include "ledger/LedgerTxn.h"
 #include "ledger/LedgerTxnEntry.h"
-#include "lib/util/format.h"
 #include "main/Application.h"
 #include "xdrpp/printer.h"
+#include <fmt/format.h>
 
 namespace stellar
 {
@@ -154,7 +154,7 @@ BucketListIsConsistentWithDatabase::checkOnBucketApply(
         }
     }
 
-    LedgerRange range{oldestLedger, newestLedger};
+    auto range = LedgerRange::inclusive(oldestLedger, newestLedger);
     std::string countFormat = "Incorrect {} count: Bucket = {} Database = {}";
     auto& ltxRoot = mApp.getLedgerTxnRoot();
     uint64_t nAccountsInDb = ltxRoot.countObjects(ACCOUNT, range);

@@ -6,6 +6,7 @@
 #include "bucket/Bucket.h"
 #include "bucket/BucketManager.h"
 #include "crypto/Random.h"
+#include <Tracy.hpp>
 
 namespace stellar
 {
@@ -15,6 +16,7 @@ namespace
 std::string
 randomBucketName(std::string const& tmpDir)
 {
+    ZoneScoped;
     for (;;)
     {
         std::string name =
@@ -35,15 +37,17 @@ randomBucketName(std::string const& tmpDir)
 BucketOutputIterator::BucketOutputIterator(std::string const& tmpDir,
                                            bool keepDeadEntries,
                                            BucketMetadata const& meta,
-                                           MergeCounters& mc, bool doFsync)
+                                           MergeCounters& mc,
+                                           asio::io_context& ctx, bool doFsync)
     : mFilename(randomBucketName(tmpDir))
-    , mOut(doFsync)
+    , mOut(ctx, doFsync)
     , mBuf(nullptr)
     , mHasher(SHA256::create())
     , mKeepDeadEntries(keepDeadEntries)
     , mMeta(meta)
     , mMergeCounters(mc)
 {
+    ZoneScoped;
     CLOG(TRACE, "Bucket") << "BucketOutputIterator opening file to write: "
                           << mFilename;
     // Will throw if unable to open the file
@@ -63,6 +67,7 @@ BucketOutputIterator::BucketOutputIterator(std::string const& tmpDir,
 void
 BucketOutputIterator::put(BucketEntry const& e)
 {
+    ZoneScoped;
     Bucket::checkProtocolLegality(e, mMeta.ledgerVersion);
     if (e.type() == METAENTRY)
     {
@@ -109,6 +114,7 @@ std::shared_ptr<Bucket>
 BucketOutputIterator::getBucket(BucketManager& bucketManager,
                                 MergeKey* mergeKey)
 {
+    ZoneScoped;
     if (mBuf)
     {
         mOut.writeOne(*mBuf, mHasher.get(), &mBytesPut);

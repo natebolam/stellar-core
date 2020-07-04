@@ -13,8 +13,8 @@
 #include "test/TestUtils.h"
 #include "test/test.h"
 #include "util/Logging.h"
-#include "util/format.h"
 #include "xdr/Stellar-ledger.h"
+#include <fmt/format.h>
 #include <fstream>
 
 using namespace stellar;
@@ -108,7 +108,8 @@ TEST_CASE("LedgerCloseMetaStream file descriptor - REPLAY_IN_MEMORY",
     using namespace stellar::historytestutils;
     TmpDirHistoryConfigurator tCfg;
     {
-        Config genCfg = getTestConfig(0);
+        Config genCfg = getTestConfig(0, Config::TESTDB_DEFAULT);
+        genCfg.MANUAL_CLOSE = false;
         VirtualClock genClock;
         genCfg = tCfg.configure(genCfg, true);
         auto genApp = createTestApplication(genClock, genCfg);

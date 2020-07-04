@@ -11,6 +11,7 @@
 #include "transactions/SignatureUtils.h"
 #include "util/Algoritm.h"
 #include "util/XDROperators.h"
+#include <Tracy.hpp>
 
 namespace stellar
 {
@@ -54,7 +55,6 @@ SignatureChecker::checkSignature(AccountID const& accountID,
     {
         if (signerKey.key.preAuthTx() == mContentsHash)
         {
-            mUsedOneTimeSignerKeys[accountID].insert(signerKey.key);
             auto w = signerKey.weight;
             if (mProtocolVersion > 9 && w > UINT8_MAX)
             {
@@ -140,11 +140,5 @@ SignatureChecker::checkAllSignaturesUsed() const
         }
     }
     return true;
-}
-
-const UsedOneTimeSignerKeys&
-SignatureChecker::usedOneTimeSignerKeys() const
-{
-    return mUsedOneTimeSignerKeys;
 }
 };

@@ -19,6 +19,8 @@ Tracks aggregates (count, min, max, mean, percentiles, etc) of samples expressed
 Tracks aggregates (count, min, max, mean, etc),  rate (1m, 5m, 15m) for samples
 expressed in base unit.
 
+### Buckets (`NewBuckets`)
+Tracks multiple timers organized into disjoint buckets.
 
 Metric name                              | Type      | Description
 ---------------------------------------  | --------  | --------------------
@@ -36,6 +38,8 @@ herder.pending-txs.age0                  | counter   | number of gen0 pending tr
 herder.pending-txs.age1                  | counter   | number of gen1 pending transactions
 herder.pending-txs.age2                  | counter   | number of gen2 pending transactions
 herder.pending-txs.age3                  | counter   | number of gen3 pending transactions
+herder.pending-txs.banned                | counter   | number of transactions that got banned
+herder.pending-txs.delay                 | timer     | time for transactions to be included in a ledger
 history-archive.<X>.failure              | meter     | accessing history archive <X> failed
 history-archive.<X>.success              | meter     | accessing history archive <X> succeeded
 history.apply-ledger-chain.failure       | meter     | apply ledger chain failed
@@ -47,7 +51,7 @@ history.publish.success                  | meter     | published completed succe
 history.publish.time                     | timer     | time to successfuly publish history
 history.verify-<X>.failure               | meter     | verification of <X> failed
 history.verify-<X>.success               | meter     | verification of <X> succeeded
-ledger.age.closed                        | timer     | time between ledgers
+ledger.age.closed                        | bucket     | time between ledgers
 ledger.age.current-seconds               | counter   | gap between last close ledger time and current time
 ledger.catchup.duration                  | timer     | time between entering LM_CATCHING_UP_STATE and entering LM_SYNCED_STATE
 ledger.invariant.failure                 | counter   | number of times invariants failed
@@ -71,6 +75,7 @@ overlay.byte.write                       | meter     | number of bytes sent
 overlay.async.read                       | meter     | number of async read requests issued
 overlay.async.write                      | meter     | number of async write requests issued
 overlay.connection.authenticated         | counter   | number of authenticated peers
+overlay.connection.latency               | timer     | estimated latency between peers
 overlay.connection.pending               | counter   | number of pending connections
 overlay.delay.async-write                | timer     | time between each message's async write issue and completion
 overlay.delay.write-queue                | timer     | time between each message's entry and exit from peer write queue
@@ -101,6 +106,8 @@ overlay.recv.survey-request              | timer     | time spent in processing 
 overlay.recv.survey-response             | timer     | time spent in processing survey response
 overlay.send.survey-request              | meter     | sent survey request
 overlay.send.survey-response             | meter     | sent survey response
+process.action.queue                     | counter   | number of items waiting in internal action-queue
+process.action.overloaded                | counter   | 0-or-1 value indicating action-queue overloading
 scp.envelope.emit                        | meter     | SCP message sent
 scp.envelope.invalidsig                  | meter     | envelope failed signature verification
 scp.envelope.receive                     | meter     | SCP message received
@@ -116,8 +123,10 @@ scp.pending.ready                        | counter   | number of envelopes ready
 scp.sync.lost                            | meter     | validator lost sync
 scp.timeout.nominate                     | meter     | timeouts in nomination
 scp.timeout.prepare                      | meter     | timeouts in ballot protocol
-scp.timing.externalized                  | timer     | time spent in ballot protocol
 scp.timing.nominated                     | timer     | time spent in nomination
+scp.timing.externalized                  | timer     | time spent in ballot protocol
+scp.timing.externalize-lag               | timer     | delay between first externalize message and local node externalizing
+scp.timing.externalize-delay             | timer     | delay between local node externalizing and later externalize messages
 scp.value.invalid                        | meter     | SCP value is invalid
 scp.value.valid                          | meter     | SCP value is valid
 

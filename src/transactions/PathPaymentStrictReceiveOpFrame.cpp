@@ -9,6 +9,7 @@
 #include "ledger/TrustLineWrapper.h"
 #include "transactions/TransactionUtils.h"
 #include "util/XDROperators.h"
+#include <Tracy.hpp>
 
 namespace stellar
 {
@@ -23,6 +24,17 @@ PathPaymentStrictReceiveOpFrame::PathPaymentStrictReceiveOpFrame(
 bool
 PathPaymentStrictReceiveOpFrame::doApply(AbstractLedgerTxn& ltx)
 {
+    ZoneNamedN(applyZone, "PathPaymentStrictReceiveOp apply", true);
+    std::string pathStr = assetToString(getSourceAsset());
+    for (auto const& asset : mPathPayment.path)
+    {
+        pathStr += "->";
+        pathStr += assetToString(asset);
+    }
+    pathStr += "->";
+    pathStr += assetToString(getDestAsset());
+    ZoneTextV(applyZone, pathStr.c_str(), pathStr.size());
+
     setResultSuccess();
 
     bool doesSourceAccountExist = true;
@@ -159,8 +171,8 @@ PathPaymentStrictReceiveOpFrame::getDestAsset() const
     return mPathPayment.destAsset;
 }
 
-AccountID const&
-PathPaymentStrictReceiveOpFrame::getDestID() const
+MuxedAccount const&
+PathPaymentStrictReceiveOpFrame::getDestMuxedAccount() const
 {
     return mPathPayment.destination;
 }

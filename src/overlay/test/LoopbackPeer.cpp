@@ -77,14 +77,14 @@ LoopbackPeer::sendMessage(xdr::msg_ptr&& msg)
         {
             if (rand_flip() || rand_flip())
             {
-                CLOG(INFO, "Overlay")
+                CLOG(DEBUG, "Overlay")
                     << "Loopback send-to-straggler pausing, "
                     << "outbound queue at " << mOutQueue.size();
                 break;
             }
             else
             {
-                CLOG(INFO, "Overlay")
+                CLOG(DEBUG, "Overlay")
                     << "Loopback send-to-straggler sending, "
                     << "outbound queue at " << mOutQueue.size();
             }
@@ -103,19 +103,24 @@ LoopbackPeer::drop(std::string const& reason, DropDirection direction, DropMode)
 
     mDropReason = reason;
     mState = CLOSING;
-    mIdleTimer.cancel();
+    mRecurringTimer.cancel();
     getApp().getOverlayManager().removePeer(this);
 
     auto remote = mRemote.lock();
     if (remote)
     {
         remote->getApp().postOnMainThread(
-            [remote, reason, direction]() {
-                remote->drop("remote dropping because of " + reason,
-                             direction == Peer::DropDirection::WE_DROPPED_REMOTE
-                                 ? Peer::DropDirection::REMOTE_DROPPED_US
-                                 : Peer::DropDirection::WE_DROPPED_REMOTE,
-                             Peer::DropMode::IGNORE_WRITE_QUEUE);
+            [ remW = mRemote, reason, direction ]() {
+                auto remS = remW.lock();
+                if (remS)
+                {
+                    remS->drop(reason,
+                               direction ==
+                                       Peer::DropDirection::WE_DROPPED_REMOTE
+                                   ? Peer::DropDirection::REMOTE_DROPPED_US
+                                   : Peer::DropDirection::WE_DROPPED_REMOTE,
+                               Peer::DropMode::IGNORE_WRITE_QUEUE);
+                }
             },
             "LoopbackPeer: drop");
     }
@@ -237,7 +242,13 @@ LoopbackPeer::deliverOne()
             // move msg to remote's in queue
             remote->mInQueue.emplace(std::move(msg.mMessage));
             remote->getApp().postOnMainThread(
-                [remote]() { remote->processInQueue(); },
+                [remW = mRemote]() {
+                    auto remS = remW.lock();
+                    if (remS)
+                    {
+                        remS->processInQueue();
+                    }
+                },
                 "LoopbackPeer: processInQueue in deliverOne");
         }
         LoadManager::PeerContext loadCtx(mApp, mPeerID);
@@ -439,12 +450,18 @@ LoopbackPeerConnection::LoopbackPeerConnection(Application& initiator,
         return;
     }
 
-    mInitiator->startIdleTimer();
-    mAcceptor->startIdleTimer();
+    mInitiator->startRecurrentTimer();
+    mAcceptor->startRecurrentTimer();
 
-    auto init = mInitiator;
+    std::weak_ptr<LoopbackPeer> init = mInitiator;
     mInitiator->getApp().postOnMainThread(
-        [init]() { init->connectHandler(asio::error_code()); },
+        [init]() {
+            auto inC = init.lock();
+            if (inC)
+            {
+                inC->connectHandler(asio::error_code());
+            }
+        },
         "LoopbackPeer: connect");
 }
 

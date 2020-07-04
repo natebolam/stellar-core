@@ -18,8 +18,9 @@
 #include "util/optional.h"
 #include "util/types.h"
 
-#include "catchup/simulation/ApplyTransactionsWork.h"
 #include "historywork/BatchDownloadWork.h"
+#include "src/catchup/simulation/TxSimApplyTransactionsWork.h"
+#include "src/transactions/simulation/TxSimScaleBucketlistWork.h"
 #include "work/WorkScheduler.h"
 
 #ifdef BUILD_TESTS
@@ -28,9 +29,9 @@
 #include "test/test.h"
 #endif
 
+#include <fmt/format.h>
 #include <iostream>
 #include <lib/clara.hpp>
-#include <lib/util/format.h>
 
 namespace stellar
 {
@@ -230,6 +231,28 @@ configurationParser(CommandLine::ConfigOption& configOption)
            clara::Opt{configOption.mConfigFile, "FILE-NAME"}["--conf"](
                "specify a config file ('-' for STDIN, "
                "default 'stellar-core.cfg')");
+}
+
+clara::Opt
+metadataOutputStreamParser(std::string& stream)
+{
+    return clara::Opt(stream, "STREAM")["--metadata-output-stream"](
+        "Filename or file-descriptor number 'fd:N' to stream metadata to");
+}
+
+void
+maybeSetMetadataOutputStream(Config& cfg, std::string const& stream)
+{
+    if (!stream.empty())
+    {
+        if (!cfg.METADATA_OUTPUT_STREAM.empty())
+        {
+            throw std::runtime_error(
+                "Command-line --metadata-output-stream conflicts with "
+                "config-file provided METADATA_OUTPUT_STREAM");
+        }
+        cfg.METADATA_OUTPUT_STREAM = stream;
+    }
 }
 
 int
@@ -474,6 +497,7 @@ runCatchup(CommandLineArgs const& args)
     std::string archive;
     bool completeValidation = false;
     bool replayInMemory = false;
+    std::string stream;
 
     auto validateCatchupString = [&] {
         try
@@ -524,7 +548,8 @@ runCatchup(CommandLineArgs const& args)
          catchupArchiveParser, outputFileParser(outputFile),
          disableBucketGCParser(disableBucketGC),
          validationParser(completeValidation),
-         replayInMemoryParser(replayInMemory)},
+         replayInMemoryParser(replayInMemory),
+         metadataOutputStreamParser(stream)},
         [&] {
             auto config = configOption.getConfig();
             config.setNoListen();
@@ -553,6 +578,8 @@ runCatchup(CommandLineArgs const& args)
                 config.DISABLE_XDR_FSYNC = true;
             }
 
+            maybeSetMetadataOutputStream(config, stream);
+
             VirtualClock clock(VirtualClock::REAL_TIME);
             int result;
             {
@@ -573,14 +600,6 @@ runCatchup(CommandLineArgs const& args)
                     writeCatchupInfo(catchupInfo, outputFile);
                 }
             }
-
-            if (replayInMemory)
-            {
-                // Clean up `buckets` folder when in in-memory-replay mode
-                VirtualClock clockBuckets(VirtualClock::REAL_TIME);
-                auto app = Application::create(clockBuckets, config, true);
-            }
-
             return result;
         });
 }
@@ -783,6 +802,7 @@ run(CommandLineArgs const& args)
     CommandLine::ConfigOption configOption;
     auto disableBucketGC = false;
     uint32_t simulateSleepPerOp = 0;
+    std::string stream;
 
     auto simulateParser = [](uint32_t& simulateSleepPerOp) {
         return clara::Opt{simulateSleepPerOp,
@@ -793,7 +813,8 @@ run(CommandLineArgs const& args)
     return runWithHelp(args,
                        {configurationParser(configOption),
                         disableBucketGCParser(disableBucketGC),
-                        simulateParser(simulateSleepPerOp)},
+                        simulateParser(simulateSleepPerOp),
+                        metadataOutputStreamParser(stream)},
                        [&] {
                            Config cfg;
                            try
@@ -811,6 +832,8 @@ run(CommandLineArgs const& args)
                                    cfg.MODE_ENABLES_BUCKETLIST = false;
                                    cfg.PREFETCH_BATCH_SIZE = 0;
                                }
+
+                               maybeSetMetadataOutputStream(cfg, stream);
                            }
                            catch (std::exception& e)
                            {
@@ -903,13 +926,19 @@ runRebuildLedgerFromBuckets(CommandLineArgs const& args)
 }
 
 int
-runSimulate(CommandLineArgs const& args)
+runGenerateOrSimulateTxs(CommandLineArgs const& args, bool generate)
 {
     CommandLine::ConfigOption configOption;
+    // If >0, packs mMaxOperations into a ledger maintaining a sustained load
+    // If 0, scale the existing ledgers with multiplier
     uint32_t opsPerLedger = 0;
     uint32_t firstLedgerInclusive = 0;
     uint32_t lastLedgerInclusive = 0;
     std::string historyArchiveGet;
+    bool upgrade = false;
+    // Default to no simulated transactions, just real data
+    uint32_t multiplier = 1;
+    bool verifyResults = false;
 
     auto validateFirstLedger = [&] {
         if (firstLedgerInclusive == 0)
@@ -927,43 +956,190 @@ runSimulate(CommandLineArgs const& args)
             "first ledger to read from history archive"),
         validateFirstLedger};
 
+    auto opsPerLedgerParser = [](uint32_t& opsPerLedger) {
+        return clara::Opt{opsPerLedger, "OPS-PER-LEDGER"}["--ops-per-ledger"](
+            "desired number of operations per ledger, will never be less but "
+            "could be up to 100 * multiplier more. If 0, real ledger sizes "
+            "from the archive stream are used");
+    };
+
+    auto multiplierParser = [](uint32_t& multiplier) {
+        return clara::Opt{multiplier,
+                          "N"}["--multiplier"]("amplification factor, "
+                                               "must be consistent with "
+                                               "simulated bucketlist");
+    };
+
+    std::vector<ParserWithValidation> parsers = {
+        configurationParser(configOption), firstLedgerParser,
+        clara::Opt{upgrade}["--upgrade"](
+            "upgrade to latest known protocol version"),
+        clara::Opt{verifyResults}["--verify"](
+            "check results after application and log inconsistencies"),
+        clara::Opt{lastLedgerInclusive, "LEDGER"}["--last-ledger-inclusive"](
+            "last ledger to read from history archive")};
+
+    // Allow passing multiplier during transaction generation, ops-per-ledger
+    // during simulation
+    parsers.emplace_back((generate ? multiplierParser(multiplier)
+                                   : opsPerLedgerParser(opsPerLedger)));
+
+    return runWithHelp(args, parsers, [&] {
+        auto config = configOption.getConfig();
+        config.setNoListen();
+
+        auto found = config.HISTORY.find("simulate");
+        if (!generate)
+        {
+            // Check if special `simulate` archive is present in the config
+            // If so, ensure we're getting historical data from it exclusively
+            if (found != config.HISTORY.end())
+            {
+                auto simArchive = *found;
+                config.HISTORY.clear();
+                config.HISTORY[simArchive.first] = simArchive.second;
+            }
+
+            LOG(INFO) << "Publishing is disabled in `simulate` mode";
+            config.setNoPublish();
+        }
+        else if (found == config.HISTORY.end())
+        {
+            throw std::runtime_error("Must provide writable `simulate` archive "
+                                     "when generating transactions");
+        }
+
+        VirtualClock clock(VirtualClock::REAL_TIME);
+        auto app = Application::create(clock, config, false);
+        app->start();
+
+        if (generate && app->getHistoryManager().checkpointContainingLedger(
+                            lastLedgerInclusive) == lastLedgerInclusive)
+        {
+            // Bump last ledger to unblock publish
+            ++lastLedgerInclusive;
+        }
+
+        auto lr =
+            LedgerRange::inclusive(firstLedgerInclusive, lastLedgerInclusive);
+        CheckpointRange cr(lr, app->getHistoryManager());
+        TmpDir dir(app->getTmpDirManager().tmpDir("simulate"));
+
+        auto downloadLedgers = std::make_shared<BatchDownloadWork>(
+            *app, cr, HISTORY_FILE_TYPE_LEDGER, dir);
+        auto downloadTransactions = std::make_shared<BatchDownloadWork>(
+            *app, cr, HISTORY_FILE_TYPE_TRANSACTIONS, dir);
+        auto downloadResults = std::make_shared<BatchDownloadWork>(
+            *app, cr, HISTORY_FILE_TYPE_RESULTS, dir);
+        auto apply = std::make_shared<txsimulation::TxSimApplyTransactionsWork>(
+            *app, dir, lr, app->getConfig().NETWORK_PASSPHRASE, opsPerLedger,
+            upgrade, multiplier, verifyResults);
+        std::vector<std::shared_ptr<BasicWork>> seq{
+            downloadLedgers, downloadTransactions, downloadResults, apply};
+
+        app->getWorkScheduler().executeWork<WorkSequence>(
+            "download-simulate-seq", seq);
+
+        // Publish all simulated transactions to a simulated archive to avoid
+        // re-generating and signing them
+        if (generate)
+        {
+            publish(app);
+        }
+
+        return 0;
+    });
+}
+
+int
+runSimulateTxs(CommandLineArgs const& args)
+{
+    return runGenerateOrSimulateTxs(args, false);
+}
+
+int
+runGenerateTxs(CommandLineArgs const& args)
+{
+    return runGenerateOrSimulateTxs(args, true);
+}
+
+int
+runSimulateBuckets(CommandLineArgs const& args)
+{
+    CommandLine::ConfigOption configOption;
+    uint32_t ledger = 0;
+    uint32_t n = 2;
+    std::string hasStr = "";
+
+    ParserWithValidation ledgerParser{
+        clara::Arg(ledger, "LEDGER").required(),
+        [&] { return ledger > 0 ? "" : "Ledger must be non-zero"; }};
+
     return runWithHelp(
         args,
-        {configurationParser(configOption),
-         clara::Opt{opsPerLedger, "OPS-PER-LEDGER"}["--ops-per-ledger"](
-             "desired number of operations per ledger, will never be less but "
-             "could be up to 100 more"),
-         firstLedgerParser,
-         clara::Opt{lastLedgerInclusive, "LEDGER"}["--last-ledger-inclusive"](
-             "last ledger to read from history archive")},
+        {configurationParser(configOption), ledgerParser,
+         clara::Opt{n, "N"}["--multiplier"]("amplification factor"),
+         clara::Opt{hasStr, "FILENAME"}["--history-archive-state"](
+             "skip directly to application if buckets already generated")},
         [&] {
             auto config = configOption.getConfig();
             config.setNoListen();
-            LOG(INFO) << "Publishing is disabled in `simulate` mode";
-            config.setNoPublish();
+
+            std::shared_ptr<HistoryArchiveState> has;
+            if (!hasStr.empty())
+            {
+                LOG(INFO) << "Loading state from " << hasStr;
+                has = std::make_shared<HistoryArchiveState>();
+                has->load(hasStr);
+                config.DISABLE_BUCKET_GC =
+                    true; /* Do not wipe out simulated buckets */
+            }
 
             VirtualClock clock(VirtualClock::REAL_TIME);
-            auto app = Application::create(clock, config, false);
+            auto app = Application::create(clock, config, !has);
             app->start();
+            TmpDir dir(app->getTmpDirManager().tmpDir("simulate-buckets-tmp"));
 
-            LedgerRange lr{firstLedgerInclusive, lastLedgerInclusive};
-            CheckpointRange cr(lr, app->getHistoryManager());
-            TmpDir dir(app->getTmpDirManager().tmpDir("simulate"));
+            auto checkpoint =
+                app->getHistoryManager().checkpointContainingLedger(ledger);
 
-            auto downloadLedgers = std::make_shared<BatchDownloadWork>(
+            auto simulateBuckets =
+                std::make_shared<txsimulation::TxSimScaleBucketlistWork>(
+                    *app, n, checkpoint, dir, has);
+
+            // Once simulated bucketlist is good to go, download ledgers headers
+            // to convince LedgerManager that we have succesfully restored
+            // ledger state
+            auto cr = CheckpointRange::inclusive(
+                checkpoint, checkpoint,
+                app->getHistoryManager().getCheckpointFrequency());
+            auto downloadHeaders = std::make_shared<BatchDownloadWork>(
                 *app, cr, HISTORY_FILE_TYPE_LEDGER, dir);
-            auto downloadTransactions = std::make_shared<BatchDownloadWork>(
-                *app, cr, HISTORY_FILE_TYPE_TRANSACTIONS, dir);
-            auto downloadResults = std::make_shared<BatchDownloadWork>(
-                *app, cr, HISTORY_FILE_TYPE_RESULTS, dir);
-            auto apply = std::make_shared<ApplyTransactionsWork>(
-                *app, dir, lr, app->getConfig().NETWORK_PASSPHRASE,
-                opsPerLedger);
-            std::vector<std::shared_ptr<BasicWork>> seq{
-                downloadLedgers, downloadTransactions, downloadResults, apply};
 
-            app->getWorkScheduler().executeWork<WorkSequence>(
-                "download-simulate-seq", seq);
+            std::vector<std::shared_ptr<BasicWork>> seq{simulateBuckets,
+                                                        downloadHeaders};
+
+            auto w = app->getWorkScheduler().executeWork<WorkSequence>(
+                "simulate-bucketlist-application", seq);
+
+            if (w->getState() == BasicWork::State::WORK_SUCCESS)
+            {
+                // Ensure that LedgerManager's view of LCL is consistent with
+                // the bucketlist
+                FileTransferInfo ft(dir, HISTORY_FILE_TYPE_LEDGER, checkpoint);
+                XDRInputFileStream hdrIn;
+                hdrIn.open(ft.localPath_nogz());
+                LedgerHeaderHistoryEntry curr;
+                // Read the last LedgerHeaderHistoryEntry to use as LCL
+                while (hdrIn && hdrIn.readOne(curr))
+                    ;
+
+                LOG(INFO) << "Assuming state for ledger "
+                          << curr.header.ledgerSeq;
+                app->getLedgerManager().setLastClosedLedger(curr);
+                app->getBucketManager().forgetUnreferencedBuckets();
+            }
+
             return 0;
         });
 }
@@ -1084,7 +1260,15 @@ handleCommandLine(int argc, char* const* argv)
           runRebuildLedgerFromBuckets},
          {"fuzz", "run a single fuzz input and exit", runFuzz},
          {"gen-fuzz", "generate a random fuzzer input file", runGenFuzz},
-         {"simulate", "simulate applying ledgers", runSimulate},
+         {"generate-transactions",
+          "generate simulated transactions based on a multiplier. Ensure a "
+          "proper writeable test archive is configured",
+          runGenerateTxs},
+         {"simulate-transactions",
+          "simulate applying ledgers from a real or simulated archive (must be "
+          "caught up)",
+          runSimulateTxs},
+         {"simulate-bucketlist", "simulate bucketlist", runSimulateBuckets},
          {"test", "execute test suite", runTest},
 #endif
          {"write-quorum", "print a quorum set graph from history",

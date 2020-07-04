@@ -7,10 +7,10 @@
 #include "bucket/Bucket.h"
 #include "ledger/LedgerTxn.h"
 #include "ledger/LedgerTxnEntry.h"
-#include "lib/util/format.h"
 #include "main/Application.h"
 #include "util/Logging.h"
 #include "util/types.h"
+#include <fmt/format.h>
 
 namespace stellar
 {
@@ -51,7 +51,8 @@ BucketApplicator::advance(BucketApplicator::Counters& counters)
 {
     size_t count = 0;
 
-    LedgerTxn ltx(mApp.getLedgerTxnRoot(), false);
+    auto& root = mApp.getLedgerTxnRoot();
+    LedgerTxn ltx(root, false);
     for (; mBucketIter; ++mBucketIter)
     {
         BucketEntry const& e = *mBucketIter;

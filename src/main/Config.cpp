@@ -18,14 +18,15 @@
 #include "util/XDROperators.h"
 #include "util/types.h"
 
+#include <fmt/format.h>
 #include <functional>
-#include <lib/util/format.h>
 #include <sstream>
 #include <unordered_set>
 
 namespace stellar
 {
-const uint32 Config::CURRENT_LEDGER_PROTOCOL_VERSION = 12;
+const uint32 Config::CURRENT_LEDGER_PROTOCOL_VERSION = 13;
+const uint32 Config::MAXIMUM_QUORUM_NESTING_LEVEL = 4;
 
 // Options that must only be used for testing
 static const std::unordered_set<std::string> TESTING_ONLY_OPTIONS = {
@@ -98,8 +99,8 @@ Config::Config() : NODE_SEED(SecretKey::random())
 
     MAXIMUM_LEDGER_CLOSETIME_DRIFT = 50;
 
-    OVERLAY_PROTOCOL_MIN_VERSION = 10;
-    OVERLAY_PROTOCOL_VERSION = 12;
+    OVERLAY_PROTOCOL_MIN_VERSION = 13;
+    OVERLAY_PROTOCOL_VERSION = 13;
 
     VERSION_STR = STELLAR_CORE_VERSION;
 
@@ -144,8 +145,17 @@ Config::Config() : NODE_SEED(SecretKey::random())
     PEER_AUTHENTICATION_TIMEOUT = 2;
     PEER_TIMEOUT = 30;
     PEER_STRAGGLER_TIMEOUT = 120;
-    MAX_BATCH_READ_PERIOD_MS = std::chrono::milliseconds(1);
-    MAX_BATCH_READ_COUNT = 1;
+
+    // time spent picking up items from a connection all at once, this should be
+    // picked high enough that we can pick up as many items as possible but low
+    // enough that we give a chance to cycle through all connections in a
+    // reasonable amount of time. 10ms would allow to cycle through 100
+    // connections in one second
+    MAX_BATCH_READ_PERIOD_MS = std::chrono::milliseconds(10);
+    // during transaction spikes, we want to increase the chance of picking up
+    // items behind transactions
+    MAX_BATCH_READ_COUNT = 1000;
+
     MAX_BATCH_WRITE_COUNT = 1024;
     MAX_BATCH_WRITE_BYTES = 1 * 1024 * 1024;
     PREFERRED_PEERS_ONLY = false;
@@ -171,8 +181,6 @@ Config::Config() : NODE_SEED(SecretKey::random())
     ENTRY_CACHE_SIZE = 100000;
     BEST_OFFERS_CACHE_SIZE = 64;
     PREFETCH_BATCH_SIZE = 1000;
-
-    SUPPORTED_META_VERSION = 1;
 
 #ifdef BUILD_TESTS
     TEST_CASES_ENABLED = false;
@@ -252,7 +260,7 @@ Config::loadQset(std::shared_ptr<cpptoml::table> group, SCPQuorumSet& qset,
         throw std::invalid_argument("invalid entry in quorum set definition");
     }
 
-    if (level > 2)
+    if (level > Config::MAXIMUM_QUORUM_NESTING_LEVEL)
     {
         throw std::invalid_argument("too many levels in quorum set");
     }
@@ -970,10 +978,6 @@ Config::processConfig(std::shared_ptr<cpptoml::table> t)
             else if (item.first == "HOME_DOMAINS")
             {
                 domainQualityMap = parseDomainsQuality(item.second);
-            }
-            else if (item.first == "SUPPORTED_META_VERSION")
-            {
-                SUPPORTED_META_VERSION = readInt<uint32_t>(item, 1, 2);
             }
             else if (item.first == "SURVEYOR_KEYS")
             {

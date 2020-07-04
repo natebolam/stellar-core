@@ -5,9 +5,10 @@
 #include "invariant/LedgerEntryIsValid.h"
 #include "invariant/InvariantManager.h"
 #include "ledger/LedgerTxn.h"
-#include "lib/util/format.h"
 #include "main/Application.h"
+#include "transactions/TransactionUtils.h"
 #include "xdrpp/printer.h"
+#include <fmt/format.h>
 
 namespace stellar
 {
@@ -174,7 +175,7 @@ LedgerEntryIsValid::checkIsValid(TrustLineEntry const& tl, uint32 version) const
         return fmt::format("TrustLine balance ({}) exceeds limit ({})",
                            tl.balance, tl.limit);
     }
-    if ((tl.flags & ~MASK_TRUSTLINE_FLAGS) != 0)
+    if (!trustLineFlagIsValid(tl.flags, version))
     {
         return "TrustLine flags are invalid";
     }

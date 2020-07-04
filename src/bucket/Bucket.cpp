@@ -17,7 +17,6 @@
 #include "crypto/Random.h"
 #include "crypto/SHA.h"
 #include "database/Database.h"
-#include "lib/util/format.h"
 #include "main/Application.h"
 #include "medida/timer.h"
 #include "util/Fs.h"
@@ -25,7 +24,9 @@
 #include "util/TmpDir.h"
 #include "util/XDRStream.h"
 #include "xdrpp/message.h"
+#include <Tracy.hpp>
 #include <cassert>
+#include <fmt/format.h>
 #include <future>
 
 namespace stellar
@@ -84,14 +85,15 @@ Bucket::containsBucketIdentity(BucketEntry const& id) const
 void
 Bucket::apply(Application& app) const
 {
+    ZoneScoped;
     BucketApplicator applicator(app, app.getConfig().LEDGER_PROTOCOL_VERSION,
                                 shared_from_this());
-    BucketApplicator::Counters counters(std::chrono::system_clock::now());
+    BucketApplicator::Counters counters(app.getClock().now());
     while (applicator)
     {
         applicator.advance(counters);
     }
-    counters.logInfo("direct", 0, std::chrono::system_clock::now());
+    counters.logInfo("direct", 0, app.getClock().now());
 }
 
 std::vector<BucketEntry>
@@ -138,8 +140,9 @@ Bucket::fresh(BucketManager& bucketManager, uint32_t protocolVersion,
               std::vector<LedgerEntry> const& initEntries,
               std::vector<LedgerEntry> const& liveEntries,
               std::vector<LedgerKey> const& deadEntries, bool countMergeEvents,
-              bool doFsync)
+              asio::io_context& ctx, bool doFsync)
 {
+    ZoneScoped;
     // When building fresh buckets after protocol version 10 (i.e. version
     // 11-or-after) we differentiate INITENTRY from LIVEENTRY. In older
     // protocols, for compatibility sake, we mark both cases as LIVEENTRY.
@@ -152,7 +155,7 @@ Bucket::fresh(BucketManager& bucketManager, uint32_t protocolVersion,
         convertToBucketEntry(useInit, initEntries, liveEntries, deadEntries);
 
     MergeCounters mc;
-    BucketOutputIterator out(bucketManager.getTmpDir(), true, meta, mc,
+    BucketOutputIterator out(bucketManager.getTmpDir(), true, meta, mc, ctx,
                              doFsync);
     for (auto const& e : entries)
     {
@@ -589,8 +592,10 @@ Bucket::merge(BucketManager& bucketManager, uint32_t maxProtocolVersion,
               std::shared_ptr<Bucket> const& oldBucket,
               std::shared_ptr<Bucket> const& newBucket,
               std::vector<std::shared_ptr<Bucket>> const& shadows,
-              bool keepDeadEntries, bool countMergeEvents, bool doFsync)
+              bool keepDeadEntries, bool countMergeEvents,
+              asio::io_context& ctx, bool doFsync)
 {
+    ZoneScoped;
     // This is the key operation in the scheme: merging two (read-only)
     // buckets together into a new 3rd bucket, while calculating its hash,
     // in a single pass.
@@ -614,7 +619,7 @@ Bucket::merge(BucketManager& bucketManager, uint32_t maxProtocolVersion,
     BucketMetadata meta;
     meta.ledgerVersion = protocolVersion;
     BucketOutputIterator out(bucketManager.getTmpDir(), keepDeadEntries, meta,
-                             mc, doFsync);
+                             mc, ctx, doFsync);
 
     BucketEntryIdCmp cmp;
     while (oi || ni)

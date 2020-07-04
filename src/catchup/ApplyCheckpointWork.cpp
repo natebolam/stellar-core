@@ -16,8 +16,8 @@
 #include "main/Application.h"
 #include "main/ErrorMessages.h"
 #include "util/FileSystemException.h"
-
-#include <lib/util/format.h>
+#include <Tracy.hpp>
+#include <fmt/format.h>
 #include <medida/meter.h>
 #include <medida/metrics_registry.h>
 
@@ -29,7 +29,7 @@ ApplyCheckpointWork::ApplyCheckpointWork(Application& app,
                                          LedgerRange const& range)
     : BasicWork(app,
                 "apply-ledgers-" +
-                    fmt::format("{}-{}", range.mFirst, range.mLast),
+                    fmt::format("{}-{}", range.mFirst, range.limit()),
                 BasicWork::RETRY_NEVER)
     , mDownloadDir(downloadDir)
     , mLedgerRange(range)
@@ -42,14 +42,13 @@ ApplyCheckpointWork::ApplyCheckpointWork(Application& app,
 {
     // Ledger range check to enforce application of a single checkpoint
     auto const& hm = mApp.getHistoryManager();
-    auto low = std::max(LedgerManager::GENESIS_LEDGER_SEQ,
-                        hm.prevCheckpointLedger(mCheckpoint));
+    auto low = hm.firstLedgerInCheckpointContaining(mCheckpoint);
     if (mLedgerRange.mFirst != low)
     {
         throw std::runtime_error(
             "Ledger range start must be aligned with checkpoint start");
     }
-    if (mLedgerRange.mLast > mCheckpoint)
+    if (mLedgerRange.mCount > 0 && mLedgerRange.last() > mCheckpoint)
     {
         throw std::runtime_error(
             "Ledger range must span at most 1 checkpoint worth of ledgers");
@@ -79,6 +78,7 @@ ApplyCheckpointWork::onReset()
 void
 ApplyCheckpointWork::openInputFiles()
 {
+    ZoneScoped;
     mHdrIn.close();
     mTxIn.close();
     FileTransferInfo hi(mDownloadDir, HISTORY_FILE_TYPE_LEDGER, mCheckpoint);
@@ -98,6 +98,7 @@ ApplyCheckpointWork::openInputFiles()
 TxSetFramePtr
 ApplyCheckpointWork::getCurrentTxSet()
 {
+    ZoneScoped;
     auto& lm = mApp.getLedgerManager();
     auto seq = lm.getLastClosedLedgerNum() + 1;
 
@@ -132,6 +133,7 @@ ApplyCheckpointWork::getCurrentTxSet()
 std::shared_ptr<LedgerCloseData>
 ApplyCheckpointWork::getNextLedgerCloseData()
 {
+    ZoneScoped;
     if (!mHdrIn || !mHdrIn.readOne(mHeaderHistoryEntry))
     {
         throw std::runtime_error("No more ledgers to replay!");
@@ -244,6 +246,7 @@ ApplyCheckpointWork::getNextLedgerCloseData()
 BasicWork::State
 ApplyCheckpointWork::onRun()
 {
+    ZoneScoped;
     try
     {
         if (mConditionalWork)
@@ -280,17 +283,18 @@ ApplyCheckpointWork::onRun()
             }
         }
 
-        if (!mFilesOpen)
-        {
-            openInputFiles();
-        }
-
         auto const& lm = mApp.getLedgerManager();
-        auto done = lm.getLastClosedLedgerNum() == mLedgerRange.mLast;
+        auto done = (mLedgerRange.mCount == 0 ||
+                     lm.getLastClosedLedgerNum() == mLedgerRange.last());
 
         if (done)
         {
             return State::WORK_SUCCESS;
+        }
+
+        if (!mFilesOpen)
+        {
+            openInputFiles();
         }
 
         auto lcd = getNextLedgerCloseData();
@@ -338,6 +342,7 @@ ApplyCheckpointWork::onRun()
 void
 ApplyCheckpointWork::shutdown()
 {
+    ZoneScoped;
     if (mConditionalWork)
     {
         mConditionalWork->shutdown();
@@ -348,6 +353,7 @@ ApplyCheckpointWork::shutdown()
 bool
 ApplyCheckpointWork::onAbort()
 {
+    ZoneScoped;
     if (mConditionalWork && !mConditionalWork->isDone())
     {
         mConditionalWork->crankWork();

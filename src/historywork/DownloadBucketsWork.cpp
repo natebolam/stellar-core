@@ -8,7 +8,8 @@
 #include "history/HistoryArchive.h"
 #include "historywork/GetAndUnzipRemoteFileWork.h"
 #include "historywork/VerifyBucketWork.h"
-#include "util/format.h"
+#include <Tracy.hpp>
+#include <fmt/format.h>
 
 namespace stellar
 {
@@ -33,7 +34,8 @@ DownloadBucketsWork::getStatus() const
     {
         if (!mHashes.empty())
         {
-            auto numDone = std::distance(mHashes.begin(), mNextBucketIter);
+            auto numStarted = std::distance(mHashes.begin(), mNextBucketIter);
+            auto numDone = numStarted - getNumWorksInBatch();
             auto total = static_cast<uint32_t>(mHashes.size());
             auto pct = (100 * numDone) / total;
             return fmt::format(
@@ -59,6 +61,7 @@ DownloadBucketsWork::resetIter()
 std::shared_ptr<BasicWork>
 DownloadBucketsWork::yieldMoreWork()
 {
+    ZoneScoped;
     if (!hasNext())
     {
         throw std::runtime_error("Nothing to iterate over!");

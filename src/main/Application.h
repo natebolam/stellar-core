@@ -218,10 +218,9 @@ class Application
     // with caution.
     virtual asio::io_context& getWorkerIOContext() = 0;
 
-    virtual void postOnMainThread(std::function<void()>&& f,
-                                  std::string jobName) = 0;
-    virtual void postOnMainThreadWithDelay(std::function<void()>&& f,
-                                           std::string jobName) = 0;
+    virtual void postOnMainThread(
+        std::function<void()>&& f, std::string&& name,
+        Scheduler::ActionType type = Scheduler::ActionType::NORMAL_ACTION) = 0;
     virtual void postOnBackgroundThread(std::function<void()>&& f,
                                         std::string jobName) = 0;
 
@@ -250,7 +249,9 @@ class Application
     // against the current application.
     virtual void generateLoad(bool isCreate, uint32_t nAccounts,
                               uint32_t offset, uint32_t nTxs, uint32_t txRate,
-                              uint32_t batchSize) = 0;
+                              uint32_t batchSize,
+                              std::chrono::seconds spikeInterval,
+                              uint32_t spikeSize) = 0;
 
     // Access the load generator for manual operation.
     virtual LoadGenerator& getLoadGenerator() = 0;

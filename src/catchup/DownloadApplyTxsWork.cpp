@@ -10,6 +10,8 @@
 #include "ledger/LedgerManager.h"
 #include "work/ConditionalWork.h"
 #include "work/WorkSequence.h"
+#include <Tracy.hpp>
+#include <fmt/format.h>
 
 namespace stellar
 {
@@ -32,6 +34,7 @@ DownloadApplyTxsWork::DownloadApplyTxsWork(
 std::shared_ptr<BasicWork>
 DownloadApplyTxsWork::yieldMoreWork()
 {
+    ZoneScoped;
     if (!hasNext())
     {
         throw std::runtime_error("Work has no more children to iterate over!");
@@ -46,11 +49,10 @@ DownloadApplyTxsWork::yieldMoreWork()
         std::make_shared<GetAndUnzipRemoteFileWork>(mApp, ft, mArchive);
 
     auto const& hm = mApp.getHistoryManager();
-    auto low = std::max(LedgerManager::GENESIS_LEDGER_SEQ,
-                        hm.prevCheckpointLedger(mCheckpointToQueue));
-    auto high = std::min(mCheckpointToQueue, mRange.mLast);
-    auto apply = std::make_shared<ApplyCheckpointWork>(mApp, mDownloadDir,
-                                                       LedgerRange{low, high});
+    auto low = hm.firstLedgerInCheckpointContaining(mCheckpointToQueue);
+    auto high = std::min(mCheckpointToQueue, mRange.last());
+    auto apply = std::make_shared<ApplyCheckpointWork>(
+        mApp, mDownloadDir, LedgerRange::inclusive(low, high));
 
     std::vector<std::shared_ptr<BasicWork>> seq{getAndUnzip};
 
@@ -119,8 +121,12 @@ DownloadApplyTxsWork::resetIter()
 bool
 DownloadApplyTxsWork::hasNext() const
 {
+    if (mRange.mCount == 0)
+    {
+        return false;
+    }
     auto last =
-        mApp.getHistoryManager().checkpointContainingLedger(mRange.mLast);
+        mApp.getHistoryManager().checkpointContainingLedger(mRange.last());
     return mCheckpointToQueue <= last;
 }
 
@@ -128,5 +134,25 @@ void
 DownloadApplyTxsWork::onSuccess()
 {
     mLastApplied = mApp.getLedgerManager().getLastClosedLedgerHeader();
+}
+
+std::string
+DownloadApplyTxsWork::getStatus() const
+{
+    auto& hm = mApp.getHistoryManager();
+    auto first = hm.checkpointContainingLedger(mRange.mFirst);
+    auto last =
+        (mRange.mCount == 0 ? first
+                            : hm.checkpointContainingLedger(mRange.last()));
+
+    auto checkpointsStarted =
+        (mCheckpointToQueue - first) / hm.getCheckpointFrequency();
+    auto checkpointsApplied = checkpointsStarted - getNumWorksInBatch();
+
+    auto totalCheckpoints = (last - first) / hm.getCheckpointFrequency() + 1;
+    return fmt::format("Download & apply checkpoints: num checkpoints left to "
+                       "apply:{} ({}% done)",
+                       totalCheckpoints - checkpointsApplied,
+                       100 * checkpointsApplied / totalCheckpoints);
 }
 }

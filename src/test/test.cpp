@@ -17,7 +17,7 @@
 #include "util/TmpDir.h"
 
 #include <cstdlib>
-#include <lib/util/format.h>
+#include <fmt/format.h>
 #include <numeric>
 #include <time.h>
 
@@ -128,6 +128,8 @@ getTestConfig(int instanceNumber, Config::TestDbMode mode)
         // attempted.
         thisConfig.RUN_STANDALONE = true;
         thisConfig.FORCE_SCP = true;
+
+        thisConfig.MANUAL_CLOSE = true;
 
         thisConfig.TEST_CASES_ENABLED = true;
 
@@ -277,7 +279,7 @@ runTest(CommandLineArgs const& args)
     gTestCfg->clear();
     if (r != 0)
     {
-        LOG(FATAL) << "Nonzero test result with --rng-seed " << seed;
+        LOG(ERROR) << "Nonzero test result with --rng-seed " << seed;
     }
     return r;
 }

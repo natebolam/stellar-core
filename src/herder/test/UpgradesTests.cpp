@@ -5,6 +5,7 @@
 #include "bucket/BucketInputIterator.h"
 #include "bucket/BucketTests.h"
 #include "herder/Herder.h"
+#include "herder/HerderImpl.h"
 #include "herder/LedgerCloseData.h"
 #include "herder/Upgrades.h"
 #include "history/HistoryArchiveManager.h"
@@ -22,9 +23,11 @@
 #include "util/StatusManager.h"
 #include "util/Timer.h"
 #include "util/optional.h"
+#include <fmt/format.h>
 #include <xdrpp/marshal.h>
 
 using namespace stellar;
+using namespace stellar::txtest;
 
 struct LedgerUpgradeableData
 {
@@ -44,12 +47,12 @@ struct LedgerUpgradeableData
 struct LedgerUpgradeNode
 {
     LedgerUpgradeableData desiredUpgrades;
-    VirtualClock::time_point preferredUpgradeDatetime;
+    VirtualClock::system_time_point preferredUpgradeDatetime;
 };
 
 struct LedgerUpgradeCheck
 {
-    VirtualClock::time_point time;
+    VirtualClock::system_time_point time;
     std::vector<LedgerUpgradeableData> expected;
 };
 
@@ -75,7 +78,8 @@ simulateUpgrade(std::vector<LedgerUpgradeNode> const& nodes,
             SecretKey::fromSeed(sha256("NODE_SEED_" + std::to_string(i))));
         configs.push_back(simulation->newConfig());
         // disable upgrade from config
-        configs.back().TESTING_UPGRADE_DATETIME = VirtualClock::time_point();
+        configs.back().TESTING_UPGRADE_DATETIME =
+            VirtualClock::system_time_point();
         configs.back().USE_CONFIG_FOR_GENESIS = false;
         // first node can write to history, all can read
         configurator.configure(configs.back(), i == 0);
@@ -237,7 +241,7 @@ executeUpgrade(Application& app, LedgerUpgrade const& lupgrade)
 };
 
 void
-testListUpgrades(VirtualClock::time_point preferredUpgradeDatetime,
+testListUpgrades(VirtualClock::system_time_point preferredUpgradeDatetime,
                  bool shouldListAny)
 {
     auto cfg = getTestConfig();
@@ -320,7 +324,7 @@ testListUpgrades(VirtualClock::time_point preferredUpgradeDatetime,
 }
 
 void
-testValidateUpgrades(VirtualClock::time_point preferredUpgradeDatetime,
+testValidateUpgrades(VirtualClock::system_time_point preferredUpgradeDatetime,
                      bool canBeValid)
 {
     auto cfg = getTestConfig();
@@ -1574,12 +1578,12 @@ TEST_CASE("upgrade to version 12", "[upgrades]")
                         STELLAR_VALUE_BASIC);
         lm.closeLedger(LedgerCloseData(ledgerSeq, txSet, sv));
         auto& bm = app->getBucketManager();
-        auto mc = bm.readMergeCounters();
         auto& bl = bm.getBucketList();
         while (!bl.futuresAllResolved())
         {
             bl.resolveAnyReadyFutures();
         }
+        auto mc = bm.readMergeCounters();
 
         if (ledgerSeq < 5)
         {
@@ -1629,6 +1633,56 @@ TEST_CASE("upgrade to version 12", "[upgrades]")
                 break;
             }
         }
+    }
+}
+
+TEST_CASE("upgrade to version 13", "[upgrades]")
+{
+    VirtualClock clock;
+    auto cfg = getTestConfig(0);
+    cfg.USE_CONFIG_FOR_GENESIS = false;
+
+    auto app = createTestApplication(clock, cfg);
+    app->start();
+    executeUpgrade(*app, makeProtocolVersionUpgrade(12));
+
+    auto& lm = app->getLedgerManager();
+    auto& herder = static_cast<HerderImpl&>(app->getHerder());
+
+    auto root = TestAccount::createRoot(*app);
+    auto acc = root.create("A", lm.getLastMinBalance(2));
+
+    herder.recvTransaction(root.tx({payment(root, 1)}));
+    herder.recvTransaction(root.tx({payment(root, 2)}));
+    herder.recvTransaction(acc.tx({payment(acc, 1)}));
+    herder.recvTransaction(acc.tx({payment(acc, 2)}));
+
+    auto txSet = herder.getTransactionQueue().toTxSet({});
+    for (auto const& tx : txSet->mTransactions)
+    {
+        REQUIRE(tx->getEnvelope().type() == ENVELOPE_TYPE_TX_V0);
+    }
+
+    {
+        auto const& lcl = lm.getLastClosedLedgerHeader();
+        auto ledgerSeq = lcl.header.ledgerSeq + 1;
+
+        auto emptyTxSet = std::make_shared<TxSetFrame>(lcl.hash);
+        herder.getPendingEnvelopes().putTxSet(emptyTxSet->getContentsHash(),
+                                              ledgerSeq, emptyTxSet);
+
+        auto upgrade = toUpgradeType(makeProtocolVersionUpgrade(13));
+        StellarValue sv{emptyTxSet->getContentsHash(), 2,
+                        xdr::xvector<UpgradeType, 6>({upgrade}),
+                        STELLAR_VALUE_BASIC};
+        herder.getHerderSCPDriver().valueExternalized(ledgerSeq,
+                                                      xdr::xdr_to_opaque(sv));
+    }
+
+    txSet = herder.getTransactionQueue().toTxSet({});
+    for (auto const& tx : txSet->mTransactions)
+    {
+        REQUIRE(tx->getEnvelope().type() == ENVELOPE_TYPE_TX);
     }
 }
 
@@ -1784,7 +1838,8 @@ TEST_CASE("upgrade base reserve", "[upgrades]")
             market.requireChanges(offers,
                                   std::bind(executeUpgrade, 2 * baseReserve));
         });
-        for_versions_from(10, *app, [&] {
+
+        auto increaseReserveFromV10 = [&](bool allowMaintainLiablities) {
             auto a1 = root.create("A", 2 * lm.getLastMinBalance(14) + 3999 +
                                            14 * txFee);
             a1.changeTrust(cur1, 12000);
@@ -1815,6 +1870,14 @@ TEST_CASE("upgrade base reserve", "[upgrades]")
 
             createOffers(a2, offers);
 
+            if (allowMaintainLiablities)
+            {
+                issuer.setOptions(txtest::setFlags(
+                    static_cast<uint32_t>(AUTH_REQUIRED_FLAG) |
+                    static_cast<uint32_t>(AUTH_REVOCABLE_FLAG)));
+                issuer.allowMaintainLiabilities(cur1, a1);
+            }
+
             uint32_t baseReserve = lm.getLastReserve();
             market.requireChanges(offers,
                                   std::bind(executeUpgrade, 2 * baseReserve));
@@ -1824,7 +1887,11 @@ TEST_CASE("upgrade base reserve", "[upgrades]")
             REQUIRE(getLiabilities(a2) == Liabilities{8000, 4000});
             REQUIRE(getAssetLiabilities(a2, cur1) == Liabilities{8000, 4000});
             REQUIRE(getAssetLiabilities(a2, cur2) == Liabilities{8000, 4000});
-        });
+        };
+
+        for_versions_from(10, *app, [&] { increaseReserveFromV10(false); });
+
+        for_versions_from(13, *app, [&] { increaseReserveFromV10(true); });
     }
 }
 

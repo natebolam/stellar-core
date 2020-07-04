@@ -3,6 +3,7 @@
 // of this distribution or at http://www.apache.org/licenses/LICENSE-2.0
 
 #include "overlay/TCPPeer.h"
+#include "crypto/Curve25519.h"
 #include "database/Database.h"
 #include "main/Application.h"
 #include "main/Config.h"
@@ -16,8 +17,9 @@
 #include "overlay/StellarXDR.h"
 #include "util/GlobalChecks.h"
 #include "util/Logging.h"
-#include "util/format.h"
 #include "xdrpp/marshal.h"
+#include <Tracy.hpp>
+#include <fmt/format.h>
 
 using namespace soci;
 
@@ -49,7 +51,7 @@ TCPPeer::initiate(Application& app, PeerBareAddress const& address)
     auto socket = make_shared<SocketType>(app.getClock().getIOContext(), BUFSZ);
     auto result = make_shared<TCPPeer>(app, WE_CALLED_REMOTE, socket);
     result->mAddress = address;
-    result->startIdleTimer();
+    result->startRecurrentTimer();
     asio::ip::tcp::endpoint endpoint(
         asio::ip::address::from_string(address.getIP()), address.getPort());
     socket->next_layer().async_connect(
@@ -85,7 +87,7 @@ TCPPeer::accept(Application& app, shared_ptr<TCPPeer::SocketType> socket)
         CLOG(DEBUG, "Overlay") << "TCPPeer:accept"
                                << "@" << app.getConfig().PEER_PORT;
         result = make_shared<TCPPeer>(app, REMOTE_CALLED_US, socket);
-        result->startIdleTimer();
+        result->startRecurrentTimer();
         result->startRead();
     }
     else
@@ -101,7 +103,7 @@ TCPPeer::accept(Application& app, shared_ptr<TCPPeer::SocketType> socket)
 TCPPeer::~TCPPeer()
 {
     assertThreadIsMain();
-    mIdleTimer.cancel();
+    mRecurringTimer.cancel();
     if (mSocket)
     {
         // Ignore: this indicates an attempt to cancel events
@@ -168,62 +170,64 @@ TCPPeer::shutdown()
         return;
     }
 
-    mIdleTimer.cancel();
+    mRecurringTimer.cancel();
     mShutdownScheduled = true;
     auto self = static_pointer_cast<TCPPeer>(shared_from_this());
 
     // To shutdown, we first queue up our desire to shutdown in the strand,
     // behind any pending read/write calls. We'll let them issue first.
-    self->getApp().postOnMainThread(
-        [self]() {
-            // Gracefully shut down connection: this pushes a FIN packet into
-            // TCP which, if we wanted to be really polite about, we would wait
-            // for an ACK from by doing repeated reads until we get a 0-read.
-            //
-            // But since we _might_ be dropping a hostile or unresponsive
-            // connection, we're going to just post a close() immediately after,
-            // and hope the kernel does something useful as far as putting any
-            // queued last-gasp ERROR_MSG packet on the wire.
-            //
-            // All of this is voluntary. We can also just close(2) here and be
-            // done with it, but we want to give some chance of telling peers
-            // why we're disconnecting them.
-            asio::error_code ec;
-            self->mSocket->next_layer().shutdown(
-                asio::ip::tcp::socket::shutdown_both, ec);
-            if (ec)
-            {
-                CLOG(DEBUG, "Overlay")
-                    << "TCPPeer::drop shutdown socket failed: " << ec.message();
-            }
-            self->getApp().postOnMainThread(
-                [self]() {
-                    // Close fd associated with socket. Socket is already shut
-                    // down, but depending on platform (and apparently whether
-                    // there was unread data when we issued shutdown()) this
-                    // call might push RST onto the wire, or some other action;
-                    // in any case it has to be done to free the OS resources.
-                    //
-                    // It will also, at this point, cancel any pending asio
-                    // read/write handlers, i.e. fire them with an error code
-                    // indicating cancellation.
-                    asio::error_code ec2;
-                    self->mSocket->close(ec2);
-                    if (ec2)
-                    {
-                        CLOG(DEBUG, "Overlay")
-                            << "TCPPeer::drop close socket failed: "
-                            << ec2.message();
-                    }
-                },
-                "TCPPeer: close");
-        },
-        "TCPPeer: shutdown");
+
+    // leave some time before actually calling shutdown
+    mRecurringTimer.expires_from_now(std::chrono::seconds(5));
+    mRecurringTimer.async_wait([self](asio::error_code) {
+        // Gracefully shut down connection: this pushes a FIN packet into
+        // TCP which, if we wanted to be really polite about, we would wait
+        // for an ACK from by doing repeated reads until we get a 0-read.
+        //
+        // But since we _might_ be dropping a hostile or unresponsive
+        // connection, we're going to just post a close() immediately after,
+        // and hope the kernel does something useful as far as putting any
+        // queued last-gasp ERROR_MSG packet on the wire.
+        //
+        // All of this is voluntary. We can also just close(2) here and be
+        // done with it, but we want to give some chance of telling peers
+        // why we're disconnecting them.
+        asio::error_code ec;
+        self->mSocket->next_layer().shutdown(
+            asio::ip::tcp::socket::shutdown_both, ec);
+        if (ec)
+        {
+            CLOG(DEBUG, "Overlay")
+                << "TCPPeer::drop shutdown socket failed: " << ec.message();
+        }
+        self->getApp().postOnMainThread(
+            [self]() {
+                // Close fd associated with socket. Socket is already shut
+                // down, but depending on platform (and apparently whether
+                // there was unread data when we issued shutdown()) this
+                // call might push RST onto the wire, or some other action;
+                // in any case it has to be done to free the OS resources.
+                //
+                // It will also, at this point, cancel any pending asio
+                // read/write handlers, i.e. fire them with an error code
+                // indicating cancellation.
+                asio::error_code ec2;
+                self->mSocket->close(ec2);
+                if (ec2)
+                {
+                    CLOG(DEBUG, "Overlay")
+                        << "TCPPeer::drop close socket failed: "
+                        << ec2.message();
+                }
+            },
+            "TCPPeer: close");
+    });
 }
 
 void
 TCPPeer::messageSender()
 {
+    ZoneScoped;
     assertThreadIsMain();
 
     // if nothing to do, mark progress and return.
@@ -331,6 +335,7 @@ TCPPeer::writeHandler(asio::error_code const& error,
                       std::size_t bytes_transferred,
                       size_t messages_transferred)
 {
+    ZoneScoped;
     assertThreadIsMain();
     mLastWrite = mApp.getClock().now();
 
@@ -422,6 +427,7 @@ TCPPeer::noteFullyReadBody(size_t nbytes)
 void
 TCPPeer::startRead()
 {
+    ZoneScoped;
     assertThreadIsMain();
     if (shouldAbort())
     {
@@ -438,9 +444,7 @@ TCPPeer::startRead()
     // We read large-ish (256KB) buffers of data from TCP which might have quite
     // a few messages in them. We want to digest as many of these
     // _synchronously_ as we can before we issue an async_read against ASIO.
-    YieldTimer yt(mApp.getClock(), mApp.getConfig().MAX_BATCH_READ_PERIOD_MS,
-                  mApp.getConfig().MAX_BATCH_READ_COUNT);
-    while (mSocket->in_avail() >= HDRSZ && yt.shouldKeepGoing())
+    while (mSocket->in_avail() >= HDRSZ)
     {
         asio::error_code ec_hdr, ec_body;
         size_t n = mSocket->read_some(asio::buffer(mIncomingHeader), ec_hdr);
@@ -476,6 +480,10 @@ TCPPeer::startRead()
                 }
                 noteFullyReadBody(length);
                 recvMessage();
+                if (mApp.getClock().shouldYield())
+                {
+                    break;
+                }
             }
         }
         else
@@ -549,7 +557,6 @@ TCPPeer::readHeaderHandler(asio::error_code const& error,
                            std::size_t bytes_transferred)
 {
     assertThreadIsMain();
-
     if (error)
     {
         noteErrorReadHeader(bytes_transferred, error);
@@ -603,19 +610,28 @@ TCPPeer::readBodyHandler(asio::error_code const& error,
 void
 TCPPeer::recvMessage()
 {
+    ZoneScoped;
     assertThreadIsMain();
+
     try
     {
         xdr::xdr_get g(mIncomingBody.data(),
                        mIncomingBody.data() + mIncomingBody.size());
         AuthenticatedMessage am;
         xdr::xdr_argpack_archive(g, am);
+
         Peer::recvMessage(am);
     }
     catch (xdr::xdr_runtime_error& e)
     {
         CLOG(ERROR, "Overlay") << "recvMessage got a corrupt xdr: " << e.what();
         sendErrorAndDrop(ERR_DATA, "received corrupt XDR",
+                         Peer::DropMode::IGNORE_WRITE_QUEUE);
+    }
+    catch (CryptoError const& e)
+    {
+        CLOG(ERROR, "Overlay") << fmt::format("Crypto error: {}", e.what());
+        sendErrorAndDrop(ERR_DATA, "crypto error",
                          Peer::DropMode::IGNORE_WRITE_QUEUE);
     }
 }

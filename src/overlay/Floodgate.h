@@ -59,9 +59,7 @@ class Floodgate
     bool addRecord(StellarMessage const& msg, Peer::pointer fromPeer,
                    Hash& msgID);
 
-    // only flood messages to peers that are at least minOverlayVersion
-    void broadcast(StellarMessage const& msg, bool force,
-                   uint32_t minOverlayVersion);
+    void broadcast(StellarMessage const& msg, bool force);
 
     // returns the list of peers that sent us the item with hash `msgID`
     // NB: `msgID` is the hash of a `StellarMessage`
@@ -72,5 +70,8 @@ class Floodgate
     void forgetRecord(Hash const& msgID);
 
     void shutdown();
+
+    void updateRecord(StellarMessage const& oldMsg,
+                      StellarMessage const& newMsg);
 };
 }

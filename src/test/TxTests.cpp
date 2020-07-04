@@ -16,6 +16,7 @@
 #include "test/test.h"
 #include "transactions/OperationFrame.h"
 #include "transactions/TransactionFrame.h"
+#include "transactions/TransactionSQL.h"
 #include "transactions/TransactionUtils.h"
 #include "util/Logging.h"
 #include "util/XDROperators.h"
@@ -223,8 +224,8 @@ applyCheck(TransactionFramePtr tx, Application& app, bool checkSeqNum)
                 // do not perform the check if there was a failure before
                 // or during the sequence number processing
                 auto header = ltxTx.loadHeader();
-                if (checkSeqNum && header.current().ledgerVersion >= 10 &&
-                    !earlyFailure)
+                auto ledgerVersion = header.current().ledgerVersion;
+                if (checkSeqNum && ledgerVersion >= 10 && !earlyFailure)
                 {
                     REQUIRE(srcAccountAfter.current().data.account().seqNum ==
                             (srcAccountBefore.seqNum + 1));
@@ -232,7 +233,9 @@ applyCheck(TransactionFramePtr tx, Application& app, bool checkSeqNum)
                 // on failure, no other changes should have been made
                 if (!res)
                 {
-                    if (earlyFailure || header.current().ledgerVersion <= 9)
+                    bool noChangeOnEarlyFailure =
+                        earlyFailure && ledgerVersion < 13;
+                    if (noChangeOnEarlyFailure || ledgerVersion <= 9)
                     {
                         // no changes during an early failure
                         REQUIRE(ltxTx.getDelta().entry.empty());
@@ -246,6 +249,21 @@ applyCheck(TransactionFramePtr tx, Application& app, bool checkSeqNum)
                             REQUIRE(current);
                             auto previous = kvp.second.previous;
                             REQUIRE(previous);
+
+                            // From V13, it's possible to remove one-time
+                            // signers on early failures
+                            if (ledgerVersion >= 13 && earlyFailure)
+                            {
+                                auto currAcc = current->data.account();
+                                auto prevAcc = previous->data.account();
+                                REQUIRE(currAcc.signers.size() + 1 ==
+                                        prevAcc.signers.size());
+                                // signers should be the only change so this
+                                // should make the accounts equivalent
+                                currAcc.signers = prevAcc.signers;
+                                currAcc.numSubEntries = prevAcc.numSubEntries;
+                                REQUIRE(currAcc == prevAcc);
+                            }
                         }
                         // could check more here if needed
                     }
@@ -317,7 +335,7 @@ validateTxResults(TransactionFramePtr const& tx, Application& app,
 
 TxSetResultMeta
 closeLedgerOn(Application& app, uint32 ledgerSeq, int day, int month, int year,
-              std::vector<TransactionFramePtr> const& txs)
+              std::vector<TransactionFrameBasePtr> const& txs)
 {
     auto txSet = std::make_shared<TxSetFrame>(
         app.getLedgerManager().getLastClosedLedgerHeader().hash);
@@ -335,10 +353,8 @@ closeLedgerOn(Application& app, uint32 ledgerSeq, int day, int month, int year,
     LedgerCloseData ledgerData(ledgerSeq, txSet, sv);
     app.getLedgerManager().closeLedger(ledgerData);
 
-    auto z1 = TransactionFrame::getTransactionHistoryResults(app.getDatabase(),
-                                                             ledgerSeq);
-    auto z2 =
-        TransactionFrame::getTransactionFeeMeta(app.getDatabase(), ledgerSeq);
+    auto z1 = getTransactionHistoryResults(app.getDatabase(), ledgerSeq);
+    auto z2 = getTransactionFeeMeta(app.getDatabase(), ledgerSeq);
 
     REQUIRE(app.getLedgerManager().getLastClosedLedgerNum() == ledgerSeq);
 
@@ -402,24 +418,64 @@ getAccountSigners(PublicKey const& k, Application& app)
 }
 
 TransactionFramePtr
+transactionFromOperationsV0(Application& app, SecretKey const& from,
+                            SequenceNumber seq,
+                            const std::vector<Operation>& ops, int fee)
+{
+    TransactionEnvelope e(ENVELOPE_TYPE_TX_V0);
+    e.v0().tx.sourceAccountEd25519 = from.getPublicKey().ed25519();
+    e.v0().tx.fee =
+        fee != 0 ? fee
+                 : static_cast<uint32_t>(
+                       (ops.size() * app.getLedgerManager().getLastTxFee()) &
+                       UINT32_MAX);
+    e.v0().tx.seqNum = seq;
+    std::copy(std::begin(ops), std::end(ops),
+              std::back_inserter(e.v0().tx.operations));
+
+    auto res = std::static_pointer_cast<TransactionFrame>(
+        TransactionFrameBase::makeTransactionFromWire(app.getNetworkID(), e));
+    res->addSignature(from);
+    return res;
+}
+
+TransactionFramePtr
+transactionFromOperationsV1(Application& app, SecretKey const& from,
+                            SequenceNumber seq,
+                            const std::vector<Operation>& ops, int fee)
+{
+    TransactionEnvelope e(ENVELOPE_TYPE_TX);
+    e.v1().tx.sourceAccount = toMuxedAccount(from.getPublicKey());
+    e.v1().tx.fee =
+        fee != 0 ? fee
+                 : static_cast<uint32_t>(
+                       (ops.size() * app.getLedgerManager().getLastTxFee()) &
+                       UINT32_MAX);
+    e.v1().tx.seqNum = seq;
+    std::copy(std::begin(ops), std::end(ops),
+              std::back_inserter(e.v1().tx.operations));
+
+    auto res = std::static_pointer_cast<TransactionFrame>(
+        TransactionFrameBase::makeTransactionFromWire(app.getNetworkID(), e));
+    res->addSignature(from);
+    return res;
+}
+
+TransactionFramePtr
 transactionFromOperations(Application& app, SecretKey const& from,
                           SequenceNumber seq, const std::vector<Operation>& ops,
                           int fee)
 {
-    auto e = TransactionEnvelope{};
-    e.tx.sourceAccount = from.getPublicKey();
-    e.tx.fee = fee != 0
-                   ? fee
-                   : static_cast<uint32_t>(
-                         (ops.size() * app.getLedgerManager().getLastTxFee()) &
-                         UINT32_MAX);
-    e.tx.seqNum = seq;
-    std::copy(std::begin(ops), std::end(ops),
-              std::back_inserter(e.tx.operations));
-
-    auto res = TransactionFrame::makeTransactionFromWire(app.getNetworkID(), e);
-    res->addSignature(from);
-    return res;
+    uint32_t ledgerVersion;
+    {
+        LedgerTxn ltx(app.getLedgerTxnRoot());
+        ledgerVersion = ltx.loadHeader().current().ledgerVersion;
+    }
+    if (ledgerVersion < 13)
+    {
+        return transactionFromOperationsV0(app, from, seq, ops, fee);
+    }
+    return transactionFromOperationsV1(app, from, seq, ops, fee);
 }
 
 Operation
@@ -435,7 +491,7 @@ changeTrust(Asset const& asset, int64_t limit)
 }
 
 Operation
-allowTrust(PublicKey const& trustor, Asset const& asset, bool authorize)
+allowTrust(PublicKey const& trustor, Asset const& asset, uint32_t authorize)
 {
     Operation op;
 
@@ -464,7 +520,7 @@ payment(PublicKey const& to, int64_t amount)
     Operation op;
     op.body.type(PAYMENT);
     op.body.paymentOp().amount = amount;
-    op.body.paymentOp().destination = to;
+    op.body.paymentOp().destination = toMuxedAccount(to);
     op.body.paymentOp().asset.type(ASSET_TYPE_NATIVE);
     return op;
 }
@@ -475,7 +531,7 @@ payment(PublicKey const& to, Asset const& asset, int64_t amount)
     Operation op;
     op.body.type(PAYMENT);
     op.body.paymentOp().amount = amount;
-    op.body.paymentOp().destination = to;
+    op.body.paymentOp().destination = toMuxedAccount(to);
     op.body.paymentOp().asset = asset;
     return op;
 }
@@ -534,7 +590,7 @@ pathPayment(PublicKey const& to, Asset const& sendCur, int64_t sendMax,
     ppop.sendMax = sendMax;
     ppop.destAsset = destCur;
     ppop.destAmount = destAmount;
-    ppop.destination = to;
+    ppop.destination = toMuxedAccount(to);
     std::copy(std::begin(path), std::end(path), std::back_inserter(ppop.path));
 
     return op;
@@ -552,7 +608,7 @@ pathPaymentStrictSend(PublicKey const& to, Asset const& sendCur,
     ppop.sendAmount = sendAmount;
     ppop.destAsset = destCur;
     ppop.destMin = destMin;
-    ppop.destination = to;
+    ppop.destination = toMuxedAccount(to);
     std::copy(std::begin(path), std::end(path), std::back_inserter(ppop.path));
 
     return op;
@@ -980,7 +1036,7 @@ accountMerge(PublicKey const& dest)
 {
     Operation op;
     op.body.type(ACCOUNT_MERGE);
-    op.body.destination() = dest;
+    op.body.destination() = toMuxedAccount(dest);
     return op;
 }
 

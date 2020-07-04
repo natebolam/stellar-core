@@ -75,7 +75,7 @@ class FuzzTransactionFrame : public TransactionFrame
         // number, processing the fee, or committing the LedgerTxn
         SignatureChecker signatureChecker{
             ltx.loadHeader().current().ledgerVersion, getContentsHash(),
-            mEnvelope.signatures};
+            mEnvelope.v0().signatures};
         // if any ill-formed Operations, do not attempt transaction application
         auto isInvalidOperationXDR = [&](auto const& op) {
             return !op->checkValid(signatureChecker, ltx, false);
@@ -102,11 +102,11 @@ createFuzzTransactionFrame(PublicKey sourceAccountID,
     // application in the fuzzer, is the exact same, except for the inner
     // operations of course
     auto txEnv = TransactionEnvelope{};
-    txEnv.tx.sourceAccount = sourceAccountID;
-    txEnv.tx.fee = 0;
-    txEnv.tx.seqNum = 1;
+    txEnv.v0().tx.sourceAccountEd25519 = sourceAccountID.ed25519();
+    txEnv.v0().tx.fee = 0;
+    txEnv.v0().tx.seqNum = 1;
     std::copy(std::begin(ops), std::end(ops),
-              std::back_inserter(txEnv.tx.operations));
+              std::back_inserter(txEnv.v0().tx.operations));
 
     std::shared_ptr<FuzzTransactionFrame> res =
         std::make_shared<FuzzTransactionFrame>(networkID, txEnv);
@@ -237,7 +237,8 @@ TransactionFuzzer::xdrSizeLimit()
 void
 TransactionFuzzer::genFuzz(std::string const& filename)
 {
-    XDROutputFileStream out(/*doFsync=*/false);
+    XDROutputFileStream out(mApp->getClock().getIOContext(),
+                            /*doFsync=*/false);
     out.open(filename);
     autocheck::generator<Operation> gen;
     xdr::xvector<Operation> ops;
@@ -326,8 +327,9 @@ OverlayFuzzer::inject(XDRInputFileStream& in)
         auto initiator = loopbackPeerConnection->getInitiator();
         auto acceptor = loopbackPeerConnection->getAcceptor();
 
-        initiator->getApp().getClock().postToCurrentCrank(
-            [initiator, msg]() { initiator->Peer::sendMessage(msg); });
+        initiator->getApp().postOnMainThread(
+            [initiator, msg]() { initiator->Peer::sendMessage(msg); },
+            "OverlayFuzzer");
 
         mSimulation->crankForAtMost(std::chrono::milliseconds{500}, false);
 
@@ -352,7 +354,9 @@ OverlayFuzzer::xdrSizeLimit()
 void
 OverlayFuzzer::genFuzz(std::string const& filename)
 {
-    XDROutputFileStream out(/*doFsync=*/false);
+    VirtualClock clock;
+    XDROutputFileStream out(clock.getIOContext(),
+                            /*doFsync=*/false);
     out.open(filename);
     autocheck::generator<StellarMessage> gen;
     StellarMessage m(gen(FUZZER_INITIAL_CORPUS_MESSAGE_GEN_UPPERBOUND));

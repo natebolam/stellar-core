@@ -8,9 +8,11 @@
 #include "crypto/Hex.h"
 #include "crypto/SHA.h"
 #include "crypto/SignerKey.h"
+#include "crypto/SignerKeyUtils.h"
 #include "database/Database.h"
 #include "database/DatabaseUtils.h"
 #include "herder/TxSetFrame.h"
+#include "invariant/InvariantDoesNotHold.h"
 #include "invariant/InvariantManager.h"
 #include "ledger/LedgerHeaderUtils.h"
 #include "ledger/LedgerTxn.h"
@@ -19,13 +21,17 @@
 #include "main/Application.h"
 #include "transactions/SignatureChecker.h"
 #include "transactions/SignatureUtils.h"
+#include "transactions/TransactionBridge.h"
 #include "transactions/TransactionUtils.h"
 #include "util/Algoritm.h"
 #include "util/Decoder.h"
+#include "util/GlobalChecks.h"
 #include "util/Logging.h"
 #include "util/XDROperators.h"
 #include "util/XDRStream.h"
 #include "xdrpp/marshal.h"
+#include "xdrpp/printer.h"
+#include <Tracy.hpp>
 #include <string>
 
 #include "medida/meter.h"
@@ -38,14 +44,7 @@ namespace stellar
 {
 
 using namespace std;
-
-TransactionFramePtr
-TransactionFrame::makeTransactionFromWire(Hash const& networkID,
-                                          TransactionEnvelope const& msg)
-{
-    TransactionFramePtr res = make_shared<TransactionFrame>(networkID, msg);
-    return res;
-}
+using namespace stellar::txbridge;
 
 TransactionFrame::TransactionFrame(Hash const& networkID,
                                    TransactionEnvelope const& envelope)
@@ -68,8 +67,16 @@ TransactionFrame::getContentsHash() const
 {
     if (isZero(mContentsHash))
     {
-        mContentsHash = sha256(
-            xdr::xdr_to_opaque(mNetworkID, ENVELOPE_TYPE_TX, mEnvelope.tx));
+        if (mEnvelope.type() == ENVELOPE_TYPE_TX_V0)
+        {
+            mContentsHash = sha256(xdr::xdr_to_opaque(
+                mNetworkID, ENVELOPE_TYPE_TX, 0, mEnvelope.v0().tx));
+        }
+        else
+        {
+            mContentsHash = sha256(xdr::xdr_to_opaque(
+                mNetworkID, ENVELOPE_TYPE_TX, mEnvelope.v1().tx));
+        }
     }
     return (mContentsHash);
 }
@@ -80,15 +87,6 @@ TransactionFrame::clearCached()
     Hash zero;
     mContentsHash = zero;
     mFullHash = zero;
-}
-
-TransactionResultPair
-TransactionFrame::getResultPair() const
-{
-    TransactionResultPair trp;
-    trp.transactionHash = getContentsHash();
-    trp.result = mResult;
-    return trp;
 }
 
 TransactionEnvelope const&
@@ -103,10 +101,44 @@ TransactionFrame::getEnvelope()
     return mEnvelope;
 }
 
+SequenceNumber
+TransactionFrame::getSeqNum() const
+{
+    return mEnvelope.type() == ENVELOPE_TYPE_TX_V0 ? mEnvelope.v0().tx.seqNum
+                                                   : mEnvelope.v1().tx.seqNum;
+}
+
+AccountID
+TransactionFrame::getFeeSourceID() const
+{
+    return getSourceID();
+}
+
+AccountID
+TransactionFrame::getSourceID() const
+{
+    if (mEnvelope.type() == ENVELOPE_TYPE_TX_V0)
+    {
+        AccountID res;
+        res.ed25519() = mEnvelope.v0().tx.sourceAccountEd25519;
+        return res;
+    }
+    return toAccountID(mEnvelope.v1().tx.sourceAccount);
+}
+
 uint32_t
+TransactionFrame::getNumOperations() const
+{
+    return mEnvelope.type() == ENVELOPE_TYPE_TX_V0
+               ? static_cast<uint32_t>(mEnvelope.v0().tx.operations.size())
+               : static_cast<uint32_t>(mEnvelope.v1().tx.operations.size());
+}
+
+int64_t
 TransactionFrame::getFeeBid() const
 {
-    return mEnvelope.tx.fee;
+    return mEnvelope.type() == ENVELOPE_TYPE_TX_V0 ? mEnvelope.v0().tx.fee
+                                                   : mEnvelope.v1().tx.fee;
 }
 
 int64_t
@@ -142,7 +174,7 @@ TransactionFrame::addSignature(SecretKey const& secretKey)
 void
 TransactionFrame::addSignature(DecoratedSignature const& signature)
 {
-    mEnvelope.signatures.push_back(signature);
+    getSignatures(mEnvelope).push_back(signature);
 }
 
 bool
@@ -150,6 +182,7 @@ TransactionFrame::checkSignature(SignatureChecker& signatureChecker,
                                  LedgerTxnEntry const& account,
                                  int32_t neededWeight)
 {
+    ZoneScoped;
     auto& acc = account.current().data.account();
     std::vector<Signer> signers;
     if (acc.thresholds[0])
@@ -167,6 +200,7 @@ bool
 TransactionFrame::checkSignatureNoAccount(SignatureChecker& signatureChecker,
                                           AccountID const& accountID)
 {
+    ZoneScoped;
     std::vector<Signer> signers;
     auto signerKey = KeyUtils::convertKey<SignerKey>(accountID);
     signers.push_back(Signer(signerKey, 1));
@@ -177,6 +211,7 @@ LedgerTxnEntry
 TransactionFrame::loadSourceAccount(AbstractLedgerTxn& ltx,
                                     LedgerTxnHeader const& header)
 {
+    ZoneScoped;
     auto res = loadAccount(ltx, header, getSourceID());
     if (header.current().ledgerVersion < 8)
     {
@@ -199,6 +234,7 @@ TransactionFrame::loadAccount(AbstractLedgerTxn& ltx,
                               LedgerTxnHeader const& header,
                               AccountID const& accountID)
 {
+    ZoneScoped;
     if (header.current().ledgerVersion < 8 && mCachedAccount &&
         mCachedAccount->data.account().accountID == accountID)
     {
@@ -233,17 +269,21 @@ TransactionFrame::makeOperation(Operation const& op, OperationResult& res,
 void
 TransactionFrame::resetResults(LedgerHeader const& header, int64_t baseFee)
 {
+    auto& ops = mEnvelope.type() == ENVELOPE_TYPE_TX_V0
+                    ? mEnvelope.v0().tx.operations
+                    : mEnvelope.v1().tx.operations;
+
     // pre-allocates the results for all operations
     getResult().result.code(txSUCCESS);
-    getResult().result.results().resize(getNumOperations());
+    getResult().result.results().resize(static_cast<uint32_t>(ops.size()));
 
     mOperations.clear();
 
     // bind operations to the results
-    for (size_t i = 0; i < getNumOperations(); i++)
+    for (size_t i = 0; i < ops.size(); i++)
     {
-        mOperations.push_back(makeOperation(
-            mEnvelope.tx.operations[i], getResult().result.results()[i], i));
+        mOperations.push_back(
+            makeOperation(ops[i], getResult().result.results()[i], i));
     }
 
     // feeCharged is updated accordingly to represent the cost of the
@@ -254,10 +294,13 @@ TransactionFrame::resetResults(LedgerHeader const& header, int64_t baseFee)
 bool
 TransactionFrame::isTooEarly(LedgerTxnHeader const& header) const
 {
-    if (mEnvelope.tx.timeBounds)
+    auto const& tb = mEnvelope.type() == ENVELOPE_TYPE_TX_V0
+                         ? mEnvelope.v0().tx.timeBounds
+                         : mEnvelope.v1().tx.timeBounds;
+    if (tb)
     {
         uint64 closeTime = header.current().scpValue.closeTime;
-        return mEnvelope.tx.timeBounds->minTime > closeTime;
+        return tb->minTime > closeTime;
     }
     return false;
 }
@@ -265,20 +308,32 @@ TransactionFrame::isTooEarly(LedgerTxnHeader const& header) const
 bool
 TransactionFrame::isTooLate(LedgerTxnHeader const& header) const
 {
-    if (mEnvelope.tx.timeBounds)
+    auto const& tb = mEnvelope.type() == ENVELOPE_TYPE_TX_V0
+                         ? mEnvelope.v0().tx.timeBounds
+                         : mEnvelope.v1().tx.timeBounds;
+    if (tb)
     {
         uint64 closeTime = header.current().scpValue.closeTime;
-        return mEnvelope.tx.timeBounds->maxTime &&
-               (mEnvelope.tx.timeBounds->maxTime < closeTime);
+        return tb->maxTime && (tb->maxTime < closeTime);
     }
     return false;
 }
 
 bool
-TransactionFrame::commonValidPreSeqNum(AbstractLedgerTxn& ltx, bool forApply)
+TransactionFrame::commonValidPreSeqNum(AbstractLedgerTxn& ltx, bool chargeFee)
 {
+    ZoneScoped;
     // this function does validations that are independent of the account state
     //    (stay true regardless of other side effects)
+    auto header = ltx.loadHeader();
+    uint32_t ledgerVersion = header.current().ledgerVersion;
+    if ((ledgerVersion < 13 && (mEnvelope.type() == ENVELOPE_TYPE_TX ||
+                                hasMuxedAccount(mEnvelope))) ||
+        (ledgerVersion >= 13 && mEnvelope.type() == ENVELOPE_TYPE_TX_V0))
+    {
+        getResult().result.code(txNOT_SUPPORTED);
+        return false;
+    }
 
     if (getNumOperations() == 0)
     {
@@ -286,7 +341,6 @@ TransactionFrame::commonValidPreSeqNum(AbstractLedgerTxn& ltx, bool forApply)
         return false;
     }
 
-    auto header = ltx.loadHeader();
     if (isTooEarly(header))
     {
         getResult().result.code(txTOO_EARLY);
@@ -298,7 +352,12 @@ TransactionFrame::commonValidPreSeqNum(AbstractLedgerTxn& ltx, bool forApply)
         return false;
     }
 
-    if (mEnvelope.tx.fee < getMinFee(header.current()))
+    if (chargeFee && getFeeBid() < getMinFee(header.current()))
+    {
+        getResult().result.code(txINSUFFICIENT_FEE);
+        return false;
+    }
+    if (!chargeFee && getFeeBid() < 0)
     {
         getResult().result.code(txINSUFFICIENT_FEE);
         return false;
@@ -316,30 +375,48 @@ TransactionFrame::commonValidPreSeqNum(AbstractLedgerTxn& ltx, bool forApply)
 void
 TransactionFrame::processSeqNum(AbstractLedgerTxn& ltx)
 {
+    ZoneScoped;
     auto header = ltx.loadHeader();
     if (header.current().ledgerVersion >= 10)
     {
         auto sourceAccount = loadSourceAccount(ltx, header);
-        if (sourceAccount.current().data.account().seqNum > mEnvelope.tx.seqNum)
+        if (sourceAccount.current().data.account().seqNum > getSeqNum())
         {
             throw std::runtime_error("unexpected sequence number");
         }
-        sourceAccount.current().data.account().seqNum = mEnvelope.tx.seqNum;
+        sourceAccount.current().data.account().seqNum = getSeqNum();
     }
 }
 
 bool
-TransactionFrame::processSignatures(SignatureChecker& signatureChecker,
+TransactionFrame::processSignatures(ValidationType cv,
+                                    SignatureChecker& signatureChecker,
                                     AbstractLedgerTxn& ltxOuter)
 {
-    auto allOpsValid = true;
+    ZoneScoped;
+    bool maybeValid = (cv == ValidationType::kMaybeValid);
+    uint32_t ledgerVersion = ltxOuter.loadHeader().current().ledgerVersion;
+    if (ledgerVersion < 10)
     {
-        LedgerTxn ltx(ltxOuter);
-        if (ltx.loadHeader().current().ledgerVersion < 10)
-        {
-            return true;
-        }
+        return maybeValid;
+    }
 
+    // check if we need to fast fail and use the original error code
+    if (ledgerVersion >= 13 && !maybeValid)
+    {
+        removeOneTimeSignerFromAllSourceAccounts(ltxOuter);
+        return false;
+    }
+    // older versions of the protocol only fast fail in a subset of cases
+    if (ledgerVersion < 13 && cv < ValidationType::kInvalidPostAuth)
+    {
+        return false;
+    }
+
+    bool allOpsValid = true;
+    {
+        // scope here to avoid potential side effects of loading source accounts
+        LedgerTxn ltx(ltxOuter);
         for (auto& op : mOperations)
         {
             if (!op->checkSignature(signatureChecker, ltx, false))
@@ -349,7 +426,7 @@ TransactionFrame::processSignatures(SignatureChecker& signatureChecker,
         }
     }
 
-    removeUsedOneTimeSignerKeys(signatureChecker, ltxOuter);
+    removeOneTimeSignerFromAllSourceAccounts(ltxOuter);
 
     if (!allOpsValid)
     {
@@ -363,24 +440,26 @@ TransactionFrame::processSignatures(SignatureChecker& signatureChecker,
         return false;
     }
 
-    return true;
+    return maybeValid;
 }
 
 bool
 TransactionFrame::isBadSeq(int64_t seqNum) const
 {
-    return seqNum == INT64_MAX || seqNum + 1 != mEnvelope.tx.seqNum;
+    return seqNum == INT64_MAX || seqNum + 1 != getSeqNum();
 }
 
 TransactionFrame::ValidationType
 TransactionFrame::commonValid(SignatureChecker& signatureChecker,
                               AbstractLedgerTxn& ltxOuter,
-                              SequenceNumber current, bool applying)
+                              SequenceNumber current, bool applying,
+                              bool chargeFee)
 {
+    ZoneScoped;
     LedgerTxn ltx(ltxOuter);
     ValidationType res = ValidationType::kInvalid;
 
-    if (!commonValidPreSeqNum(ltx, applying))
+    if (!commonValidPreSeqNum(ltx, chargeFee))
     {
         return res;
     }
@@ -420,21 +499,22 @@ TransactionFrame::commonValid(SignatureChecker& signatureChecker,
     // will still have minimum balance
     uint32_t feeToPay = (applying && (header.current().ledgerVersion > 8))
                             ? 0
-                            : mEnvelope.tx.fee;
+                            : static_cast<uint32_t>(getFeeBid());
     // don't let the account go below the reserve after accounting for
     // liabilities
-    if (getAvailableBalance(header, sourceAccount) < feeToPay)
+    if (chargeFee && getAvailableBalance(header, sourceAccount) < feeToPay)
     {
         getResult().result.code(txINSUFFICIENT_BALANCE);
         return res;
     }
 
-    return ValidationType::kFullyValid;
+    return ValidationType::kMaybeValid;
 }
 
 void
 TransactionFrame::processFeeSeqNum(AbstractLedgerTxn& ltx, int64_t baseFee)
 {
+    ZoneScoped;
     mCachedAccount.reset();
 
     auto header = ltx.loadHeader();
@@ -460,84 +540,84 @@ TransactionFrame::processFeeSeqNum(AbstractLedgerTxn& ltx, int64_t baseFee)
     // in v10 we update sequence numbers during apply
     if (header.current().ledgerVersion <= 9)
     {
-        if (acc.seqNum + 1 != mEnvelope.tx.seqNum)
+        if (acc.seqNum + 1 != getSeqNum())
         {
             // this should not happen as the transaction set is sanitized for
             // sequence numbers
             throw std::runtime_error("Unexpected account state");
         }
-        acc.seqNum = mEnvelope.tx.seqNum;
+        acc.seqNum = getSeqNum();
     }
 }
 
 void
-TransactionFrame::removeUsedOneTimeSignerKeys(
-    SignatureChecker& signatureChecker, AbstractLedgerTxn& ltx)
+TransactionFrame::removeOneTimeSignerFromAllSourceAccounts(
+    AbstractLedgerTxn& ltx) const
 {
-    for (auto const& usedAccount : signatureChecker.usedOneTimeSignerKeys())
+    auto ledgerVersion = ltx.loadHeader().current().ledgerVersion;
+    if (ledgerVersion == 7)
     {
-        removeUsedOneTimeSignerKeys(ltx, usedAccount.first, usedAccount.second);
+        return;
+    }
+
+    std::unordered_set<AccountID> accounts{getSourceID()};
+    for (auto& op : mOperations)
+    {
+        accounts.emplace(op->getSourceID());
+    }
+
+    auto signerKey = SignerKeyUtils::preAuthTxKey(*this);
+    for (auto const& accountID : accounts)
+    {
+        removeAccountSigner(ltx, accountID, signerKey);
     }
 }
 
 void
-TransactionFrame::removeUsedOneTimeSignerKeys(
-    AbstractLedgerTxn& ltx, AccountID const& accountID,
-    std::set<SignerKey> const& keys) const
+TransactionFrame::removeAccountSigner(AbstractLedgerTxn& ltxOuter,
+                                      AccountID const& accountID,
+                                      SignerKey const& signerKey) const
 {
+    ZoneScoped;
+    LedgerTxn ltx(ltxOuter);
+
     auto account = stellar::loadAccount(ltx, accountID);
     if (!account)
     {
         return; // probably account was removed due to merge operation
     }
 
-    auto header = ltx.loadHeader();
-    auto changed = std::accumulate(
-        std::begin(keys), std::end(keys), false,
-        [&](bool r, const SignerKey& signerKey) {
-            return r || removeAccountSigner(header, account, signerKey);
-        });
-
-    if (changed)
-    {
-        normalizeSigners(account);
-    }
-}
-
-bool
-TransactionFrame::removeAccountSigner(LedgerTxnHeader const& header,
-                                      LedgerTxnEntry& account,
-                                      SignerKey const& signerKey) const
-{
-    auto& acc = account.current().data.account();
+    auto& signers = account.current().data.account().signers;
     auto it = std::find_if(
-        std::begin(acc.signers), std::end(acc.signers),
+        std::begin(signers), std::end(signers),
         [&signerKey](Signer const& signer) { return signer.key == signerKey; });
-    if (it != std::end(acc.signers))
+
+    if (it != std::end(signers))
     {
+        auto header = ltx.loadHeader();
         auto removed = stellar::addNumEntries(header, account, -1);
         assert(removed == AddSubentryResult::SUCCESS);
-        acc.signers.erase(it);
-        return true;
+        signers.erase(it);
+        ltx.commit();
     }
-
-    return false;
 }
 
 bool
 TransactionFrame::checkValid(AbstractLedgerTxn& ltxOuter,
-                             SequenceNumber current)
+                             SequenceNumber current, bool chargeFee)
 {
+    ZoneScoped;
     mCachedAccount.reset();
 
     LedgerTxn ltx(ltxOuter);
-    auto minBaseFee = ltx.loadHeader().current().baseFee;
+    int64_t minBaseFee = chargeFee ? ltx.loadHeader().current().baseFee : 0;
     resetResults(ltx.loadHeader().current(), minBaseFee);
 
     SignatureChecker signatureChecker{ltx.loadHeader().current().ledgerVersion,
-                                      getContentsHash(), mEnvelope.signatures};
-    bool res = commonValid(signatureChecker, ltx, current, false) ==
-               ValidationType::kFullyValid;
+                                      getContentsHash(),
+                                      getSignatures(mEnvelope)};
+    bool res = commonValid(signatureChecker, ltx, current, false, chargeFee) ==
+               ValidationType::kMaybeValid;
     if (res)
     {
         for (auto& op : mOperations)
@@ -561,26 +641,41 @@ TransactionFrame::checkValid(AbstractLedgerTxn& ltxOuter,
     return res;
 }
 
+bool
+TransactionFrame::checkValid(AbstractLedgerTxn& ltxOuter,
+                             SequenceNumber current)
+{
+    return checkValid(ltxOuter, current, true);
+}
+
+void
+TransactionFrame::insertKeysForFeeProcessing(
+    std::unordered_set<LedgerKey>& keys) const
+{
+    keys.emplace(accountKey(getSourceID()));
+}
+
+void
+TransactionFrame::insertKeysForTxApply(
+    std::unordered_set<LedgerKey>& keys) const
+{
+    for (auto const& op : mOperations)
+    {
+        if (!(getSourceID() == op->getSourceID()))
+        {
+            keys.emplace(accountKey(op->getSourceID()));
+        }
+        op->insertLedgerKeysToPrefetch(keys);
+    }
+}
+
 void
 TransactionFrame::markResultFailed()
 {
-    // changing "code" causes the xdr struct to be deleted/re-created
-    // As we want to preserve the results, we save them inside a temp object
-    // Also, note that because we're using move operators
-    // mOperations are still valid (they have pointers to the individual
-    // results elements)
-    xdr::xvector<OperationResult> t(std::move(getResult().result.results()));
+    // Changing "code" normally causes the XDR structure to be destructed, then
+    // a different XDR structure is constructed. However, txFAILED and txSUCCESS
+    // have the same underlying field number so this does not occur.
     getResult().result.code(txFAILED);
-    getResult().result.results() = std::move(t);
-
-    // sanity check in case some implementations decide
-    // to not implement std::move properly
-    auto const& allResults = getResult().result.results();
-    assert(allResults.size() == getNumOperations());
-    for (size_t i = 0; i < getNumOperations(); i++)
-    {
-        assert(&mOperations[i]->getResult() == &allResults[i]);
-    }
 }
 
 bool
@@ -595,102 +690,169 @@ TransactionFrame::applyOperations(SignatureChecker& signatureChecker,
                                   Application& app, AbstractLedgerTxn& ltx,
                                   TransactionMeta& outerMeta)
 {
-    bool success = true;
-
-    TransactionMeta newMeta(2);
-    auto& operationsMeta = newMeta.v2().operations;
-    operationsMeta.reserve(getNumOperations());
-
-    // shield outer scope of any side effects with LedgerTxn
-    LedgerTxn ltxTx(ltx);
-    auto& opTimer = app.getMetrics().NewTimer({"ledger", "operation", "apply"});
-    for (auto& op : mOperations)
+    ZoneScoped;
+    try
     {
-        auto time = opTimer.TimeScope();
-        LedgerTxn ltxOp(ltxTx);
-        bool txRes = op->apply(signatureChecker, ltxOp);
+        bool success = true;
 
-        if (!txRes)
-        {
-            success = false;
-        }
-        if (success)
-        {
-            app.getInvariantManager().checkOnOperationApply(
-                op->getOperation(), op->getResult(), ltxOp.getDelta());
-        }
+        TransactionMeta newMeta(2);
+        newMeta.v2().operations.reserve(getNumOperations());
 
-        operationsMeta.emplace_back(ltxOp.getChanges());
-        ltxOp.commit();
-    }
-
-    if (success)
-    {
-        if (ltxTx.loadHeader().current().ledgerVersion < 10)
+        // shield outer scope of any side effects with LedgerTxn
+        LedgerTxn ltxTx(ltx);
+        auto& opTimer =
+            app.getMetrics().NewTimer({"ledger", "operation", "apply"});
+        for (auto& op : mOperations)
         {
-            if (!signatureChecker.checkAllSignaturesUsed())
+            auto time = opTimer.TimeScope();
+            LedgerTxn ltxOp(ltxTx);
+            bool txRes = op->apply(signatureChecker, ltxOp);
+
+            if (!txRes)
             {
-                getResult().result.code(txBAD_AUTH_EXTRA);
-                // this should never happen: malformed transaction should
-                // not be accepted by nodes
-                return false;
+                success = false;
+            }
+            if (success)
+            {
+                app.getInvariantManager().checkOnOperationApply(
+                    op->getOperation(), op->getResult(), ltxOp.getDelta());
             }
 
-            // if an error occurred, it is responsibility of account's owner
-            // to remove that signer
-            LedgerTxn ltxAfter(ltxTx);
-            removeUsedOneTimeSignerKeys(signatureChecker, ltxAfter);
-            newMeta.v2().txChangesAfter = ltxAfter.getChanges();
-            ltxAfter.commit();
+            newMeta.v2().operations.emplace_back(ltxOp.getChanges());
+            ltxOp.commit();
         }
 
-        ltxTx.commit();
-        // commit -> propagate the meta to the outer scope
-        auto& omOperations = outerMeta.v() == 1 ? outerMeta.v1().operations
-                                                : outerMeta.v2().operations;
-        std::swap(omOperations, operationsMeta);
-        if (outerMeta.v() == 2)
+        if (success)
         {
+            if (ltxTx.loadHeader().current().ledgerVersion < 10)
+            {
+                if (!signatureChecker.checkAllSignaturesUsed())
+                {
+                    getResult().result.code(txBAD_AUTH_EXTRA);
+                    // this should never happen: malformed transaction should
+                    // not be accepted by nodes
+                    return false;
+                }
+
+                // if an error occurred, it is responsibility of account's owner
+                // to remove that signer
+                LedgerTxn ltxAfter(ltxTx);
+                removeOneTimeSignerFromAllSourceAccounts(ltxAfter);
+                newMeta.v2().txChangesAfter = ltxAfter.getChanges();
+                ltxAfter.commit();
+            }
+
+            ltxTx.commit();
+            // commit -> propagate the meta to the outer scope
+            std::swap(outerMeta.v2().operations, newMeta.v2().operations);
             std::swap(outerMeta.v2().txChangesAfter,
                       newMeta.v2().txChangesAfter);
         }
+        else
+        {
+            markResultFailed();
+        }
+        return success;
     }
-    else
+    catch (InvariantDoesNotHold&)
     {
-        markResultFailed();
+        printErrorAndAbort("Invariant failure while applying operations");
     }
-    return success;
+    catch (std::bad_alloc& e)
+    {
+        printErrorAndAbort("Exception while applying operations: ", e.what());
+    }
+    catch (std::exception& e)
+    {
+        CLOG(ERROR, "Tx") << "Exception while applying operations (txHash= "
+                          << xdr::xdr_to_string(getFullHash())
+                          << "): " << e.what();
+    }
+    catch (...)
+    {
+        CLOG(ERROR, "Tx")
+            << "Unknown exception while applying operations (txHash= "
+            << xdr::xdr_to_string(getFullHash()) << ")";
+    }
+
+    // This is only reachable if an exception is thrown
+    getResult().result.code(txINTERNAL_ERROR);
+
+    auto& internalErrorCounter = app.getMetrics().NewCounter(
+        {"ledger", "transaction", "internal-error"});
+    internalErrorCounter.inc();
+
+    // operations and txChangesAfter should already be empty at this point
+    outerMeta.v2().operations.clear();
+    outerMeta.v2().txChangesAfter.clear();
+    return false;
+}
+
+bool
+TransactionFrame::apply(Application& app, AbstractLedgerTxn& ltx,
+                        TransactionMeta& meta, bool chargeFee)
+{
+    ZoneScoped;
+    try
+    {
+        mCachedAccount.reset();
+        SignatureChecker signatureChecker{
+            ltx.loadHeader().current().ledgerVersion, getContentsHash(),
+            getSignatures(mEnvelope)};
+
+        LedgerTxn ltxTx(ltx);
+        // when applying, a failure during tx validation means that
+        // we'll skip trying to apply operations but we'll still
+        // process the sequence number if needed
+        auto cv = commonValid(signatureChecker, ltxTx, 0, true, chargeFee);
+        if (cv >= ValidationType::kInvalidUpdateSeqNum)
+        {
+            processSeqNum(ltxTx);
+        }
+
+        bool signaturesValid = processSignatures(cv, signatureChecker, ltxTx);
+
+        auto changes = ltxTx.getChanges();
+        std::move(changes.begin(), changes.end(),
+                  std::back_inserter(meta.v2().txChangesBefore));
+        ltxTx.commit();
+
+        bool valid = signaturesValid && cv == ValidationType::kMaybeValid;
+        try
+        {
+            // This should only throw if the logging during exception handling
+            // for applyOperations throws. In that case, we may not have the
+            // correct TransactionResult so we must crash.
+            return valid && applyOperations(signatureChecker, app, ltx, meta);
+        }
+        catch (std::exception& e)
+        {
+            printErrorAndAbort("Exception while applying operations: ",
+                               e.what());
+        }
+        catch (...)
+        {
+            printErrorAndAbort("Unknown exception while applying operations");
+        }
+    }
+    catch (std::exception& e)
+    {
+        printErrorAndAbort("Exception after processing fees but before "
+                           "processing sequence number: ",
+                           e.what());
+    }
+    catch (...)
+    {
+        printErrorAndAbort("Unknown exception after processing fees but before "
+                           "processing sequence number");
+    }
 }
 
 bool
 TransactionFrame::apply(Application& app, AbstractLedgerTxn& ltx,
                         TransactionMeta& meta)
 {
-    mCachedAccount.reset();
-    SignatureChecker signatureChecker{ltx.loadHeader().current().ledgerVersion,
-                                      getContentsHash(), mEnvelope.signatures};
-
-    bool valid = false;
-    {
-        LedgerTxn ltxTx(ltx);
-        // when applying, a failure during tx validation means that
-        // we'll skip trying to apply operations but we'll still
-        // process the sequence number if needed
-        auto cv = commonValid(signatureChecker, ltxTx, 0, true);
-        if (cv >= ValidationType::kInvalidUpdateSeqNum)
-        {
-            processSeqNum(ltxTx);
-        }
-        auto signaturesValid = cv >= (ValidationType::kInvalidPostAuth) &&
-                               processSignatures(signatureChecker, ltxTx);
-
-        auto& txChanges =
-            meta.v() == 1 ? meta.v1().txChanges : meta.v2().txChangesBefore;
-        txChanges = ltxTx.getChanges();
-        ltxTx.commit();
-        valid = signaturesValid && (cv == ValidationType::kFullyValid);
-    }
-    return valid && applyOperations(signatureChecker, app, ltx, meta);
+    return apply(app, ltx, meta, true);
 }
 
 StellarMessage
@@ -700,283 +862,5 @@ TransactionFrame::toStellarMessage() const
     msg.type(TRANSACTION);
     msg.transaction() = mEnvelope;
     return msg;
-}
-
-void
-TransactionFrame::storeTransaction(Database& db, uint32_t ledgerSeq,
-                                   TransactionMeta const& tm, int txindex,
-                                   TransactionResultSet const& resultSet) const
-{
-    auto txBytes(xdr::xdr_to_opaque(mEnvelope));
-    auto txResultBytes(xdr::xdr_to_opaque(resultSet.results.back()));
-
-    std::string txBody;
-    txBody = decoder::encode_b64(txBytes);
-
-    std::string txResult;
-    txResult = decoder::encode_b64(txResultBytes);
-
-    xdr::opaque_vec<> txMeta(xdr::xdr_to_opaque(tm));
-
-    std::string meta;
-    meta = decoder::encode_b64(txMeta);
-
-    string txIDString(binToHex(getContentsHash()));
-
-    auto prep = db.getPreparedStatement(
-        "INSERT INTO txhistory "
-        "( txid, ledgerseq, txindex,  txbody, txresult, txmeta) VALUES "
-        "(:id,  :seq,      :txindex, :txb,   :txres,   :meta)");
-
-    auto& st = prep.statement();
-    st.exchange(soci::use(txIDString));
-    st.exchange(soci::use(ledgerSeq));
-    st.exchange(soci::use(txindex));
-    st.exchange(soci::use(txBody));
-    st.exchange(soci::use(txResult));
-    st.exchange(soci::use(meta));
-    st.define_and_bind();
-    {
-        auto timer = db.getInsertTimer("txhistory");
-        st.execute(true);
-    }
-
-    if (st.get_affected_rows() != 1)
-    {
-        throw std::runtime_error("Could not update data in SQL");
-    }
-}
-
-void
-TransactionFrame::storeTransactionFee(Database& db, uint32_t ledgerSeq,
-                                      LedgerEntryChanges const& changes,
-                                      int txindex) const
-{
-    xdr::opaque_vec<> txChanges(xdr::xdr_to_opaque(changes));
-
-    std::string txChanges64;
-    txChanges64 = decoder::encode_b64(txChanges);
-
-    string txIDString(binToHex(getContentsHash()));
-
-    auto prep = db.getPreparedStatement(
-        "INSERT INTO txfeehistory "
-        "( txid, ledgerseq, txindex,  txchanges) VALUES "
-        "(:id,  :seq,      :txindex, :txchanges)");
-
-    auto& st = prep.statement();
-    st.exchange(soci::use(txIDString));
-    st.exchange(soci::use(ledgerSeq));
-    st.exchange(soci::use(txindex));
-    st.exchange(soci::use(txChanges64));
-    st.define_and_bind();
-    {
-        auto timer = db.getInsertTimer("txfeehistory");
-        st.execute(true);
-    }
-
-    if (st.get_affected_rows() != 1)
-    {
-        throw std::runtime_error("Could not update data in SQL");
-    }
-}
-
-static void
-saveTransactionHelper(Database& db, soci::session& sess, uint32 ledgerSeq,
-                      TxSetFrame& txSet, TransactionHistoryResultEntry& results,
-                      XDROutputFileStream& txOut,
-                      XDROutputFileStream& txResultOut)
-{
-    // prepare the txset for saving
-    auto lh = LedgerHeaderUtils::loadBySequence(db, sess, ledgerSeq);
-    if (!lh)
-    {
-        throw std::runtime_error("Could not find ledger");
-    }
-    txSet.previousLedgerHash() = lh->previousLedgerHash;
-    txSet.sortForHash();
-    TransactionHistoryEntry hist;
-    hist.ledgerSeq = ledgerSeq;
-    txSet.toXDR(hist.txSet);
-    txOut.writeOne(hist);
-
-    txResultOut.writeOne(results);
-}
-
-TransactionResultSet
-TransactionFrame::getTransactionHistoryResults(Database& db, uint32 ledgerSeq)
-{
-    TransactionResultSet res;
-    std::string txresult64;
-    auto prep =
-        db.getPreparedStatement("SELECT txresult FROM txhistory "
-                                "WHERE ledgerseq = :lseq ORDER BY txindex ASC");
-    auto& st = prep.statement();
-
-    st.exchange(soci::use(ledgerSeq));
-    st.exchange(soci::into(txresult64));
-    st.define_and_bind();
-    st.execute(true);
-    while (st.got_data())
-    {
-        std::vector<uint8_t> result;
-        decoder::decode_b64(txresult64, result);
-
-        res.results.emplace_back();
-        TransactionResultPair& p = res.results.back();
-
-        xdr::xdr_get g(&result.front(), &result.back() + 1);
-        xdr_argpack_archive(g, p);
-
-        st.fetch();
-    }
-    return res;
-}
-
-std::vector<LedgerEntryChanges>
-TransactionFrame::getTransactionFeeMeta(Database& db, uint32 ledgerSeq)
-{
-    std::vector<LedgerEntryChanges> res;
-    std::string changes64;
-    auto prep =
-        db.getPreparedStatement("SELECT txchanges FROM txfeehistory "
-                                "WHERE ledgerseq = :lseq ORDER BY txindex ASC");
-    auto& st = prep.statement();
-
-    st.exchange(soci::into(changes64));
-    st.exchange(soci::use(ledgerSeq));
-    st.define_and_bind();
-    st.execute(true);
-    while (st.got_data())
-    {
-        std::vector<uint8_t> changesRaw;
-        decoder::decode_b64(changes64, changesRaw);
-
-        xdr::xdr_get g1(&changesRaw.front(), &changesRaw.back() + 1);
-        res.emplace_back();
-        xdr_argpack_archive(g1, res.back());
-
-        st.fetch();
-    }
-    return res;
-}
-
-size_t
-TransactionFrame::copyTransactionsToStream(Hash const& networkID, Database& db,
-                                           soci::session& sess,
-                                           uint32_t ledgerSeq,
-                                           uint32_t ledgerCount,
-                                           XDROutputFileStream& txOut,
-                                           XDROutputFileStream& txResultOut)
-{
-    auto timer = db.getSelectTimer("txhistory");
-    std::string txBody, txResult, txMeta;
-    uint32_t begin = ledgerSeq, end = ledgerSeq + ledgerCount;
-    size_t n = 0;
-
-    TransactionEnvelope tx;
-    uint32_t curLedgerSeq;
-
-    assert(begin <= end);
-    soci::statement st =
-        (sess.prepare << "SELECT ledgerseq, txbody, txresult FROM txhistory "
-                         "WHERE ledgerseq >= :begin AND ledgerseq < :end ORDER "
-                         "BY ledgerseq ASC, txindex ASC",
-         soci::into(curLedgerSeq), soci::into(txBody), soci::into(txResult),
-         soci::use(begin), soci::use(end));
-
-    Hash h;
-    TxSetFrame txSet(h); // we're setting the hash later
-    TransactionHistoryResultEntry results;
-
-    st.execute(true);
-
-    uint32_t lastLedgerSeq = curLedgerSeq;
-    results.ledgerSeq = curLedgerSeq;
-
-    while (st.got_data())
-    {
-        if (curLedgerSeq != lastLedgerSeq)
-        {
-            saveTransactionHelper(db, sess, lastLedgerSeq, txSet, results,
-                                  txOut, txResultOut);
-            // reset state
-            txSet.mTransactions.clear();
-            results.ledgerSeq = curLedgerSeq;
-            results.txResultSet.results.clear();
-            lastLedgerSeq = curLedgerSeq;
-        }
-
-        std::vector<uint8_t> body;
-        decoder::decode_b64(txBody, body);
-
-        std::vector<uint8_t> result;
-        decoder::decode_b64(txResult, result);
-
-        xdr::xdr_get g1(&body.front(), &body.back() + 1);
-        xdr_argpack_archive(g1, tx);
-
-        TransactionFramePtr txFrame =
-            make_shared<TransactionFrame>(networkID, tx);
-        txSet.add(txFrame);
-
-        xdr::xdr_get g2(&result.front(), &result.back() + 1);
-        results.txResultSet.results.emplace_back();
-
-        TransactionResultPair& p = results.txResultSet.results.back();
-        xdr_argpack_archive(g2, p);
-
-        if (p.transactionHash != txFrame->getContentsHash())
-        {
-            throw std::runtime_error("transaction mismatch");
-        }
-
-        ++n;
-        st.fetch();
-    }
-    if (n != 0)
-    {
-        saveTransactionHelper(db, sess, lastLedgerSeq, txSet, results, txOut,
-                              txResultOut);
-    }
-    return n;
-}
-
-void
-TransactionFrame::dropAll(Database& db)
-{
-    db.getSession() << "DROP TABLE IF EXISTS txhistory";
-
-    db.getSession() << "DROP TABLE IF EXISTS txfeehistory";
-
-    db.getSession() << "CREATE TABLE txhistory ("
-                       "txid        CHARACTER(64) NOT NULL,"
-                       "ledgerseq   INT NOT NULL CHECK (ledgerseq >= 0),"
-                       "txindex     INT NOT NULL,"
-                       "txbody      TEXT NOT NULL,"
-                       "txresult    TEXT NOT NULL,"
-                       "txmeta      TEXT NOT NULL,"
-                       "PRIMARY KEY (ledgerseq, txindex)"
-                       ")";
-    db.getSession() << "CREATE INDEX histbyseq ON txhistory (ledgerseq);";
-
-    db.getSession() << "CREATE TABLE txfeehistory ("
-                       "txid        CHARACTER(64) NOT NULL,"
-                       "ledgerseq   INT NOT NULL CHECK (ledgerseq >= 0),"
-                       "txindex     INT NOT NULL,"
-                       "txchanges   TEXT NOT NULL,"
-                       "PRIMARY KEY (ledgerseq, txindex)"
-                       ")";
-    db.getSession() << "CREATE INDEX histfeebyseq ON txfeehistory (ledgerseq);";
-}
-
-void
-TransactionFrame::deleteOldEntries(Database& db, uint32_t ledgerSeq,
-                                   uint32_t count)
-{
-    DatabaseUtils::deleteOldEntriesHelper(db.getSession(), ledgerSeq, count,
-                                          "txhistory", "ledgerseq");
-    DatabaseUtils::deleteOldEntriesHelper(db.getSession(), ledgerSeq, count,
-                                          "txfeehistory", "ledgerseq");
 }
 }

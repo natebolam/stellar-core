@@ -12,7 +12,8 @@
 #include "historywork/PutHistoryArchiveStateWork.h"
 #include "main/Application.h"
 #include "work/WorkSequence.h"
-#include <util/format.h>
+#include <Tracy.hpp>
+#include <fmt/format.h>
 
 namespace stellar
 {
@@ -31,6 +32,7 @@ PutSnapshotFilesWork::PutSnapshotFilesWork(
 BasicWork::State
 PutSnapshotFilesWork::doWork()
 {
+    ZoneScoped;
     if (!mUploadSeqs.empty())
     {
         return WorkUtils::getWorkStatus(mUploadSeqs);
@@ -123,5 +125,26 @@ PutSnapshotFilesWork::getFilesToZip()
     }
 
     return filesToZip;
+}
+
+std::string
+PutSnapshotFilesWork::getStatus() const
+{
+    if (!mUploadSeqs.empty())
+    {
+        return fmt::format("{}:uploading files", getName());
+    }
+
+    if (!mGzipFilesWorks.empty())
+    {
+        return fmt::format("{}:zipping files", getName());
+    }
+
+    if (!mGetStateWorks.empty())
+    {
+        return fmt::format("{}:getting archives", getName());
+    }
+
+    return BasicWork::getStatus();
 }
 }

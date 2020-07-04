@@ -348,8 +348,8 @@ TEST_CASE("pathpayment", "[tx][pathpayment]")
         destination.changeTrust(idr, 20);
         gateway.setOptions(
             setFlags(uint32_t{AUTH_REQUIRED_FLAG | AUTH_REVOCABLE_FLAG}));
-        gateway.denyTrust(idr, noAuthorizedSourceTrust);
-        for_all_versions(*app, [&] {
+
+        auto sourceNotAuthorized = [&]() {
             REQUIRE_THROWS_AS(
                 noAuthorizedSourceTrust.pay(gateway, idr, 10, idr, 10, {}),
                 ex_PATH_PAYMENT_STRICT_RECEIVE_SRC_NOT_AUTHORIZED);
@@ -366,7 +366,23 @@ TEST_CASE("pathpayment", "[tx][pathpayment]")
                 {{noAuthorizedSourceTrust, {{xlm, minBalance1 - 3 * txfee}, {idr, 10}, {usd, 0}}},
                  {destination, {{xlm, minBalance1 - txfee}, {idr, 0}, {usd, 0}}}});
             // clang-format on
-        });
+        };
+
+        SECTION("deny trust")
+        {
+            for_all_versions(*app, [&] {
+                gateway.denyTrust(idr, noAuthorizedSourceTrust);
+                sourceNotAuthorized();
+            });
+        }
+
+        SECTION("allow maintain liabilities")
+        {
+            for_versions_from(13, *app, [&] {
+                gateway.allowMaintainLiabilities(idr, noAuthorizedSourceTrust);
+                sourceNotAuthorized();
+            });
+        }
     }
 
     SECTION("path payment destination does not exists")
@@ -464,8 +480,8 @@ TEST_CASE("pathpayment", "[tx][pathpayment]")
         noAuthorizedDestinationTrust.changeTrust(idr, 20);
         gateway.setOptions(
             setFlags(uint32_t{AUTH_REQUIRED_FLAG | AUTH_REVOCABLE_FLAG}));
-        gateway.denyTrust(idr, noAuthorizedDestinationTrust);
-        for_all_versions(*app, [&] {
+
+        auto destNotAuthorized = [&]() {
             REQUIRE_THROWS_AS(
                 gateway.pay(noAuthorizedDestinationTrust, idr, 10, idr, 10, {}),
                 ex_PATH_PAYMENT_STRICT_RECEIVE_NOT_AUTHORIZED);
@@ -482,7 +498,23 @@ TEST_CASE("pathpayment", "[tx][pathpayment]")
                 {{source, {{xlm, minBalance1 - 2 * txfee}, {idr, 10}, {usd, 0}}},
                  {noAuthorizedDestinationTrust, {{xlm, minBalance1 - txfee}, {idr, 0}, {usd, 0}}}});
             // clang-format on
-        });
+        };
+
+        SECTION("deny trust")
+        {
+            for_all_versions(*app, [&] {
+                gateway.denyTrust(idr, noAuthorizedDestinationTrust);
+                destNotAuthorized();
+            });
+        }
+        SECTION("allow maintain liabilities")
+        {
+            for_versions_from(13, *app, [&] {
+                gateway.allowMaintainLiabilities(idr,
+                                                 noAuthorizedDestinationTrust);
+                destNotAuthorized();
+            });
+        }
     }
 
     SECTION("path payment destination line full")
@@ -539,61 +571,60 @@ TEST_CASE("pathpayment", "[tx][pathpayment]")
         });
     }
 
-    SECTION("path payment send issuer missing")
+    SECTION("issuer missing")
     {
-        auto market = TestMarket{*app};
-        auto source = root.create("source", minBalance1);
-        auto destination = root.create("destination", minBalance1);
-        source.changeTrust(idr, 20);
-        destination.changeTrust(usd, 20);
-        gateway.pay(source, idr, 10);
-        for_all_versions(*app, [&] {
-            gateway.merge(root);
-            REQUIRE_THROWS_AS(
-                source.pay(destination, idr, 11, usd, 11, {}, &idr),
-                ex_PATH_PAYMENT_STRICT_RECEIVE_NO_ISSUER);
-            // clang-format off
-            market.requireBalances(
-                {{source, {{xlm, minBalance1 - 2 * txfee}, {idr, 10}, {usd, 0}}},
-                 {destination, {{xlm, minBalance1 - txfee}, {idr, 0}, {usd, 0}}}});
-            // clang-format on
-        });
-    }
+        // look at the SECTION "path payment uses all offers in a loop" for a
+        // successful path payment test with no issuers
 
-    SECTION("path payment middle issuer missing")
-    {
         auto market = TestMarket{*app};
         auto source = root.create("source", minBalance1);
         auto destination = root.create("destination", minBalance1);
         source.changeTrust(idr, 20);
         destination.changeTrust(usd, 20);
         gateway.pay(source, idr, 10);
-        for_all_versions(*app, [&] {
-            auto btc = makeAsset(getAccount("missing"), "BTC");
-            REQUIRE_THROWS_AS(
-                source.pay(destination, idr, 11, usd, 11, {btc}, &btc),
-                ex_PATH_PAYMENT_STRICT_RECEIVE_NO_ISSUER);
-            // clang-format off
-            market.requireBalances(
-                {{source, {{xlm, minBalance1 - 2 * txfee}, {idr, 10}, {usd, 0}}},
-                 {destination, {{xlm, minBalance1 - txfee}, {idr, 0}, {usd, 0}}}});
-            // clang-format on
-        });
-    }
 
-    SECTION("path payment last issuer missing")
-    {
-        auto market = TestMarket{*app};
-        auto source = root.create("source", minBalance1);
-        auto destination = root.create("destination", minBalance1);
-        source.changeTrust(idr, 20);
-        destination.changeTrust(usd, 20);
-        gateway.pay(source, idr, 10);
         for_all_versions(*app, [&] {
-            gateway2.merge(root);
-            REQUIRE_THROWS_AS(
-                source.pay(destination, idr, 11, usd, 11, {}, &usd),
-                ex_PATH_PAYMENT_STRICT_RECEIVE_NO_ISSUER);
+            uint32_t ledgerVersion;
+            {
+                LedgerTxn ltx(app->getLedgerTxnRoot());
+                ledgerVersion = ltx.loadHeader().current().ledgerVersion;
+            }
+
+            auto pathPayment = [&](std::vector<Asset> const& path,
+                                   Asset& noIssuer) {
+                if (ledgerVersion < 13)
+                {
+                    REQUIRE_THROWS_AS(source.pay(destination, idr, 11, usd, 11,
+                                                 path, &noIssuer),
+                                      ex_PATH_PAYMENT_STRICT_RECEIVE_NO_ISSUER);
+                }
+                else
+                {
+                    REQUIRE_THROWS_AS(
+                        source.pay(destination, idr, 11, usd, 11, path,
+                                   &noIssuer),
+                        ex_PATH_PAYMENT_STRICT_RECEIVE_TOO_FEW_OFFERS);
+                }
+            };
+
+            SECTION("path payment send issuer missing")
+            {
+                gateway.merge(root);
+                pathPayment({}, idr);
+            }
+
+            SECTION("path payment middle issuer missing")
+            {
+                auto btc = makeAsset(getAccount("missing"), "BTC");
+                pathPayment({btc}, btc);
+            }
+
+            SECTION("path payment last issuer missing")
+            {
+                gateway2.merge(root);
+                pathPayment({}, usd);
+            }
+
             // clang-format off
             market.requireBalances(
                 {{source, {{xlm, minBalance1 - 2 * txfee}, {idr, 10}, {usd, 0}}},
@@ -1419,214 +1450,258 @@ TEST_CASE("pathpayment", "[tx][pathpayment]")
         });
     }
 
-    SECTION("path payment uses whole best offer for first exchange")
+    auto usesWholeBestOffer = [&](bool testAuthorizedToMaintainLiabilities) {
+        auto maybeSetAuthToMaintainLiabilities =
+            [&](TestAccount& issuer, PublicKey const& destination,
+                Asset const& asset) {
+                if (!testAuthorizedToMaintainLiabilities)
+                {
+                    return;
+                }
+
+                uint32_t ledgerVersion;
+                {
+                    LedgerTxn ltx(app->getLedgerTxnRoot());
+                    ledgerVersion = ltx.loadHeader().current().ledgerVersion;
+                }
+
+                if (ledgerVersion < 13)
+                {
+                    return;
+                }
+
+                auto toSet = static_cast<uint32_t>(AUTH_REQUIRED_FLAG) |
+                             static_cast<uint32_t>(AUTH_REVOCABLE_FLAG);
+
+                issuer.setOptions(setFlags(toSet));
+                issuer.allowMaintainLiabilities(asset, destination);
+            };
+
+        SECTION("path payment uses whole best offer for first exchange")
+        {
+            auto market = TestMarket{*app};
+            auto source = root.create("source", minBalance4);
+            auto destination = root.create("destination", minBalance1);
+            auto mm12a = root.create("mm12a", minBalance3);
+            auto mm12b = root.create("mm12b", minBalance3);
+            auto mm23 = root.create("mm23", minBalance3);
+            auto mm34 = root.create("mm34", minBalance3);
+
+            source.changeTrust(cur1, 200);
+            mm12a.changeTrust(cur1, 200);
+            mm12a.changeTrust(cur2, 200);
+            mm12b.changeTrust(cur1, 200);
+            mm12b.changeTrust(cur2, 200);
+            mm23.changeTrust(cur2, 200);
+            mm23.changeTrust(cur3, 200);
+            mm34.changeTrust(cur3, 200);
+            mm34.changeTrust(cur4, 200);
+            destination.changeTrust(cur4, 200);
+
+            gateway.pay(source, cur1, 80);
+            gateway.pay(mm12a, cur2, 40);
+            gateway.pay(mm12b, cur2, 40);
+            gateway2.pay(mm23, cur3, 20);
+            gateway2.pay(mm34, cur4, 10);
+
+            auto o1a = market.requireChangesWithOffer({}, [&] {
+                return market.addOffer(mm12a, {cur2, cur1, Price{2, 1}, 10});
+            });
+            auto o1b = market.requireChangesWithOffer({}, [&] {
+                return market.addOffer(mm12b, {cur2, cur1, Price{2, 1}, 40});
+            });
+            auto o2 = market.requireChangesWithOffer({}, [&] {
+                return market.addOffer(mm23, {cur3, cur2, Price{2, 1}, 20});
+            });
+            auto o3 = market.requireChangesWithOffer({}, [&] {
+                return market.addOffer(mm34, {cur4, cur3, Price{2, 1}, 10});
+            });
+
+            for_all_versions(*app, [&] {
+                maybeSetAuthToMaintainLiabilities(gateway, mm12a, cur2);
+                maybeSetAuthToMaintainLiabilities(gateway, mm12b, cur2);
+                auto actual = std::vector<ClaimOfferAtom>{};
+                market.requireChanges(
+                    {{o1a.key, OfferState::DELETED},
+                     {o1b.key, {cur2, cur1, Price{2, 1}, 10}},
+                     {o2.key, OfferState::DELETED},
+                     {o3.key, OfferState::DELETED}},
+                    [&] {
+                        actual = source
+                                     .pay(destination, cur1, 80, cur4, 10,
+                                          {cur1, cur2, cur3, cur4})
+                                     .success()
+                                     .offers;
+                    });
+                auto expected = std::vector<ClaimOfferAtom>{
+                    o1a.exchanged(10, 20), o1b.exchanged(30, 60),
+                    o2.exchanged(20, 40), o3.exchanged(10, 20)};
+                REQUIRE(actual == expected);
+                // clang-format off
+                market.requireBalances(
+                    {{source, {{xlm, minBalance4 - 2 * txfee}, {cur1, 0}, {cur2, 0}, {cur3, 0}, {cur4, 0}}},
+                    {mm12a, {{xlm, minBalance3 - 3 * txfee}, {cur1, 20}, {cur2, 30}, {cur3, 0}, {cur4, 0}}},
+                    {mm12b, {{xlm, minBalance3 - 3 * txfee}, {cur1, 60}, {cur2, 10}, {cur3, 0}, {cur4, 0}}},
+                    {mm23, {{xlm, minBalance3 - 3 * txfee}, {cur1, 0}, {cur2, 40}, {cur3, 0}, {cur4, 0}}},
+                    {mm34, {{xlm, minBalance3 - 3 * txfee}, {cur1, 0}, {cur2, 0}, {cur3, 20}, {cur4, 0}}},
+                    {destination, {{xlm, minBalance1 - txfee}, {cur1, 0}, {cur2, 0}, {cur3, 0}, {cur4, 10}}}});
+                // clang-format on
+            });
+        }
+
+        SECTION("path payment uses whole best offer for second exchange")
+        {
+            auto market = TestMarket{*app};
+            auto source = root.create("source", minBalance4);
+            auto destination = root.create("destination", minBalance1);
+            auto mm12 = root.create("mm12a", minBalance3);
+            auto mm23a = root.create("mm23a", minBalance3);
+            auto mm23b = root.create("mm23b", minBalance3);
+            auto mm34 = root.create("mm34", minBalance3);
+
+            source.changeTrust(cur1, 200);
+            mm12.changeTrust(cur1, 200);
+            mm12.changeTrust(cur2, 200);
+            mm23a.changeTrust(cur2, 200);
+            mm23a.changeTrust(cur3, 200);
+            mm23b.changeTrust(cur2, 200);
+            mm23b.changeTrust(cur3, 200);
+            mm34.changeTrust(cur3, 200);
+            mm34.changeTrust(cur4, 200);
+            destination.changeTrust(cur4, 200);
+
+            gateway.pay(source, cur1, 80);
+            gateway.pay(mm12, cur2, 40);
+            gateway2.pay(mm23a, cur3, 20);
+            gateway2.pay(mm23b, cur3, 20);
+            gateway2.pay(mm34, cur4, 10);
+
+            auto o1 = market.requireChangesWithOffer({}, [&] {
+                return market.addOffer(mm12, {cur2, cur1, Price{2, 1}, 40});
+            });
+            auto o2a = market.requireChangesWithOffer({}, [&] {
+                return market.addOffer(mm23a, {cur3, cur2, Price{2, 1}, 15});
+            });
+            auto o2b = market.requireChangesWithOffer({}, [&] {
+                return market.addOffer(mm23b, {cur3, cur2, Price{2, 1}, 10});
+            });
+            auto o3 = market.requireChangesWithOffer({}, [&] {
+                return market.addOffer(mm34, {cur4, cur3, Price{2, 1}, 10});
+            });
+
+            for_all_versions(*app, [&] {
+                maybeSetAuthToMaintainLiabilities(gateway2, mm23a, cur3);
+                maybeSetAuthToMaintainLiabilities(gateway2, mm23b, cur3);
+                auto actual = std::vector<ClaimOfferAtom>{};
+                market.requireChanges(
+                    {{o1.key, OfferState::DELETED},
+                     {o2a.key, OfferState::DELETED},
+                     {o2b.key, {cur3, cur2, Price{2, 1}, 5}},
+                     {o3.key, OfferState::DELETED}},
+                    [&] {
+                        actual = source
+                                     .pay(destination, cur1, 80, cur4, 10,
+                                          {cur1, cur2, cur3, cur4})
+                                     .success()
+                                     .offers;
+                    });
+                auto expected = std::vector<ClaimOfferAtom>{
+                    o1.exchanged(40, 80), o2a.exchanged(15, 30),
+                    o2b.exchanged(5, 10), o3.exchanged(10, 20)};
+                REQUIRE(actual == expected);
+                // clang-format off
+                market.requireBalances(
+                    {{source, {{xlm, minBalance4 - 2 * txfee}, {cur1, 0}, {cur2, 0}, {cur3, 0}, {cur4, 0}}},
+                    {mm12, {{xlm, minBalance3 - 3 * txfee}, {cur1, 80}, {cur2, 0}, {cur3, 0}, {cur4, 0}}},
+                    {mm23a, {{xlm, minBalance3 - 3 * txfee}, {cur1, 0}, {cur2, 30}, {cur3, 5}, {cur4, 0}}},
+                    {mm23a, {{xlm, minBalance3 - 3 * txfee}, {cur1, 0}, {cur2, 30}, {cur3, 5}, {cur4, 0}}},
+                    {mm34, {{xlm, minBalance3 - 3 * txfee}, {cur1, 0}, {cur2, 0}, {cur3, 20}, {cur4, 0}}},
+                    {destination, {{xlm, minBalance1 - txfee}, {cur1, 0}, {cur2, 0}, {cur3, 0}, {cur4, 10}}}});
+                // clang-format on
+            });
+        }
+
+        SECTION("path payment uses whole best offer for last exchange")
+        {
+            auto market = TestMarket{*app};
+            auto source = root.create("source", minBalance4);
+            auto destination = root.create("destination", minBalance1);
+            auto mm12 = root.create("mm12a", minBalance3);
+            auto mm23 = root.create("mm23", minBalance3);
+            auto mm34a = root.create("mm34a", minBalance3);
+            auto mm34b = root.create("mm34b", minBalance3);
+
+            source.changeTrust(cur1, 200);
+            mm12.changeTrust(cur1, 200);
+            mm12.changeTrust(cur2, 200);
+            mm23.changeTrust(cur2, 200);
+            mm23.changeTrust(cur3, 200);
+            mm34a.changeTrust(cur3, 200);
+            mm34a.changeTrust(cur4, 200);
+            mm34b.changeTrust(cur3, 200);
+            mm34b.changeTrust(cur4, 200);
+            destination.changeTrust(cur4, 200);
+
+            gateway.pay(source, cur1, 80);
+            gateway.pay(mm12, cur2, 40);
+            gateway2.pay(mm23, cur3, 20);
+            gateway2.pay(mm34a, cur4, 10);
+            gateway2.pay(mm34b, cur4, 10);
+
+            auto o1 = market.requireChangesWithOffer({}, [&] {
+                return market.addOffer(mm12, {cur2, cur1, Price{2, 1}, 40});
+            });
+            auto o2 = market.requireChangesWithOffer({}, [&] {
+                return market.addOffer(mm23, {cur3, cur2, Price{2, 1}, 20});
+            });
+            auto o3a = market.requireChangesWithOffer({}, [&] {
+                return market.addOffer(mm34a, {cur4, cur3, Price{2, 1}, 2});
+            });
+            auto o3b = market.requireChangesWithOffer({}, [&] {
+                return market.addOffer(mm34b, {cur4, cur3, Price{2, 1}, 10});
+            });
+
+            for_all_versions(*app, [&] {
+                maybeSetAuthToMaintainLiabilities(gateway2, mm34a, cur4);
+                maybeSetAuthToMaintainLiabilities(gateway2, mm34b, cur4);
+                auto actual = std::vector<ClaimOfferAtom>{};
+                market.requireChanges(
+                    {{o1.key, OfferState::DELETED},
+                     {o2.key, OfferState::DELETED},
+                     {o3a.key, OfferState::DELETED},
+                     {o3b.key, {cur4, cur3, Price{2, 1}, 2}}},
+                    [&] {
+                        actual = source
+                                     .pay(destination, cur1, 80, cur4, 10,
+                                          {cur1, cur2, cur3, cur4})
+                                     .success()
+                                     .offers;
+                    });
+                auto expected = std::vector<ClaimOfferAtom>{
+                    o1.exchanged(40, 80), o2.exchanged(20, 40),
+                    o3a.exchanged(2, 4), o3b.exchanged(8, 16)};
+                REQUIRE(actual == expected);
+                // clang-format off
+                market.requireBalances(
+                    {{source, {{xlm, minBalance4 - 2 * txfee}, {cur1, 0}, {cur2, 0}, {cur3, 0}, {cur4, 0}}},
+                    {mm12, {{xlm, minBalance3 - 3 * txfee}, {cur1, 80}, {cur2, 0}, {cur3, 0}, {cur4, 0}}},
+                    {mm23, {{xlm, minBalance3 - 3 * txfee}, {cur1, 0}, {cur2, 40}, {cur3, 0}, {cur4, 0}}},
+                    {mm34a, {{xlm, minBalance3 - 3 * txfee}, {cur1, 0}, {cur2, 0}, {cur3, 4}, {cur4, 8}}},
+                    {mm34b, {{xlm, minBalance3 - 3 * txfee}, {cur1, 0}, {cur2, 0}, {cur3, 16}, {cur4, 2}}},
+                    {destination, {{xlm, minBalance1 - txfee}, {cur1, 0}, {cur2, 0}, {cur3, 0}, {cur4, 10}}}});
+                // clang-format on
+            });
+        }
+    };
+
+    SECTION("authorized")
     {
-        auto market = TestMarket{*app};
-        auto source = root.create("source", minBalance4);
-        auto destination = root.create("destination", minBalance1);
-        auto mm12a = root.create("mm12a", minBalance3);
-        auto mm12b = root.create("mm12b", minBalance3);
-        auto mm23 = root.create("mm23", minBalance3);
-        auto mm34 = root.create("mm34", minBalance3);
-
-        source.changeTrust(cur1, 200);
-        mm12a.changeTrust(cur1, 200);
-        mm12a.changeTrust(cur2, 200);
-        mm12b.changeTrust(cur1, 200);
-        mm12b.changeTrust(cur2, 200);
-        mm23.changeTrust(cur2, 200);
-        mm23.changeTrust(cur3, 200);
-        mm34.changeTrust(cur3, 200);
-        mm34.changeTrust(cur4, 200);
-        destination.changeTrust(cur4, 200);
-
-        gateway.pay(source, cur1, 80);
-        gateway.pay(mm12a, cur2, 40);
-        gateway.pay(mm12b, cur2, 40);
-        gateway2.pay(mm23, cur3, 20);
-        gateway2.pay(mm34, cur4, 10);
-
-        auto o1a = market.requireChangesWithOffer({}, [&] {
-            return market.addOffer(mm12a, {cur2, cur1, Price{2, 1}, 10});
-        });
-        auto o1b = market.requireChangesWithOffer({}, [&] {
-            return market.addOffer(mm12b, {cur2, cur1, Price{2, 1}, 40});
-        });
-        auto o2 = market.requireChangesWithOffer({}, [&] {
-            return market.addOffer(mm23, {cur3, cur2, Price{2, 1}, 20});
-        });
-        auto o3 = market.requireChangesWithOffer({}, [&] {
-            return market.addOffer(mm34, {cur4, cur3, Price{2, 1}, 10});
-        });
-
-        for_all_versions(*app, [&] {
-            auto actual = std::vector<ClaimOfferAtom>{};
-            market.requireChanges({{o1a.key, OfferState::DELETED},
-                                   {o1b.key, {cur2, cur1, Price{2, 1}, 10}},
-                                   {o2.key, OfferState::DELETED},
-                                   {o3.key, OfferState::DELETED}},
-                                  [&] {
-                                      actual =
-                                          source
-                                              .pay(destination, cur1, 80, cur4,
-                                                   10, {cur1, cur2, cur3, cur4})
-                                              .success()
-                                              .offers;
-                                  });
-            auto expected = std::vector<ClaimOfferAtom>{
-                o1a.exchanged(10, 20), o1b.exchanged(30, 60),
-                o2.exchanged(20, 40), o3.exchanged(10, 20)};
-            REQUIRE(actual == expected);
-            // clang-format off
-            market.requireBalances(
-                {{source, {{xlm, minBalance4 - 2 * txfee}, {cur1, 0}, {cur2, 0}, {cur3, 0}, {cur4, 0}}},
-                 {mm12a, {{xlm, minBalance3 - 3 * txfee}, {cur1, 20}, {cur2, 30}, {cur3, 0}, {cur4, 0}}},
-                 {mm12b, {{xlm, minBalance3 - 3 * txfee}, {cur1, 60}, {cur2, 10}, {cur3, 0}, {cur4, 0}}},
-                 {mm23, {{xlm, minBalance3 - 3 * txfee}, {cur1, 0}, {cur2, 40}, {cur3, 0}, {cur4, 0}}},
-                 {mm34, {{xlm, minBalance3 - 3 * txfee}, {cur1, 0}, {cur2, 0}, {cur3, 20}, {cur4, 0}}},
-                 {destination, {{xlm, minBalance1 - txfee}, {cur1, 0}, {cur2, 0}, {cur3, 0}, {cur4, 10}}}});
-            // clang-format on
-        });
+        usesWholeBestOffer(false);
     }
 
-    SECTION("path payment uses whole best offer for second exchange")
+    SECTION("authorized to maintain liabilities")
     {
-        auto market = TestMarket{*app};
-        auto source = root.create("source", minBalance4);
-        auto destination = root.create("destination", minBalance1);
-        auto mm12 = root.create("mm12a", minBalance3);
-        auto mm23a = root.create("mm23a", minBalance3);
-        auto mm23b = root.create("mm23b", minBalance3);
-        auto mm34 = root.create("mm34", minBalance3);
-
-        source.changeTrust(cur1, 200);
-        mm12.changeTrust(cur1, 200);
-        mm12.changeTrust(cur2, 200);
-        mm23a.changeTrust(cur2, 200);
-        mm23a.changeTrust(cur3, 200);
-        mm23b.changeTrust(cur2, 200);
-        mm23b.changeTrust(cur3, 200);
-        mm34.changeTrust(cur3, 200);
-        mm34.changeTrust(cur4, 200);
-        destination.changeTrust(cur4, 200);
-
-        gateway.pay(source, cur1, 80);
-        gateway.pay(mm12, cur2, 40);
-        gateway2.pay(mm23a, cur3, 20);
-        gateway2.pay(mm23b, cur3, 20);
-        gateway2.pay(mm34, cur4, 10);
-
-        auto o1 = market.requireChangesWithOffer({}, [&] {
-            return market.addOffer(mm12, {cur2, cur1, Price{2, 1}, 40});
-        });
-        auto o2a = market.requireChangesWithOffer({}, [&] {
-            return market.addOffer(mm23a, {cur3, cur2, Price{2, 1}, 15});
-        });
-        auto o2b = market.requireChangesWithOffer({}, [&] {
-            return market.addOffer(mm23b, {cur3, cur2, Price{2, 1}, 10});
-        });
-        auto o3 = market.requireChangesWithOffer({}, [&] {
-            return market.addOffer(mm34, {cur4, cur3, Price{2, 1}, 10});
-        });
-
-        for_all_versions(*app, [&] {
-            auto actual = std::vector<ClaimOfferAtom>{};
-            market.requireChanges({{o1.key, OfferState::DELETED},
-                                   {o2a.key, OfferState::DELETED},
-                                   {o2b.key, {cur3, cur2, Price{2, 1}, 5}},
-                                   {o3.key, OfferState::DELETED}},
-                                  [&] {
-                                      actual =
-                                          source
-                                              .pay(destination, cur1, 80, cur4,
-                                                   10, {cur1, cur2, cur3, cur4})
-                                              .success()
-                                              .offers;
-                                  });
-            auto expected = std::vector<ClaimOfferAtom>{
-                o1.exchanged(40, 80), o2a.exchanged(15, 30),
-                o2b.exchanged(5, 10), o3.exchanged(10, 20)};
-            REQUIRE(actual == expected);
-            // clang-format off
-            market.requireBalances(
-                {{source, {{xlm, minBalance4 - 2 * txfee}, {cur1, 0}, {cur2, 0}, {cur3, 0}, {cur4, 0}}},
-                 {mm12, {{xlm, minBalance3 - 3 * txfee}, {cur1, 80}, {cur2, 0}, {cur3, 0}, {cur4, 0}}},
-                 {mm23a, {{xlm, minBalance3 - 3 * txfee}, {cur1, 0}, {cur2, 30}, {cur3, 5}, {cur4, 0}}},
-                 {mm23a, {{xlm, minBalance3 - 3 * txfee}, {cur1, 0}, {cur2, 30}, {cur3, 5}, {cur4, 0}}},
-                 {mm34, {{xlm, minBalance3 - 3 * txfee}, {cur1, 0}, {cur2, 0}, {cur3, 20}, {cur4, 0}}},
-                 {destination, {{xlm, minBalance1 - txfee}, {cur1, 0}, {cur2, 0}, {cur3, 0}, {cur4, 10}}}});
-            // clang-format on
-        });
-    }
-
-    SECTION("path payment uses whole best offer for last exchange")
-    {
-        auto market = TestMarket{*app};
-        auto source = root.create("source", minBalance4);
-        auto destination = root.create("destination", minBalance1);
-        auto mm12 = root.create("mm12a", minBalance3);
-        auto mm23 = root.create("mm23", minBalance3);
-        auto mm34a = root.create("mm34a", minBalance3);
-        auto mm34b = root.create("mm34b", minBalance3);
-
-        source.changeTrust(cur1, 200);
-        mm12.changeTrust(cur1, 200);
-        mm12.changeTrust(cur2, 200);
-        mm23.changeTrust(cur2, 200);
-        mm23.changeTrust(cur3, 200);
-        mm34a.changeTrust(cur3, 200);
-        mm34a.changeTrust(cur4, 200);
-        mm34b.changeTrust(cur3, 200);
-        mm34b.changeTrust(cur4, 200);
-        destination.changeTrust(cur4, 200);
-
-        gateway.pay(source, cur1, 80);
-        gateway.pay(mm12, cur2, 40);
-        gateway2.pay(mm23, cur3, 20);
-        gateway2.pay(mm34a, cur4, 10);
-        gateway2.pay(mm34b, cur4, 10);
-
-        auto o1 = market.requireChangesWithOffer({}, [&] {
-            return market.addOffer(mm12, {cur2, cur1, Price{2, 1}, 40});
-        });
-        auto o2 = market.requireChangesWithOffer({}, [&] {
-            return market.addOffer(mm23, {cur3, cur2, Price{2, 1}, 20});
-        });
-        auto o3a = market.requireChangesWithOffer({}, [&] {
-            return market.addOffer(mm34a, {cur4, cur3, Price{2, 1}, 2});
-        });
-        auto o3b = market.requireChangesWithOffer({}, [&] {
-            return market.addOffer(mm34b, {cur4, cur3, Price{2, 1}, 10});
-        });
-
-        for_all_versions(*app, [&] {
-            auto actual = std::vector<ClaimOfferAtom>{};
-            market.requireChanges({{o1.key, OfferState::DELETED},
-                                   {o2.key, OfferState::DELETED},
-                                   {o3a.key, OfferState::DELETED},
-                                   {o3b.key, {cur4, cur3, Price{2, 1}, 2}}},
-                                  [&] {
-                                      actual =
-                                          source
-                                              .pay(destination, cur1, 80, cur4,
-                                                   10, {cur1, cur2, cur3, cur4})
-                                              .success()
-                                              .offers;
-                                  });
-            auto expected = std::vector<ClaimOfferAtom>{
-                o1.exchanged(40, 80), o2.exchanged(20, 40), o3a.exchanged(2, 4),
-                o3b.exchanged(8, 16)};
-            REQUIRE(actual == expected);
-            // clang-format off
-            market.requireBalances(
-                {{source, {{xlm, minBalance4 - 2 * txfee}, {cur1, 0}, {cur2, 0}, {cur3, 0}, {cur4, 0}}},
-                 {mm12, {{xlm, minBalance3 - 3 * txfee}, {cur1, 80}, {cur2, 0}, {cur3, 0}, {cur4, 0}}},
-                 {mm23, {{xlm, minBalance3 - 3 * txfee}, {cur1, 0}, {cur2, 40}, {cur3, 0}, {cur4, 0}}},
-                 {mm34a, {{xlm, minBalance3 - 3 * txfee}, {cur1, 0}, {cur2, 0}, {cur3, 4}, {cur4, 8}}},
-                 {mm34b, {{xlm, minBalance3 - 3 * txfee}, {cur1, 0}, {cur2, 0}, {cur3, 16}, {cur4, 2}}},
-                 {destination, {{xlm, minBalance1 - txfee}, {cur1, 0}, {cur2, 0}, {cur3, 0}, {cur4, 10}}}});
-            // clang-format on
-        });
+        usesWholeBestOffer(true);
     }
 
     SECTION("path payment reaches limit for offer for first exchange")
@@ -3798,79 +3873,6 @@ TEST_CASE("pathpayment", "[tx][pathpayment]")
         });
     }
 
-    SECTION("path payment uses all offers in a loop")
-    {
-        auto market = TestMarket{*app};
-        auto source = root.create("source", minBalance4);
-        auto destination = root.create("destination", minBalance1);
-        auto mm12 = root.create("mm12", minBalance3);
-        auto mm23 = root.create("mm23", minBalance3);
-        auto mm34 = root.create("mm34", minBalance3);
-        auto mm41 = root.create("mm41", minBalance3);
-
-        source.changeTrust(cur1, 16000);
-        mm12.changeTrust(cur1, 16000);
-        mm12.changeTrust(cur2, 16000);
-        mm23.changeTrust(cur2, 16000);
-        mm23.changeTrust(cur3, 16000);
-        mm34.changeTrust(cur3, 16000);
-        mm34.changeTrust(cur4, 16000);
-        mm41.changeTrust(cur4, 16000);
-        mm41.changeTrust(cur1, 16000);
-        destination.changeTrust(cur4, 16000);
-
-        gateway.pay(source, cur1, 8000);
-        gateway.pay(mm12, cur2, 8000);
-        gateway2.pay(mm23, cur3, 8000);
-        gateway2.pay(mm34, cur4, 8000);
-        gateway.pay(mm41, cur1, 8000);
-
-        auto o1 = market.requireChangesWithOffer({}, [&] {
-            return market.addOffer(mm12, {cur2, cur1, Price{2, 1}, 1000});
-        });
-        auto o2 = market.requireChangesWithOffer({}, [&] {
-            return market.addOffer(mm23, {cur3, cur2, Price{2, 1}, 1000});
-        });
-        auto o3 = market.requireChangesWithOffer({}, [&] {
-            return market.addOffer(mm34, {cur4, cur3, Price{2, 1}, 1000});
-        });
-        auto o4 = market.requireChangesWithOffer({}, [&] {
-            return market.addOffer(mm41, {cur1, cur4, Price{2, 1}, 1000});
-        });
-
-        for_all_versions(*app, [&] {
-            auto actual = std::vector<ClaimOfferAtom>{};
-            market.requireChanges(
-                {{o1.key, {cur2, cur1, Price{2, 1}, 320}},
-                 {o2.key, {cur3, cur2, Price{2, 1}, 660}},
-                 {o3.key, {cur4, cur3, Price{2, 1}, 830}},
-                 {o4.key, {cur1, cur4, Price{2, 1}, 920}}},
-                [&] {
-                    actual = source
-                                 .pay(destination, cur1, 2000, cur4, 10,
-                                      {cur1, cur2, cur3, cur4, cur1, cur2, cur3,
-                                       cur4})
-                                 .success()
-                                 .offers;
-                });
-            auto expected = std::vector<ClaimOfferAtom>{
-                o1.exchanged(640, 1280), o2.exchanged(320, 640),
-                o3.exchanged(160, 320),  o4.exchanged(80, 160),
-                o1.exchanged(40, 80),    o2.exchanged(20, 40),
-                o3.exchanged(10, 20)};
-            REQUIRE(actual == expected);
-            // clang-format off
-            market.requireBalances(
-                {{source, {{xlm, minBalance4 - 2 * txfee}, {cur1, 6720}, {cur2, 0}, {cur3, 0}, {cur4, 0}}},
-                 {mm12, {{xlm, minBalance3 - 3 * txfee}, {cur1, 1360}, {cur2, 7320}, {cur3, 0}, {cur4, 0}}},
-                 {mm23, {{xlm, minBalance3 - 3 * txfee}, {cur1, 0}, {cur2, 680}, {cur3, 7660}, {cur4, 0}}},
-                 {mm34, {{xlm, minBalance3 - 3 * txfee}, {cur1, 0}, {cur2, 0}, {cur3, 340}, {cur4, 7830}}},
-                 {mm41, {{xlm, minBalance3 - 3 * txfee}, {cur1, 7920}, {cur2, 0}, {cur3, 0}, {cur4, 160}}},
-                 {destination, {{xlm, minBalance1 - txfee}, {cur1, 0}, {cur2, 0}, {cur3, 0}, {cur4, 10}}}});
-            // clang-format on
-        });
-    }
-
     SECTION("path payment with rounding errors")
     {
         auto market = TestMarket{*app};
@@ -4335,5 +4337,147 @@ TEST_CASE("pathpayment", "[tx][pathpayment]")
                 source.pay(destination, cur1, 50, cur2, 50, {cur1, cur2});
             });
         }
+    }
+}
+
+TEST_CASE("path payment uses all offers in a loop", "[tx][pathpayment]")
+{
+    // This test would downgrade the bucket protocol from >12 to 12
+    // with USE_CONFIG_FOR_GENESIS.  Some other tests in this module,
+    // however, rely on that being set, so we separate this one
+    // out into a test case with its own Application object.
+    Config cfg = getTestConfig();
+    cfg.USE_CONFIG_FOR_GENESIS = false;
+
+    VirtualClock clock;
+    auto app = createTestApplication(clock, cfg);
+    app->start();
+
+    // set up world
+    auto root = TestAccount::createRoot(*app);
+    auto xlm = makeNativeAsset();
+    auto txfee = app->getLedgerManager().getLastTxFee();
+
+    auto const minBalance1 =
+        app->getLedgerManager().getLastMinBalance(1) + 10 * txfee;
+    auto const minBalance2 =
+        app->getLedgerManager().getLastMinBalance(2) + 10 * txfee;
+    auto const minBalance3 =
+        app->getLedgerManager().getLastMinBalance(3) + 10 * txfee;
+    auto const minBalance4 =
+        app->getLedgerManager().getLastMinBalance(4) + 10 * txfee;
+
+    auto const paymentAmount = minBalance3;
+    auto const morePayment = paymentAmount / 2;
+
+    // sets up gateway account
+    auto const gatewayPayment = minBalance2 + morePayment;
+    auto gateway = root.create("gate", gatewayPayment);
+
+    // sets up gateway2 account
+    auto gateway2 = root.create("gate2", gatewayPayment);
+
+    auto cur1 = makeAsset(gateway, "CUR1");
+    auto cur2 = makeAsset(gateway, "CUR2");
+    auto cur3 = makeAsset(gateway2, "CUR3");
+    auto cur4 = makeAsset(gateway2, "CUR4");
+
+    auto useAllOffersInLoop = [&](TestAccount* issuerToDelete) {
+        for_all_versions(*app, [&] {
+            auto market = TestMarket{*app};
+            auto source = root.create("source", minBalance4);
+            auto destination = root.create("destination", minBalance1);
+            auto mm12 = root.create("mm12", minBalance3);
+            auto mm23 = root.create("mm23", minBalance3);
+            auto mm34 = root.create("mm34", minBalance3);
+            auto mm41 = root.create("mm41", minBalance3);
+
+            source.changeTrust(cur1, 16000);
+            mm12.changeTrust(cur1, 16000);
+            mm12.changeTrust(cur2, 16000);
+            mm23.changeTrust(cur2, 16000);
+            mm23.changeTrust(cur3, 16000);
+            mm34.changeTrust(cur3, 16000);
+            mm34.changeTrust(cur4, 16000);
+            mm41.changeTrust(cur4, 16000);
+            mm41.changeTrust(cur1, 16000);
+            destination.changeTrust(cur4, 16000);
+
+            gateway.pay(source, cur1, 8000);
+            gateway.pay(mm12, cur2, 8000);
+            gateway2.pay(mm23, cur3, 8000);
+            gateway2.pay(mm34, cur4, 8000);
+            gateway.pay(mm41, cur1, 8000);
+
+            auto o1 = market.requireChangesWithOffer({}, [&] {
+                return market.addOffer(mm12, {cur2, cur1, Price{2, 1}, 1000});
+            });
+            auto o2 = market.requireChangesWithOffer({}, [&] {
+                return market.addOffer(mm23, {cur3, cur2, Price{2, 1}, 1000});
+            });
+            auto o3 = market.requireChangesWithOffer({}, [&] {
+                return market.addOffer(mm34, {cur4, cur3, Price{2, 1}, 1000});
+            });
+            auto o4 = market.requireChangesWithOffer({}, [&] {
+                return market.addOffer(mm41, {cur1, cur4, Price{2, 1}, 1000});
+            });
+
+            uint32_t ledgerVersion;
+            {
+                LedgerTxn ltx(app->getLedgerTxnRoot());
+                ledgerVersion = ltx.loadHeader().current().ledgerVersion;
+            }
+            if (issuerToDelete && ledgerVersion >= 13)
+            {
+                closeLedgerOn(*app, 2, 1, 1, 2016);
+                // remove issuer
+                issuerToDelete->merge(root);
+            }
+
+            auto actual = std::vector<ClaimOfferAtom>{};
+            market.requireChanges(
+                {{o1.key, {cur2, cur1, Price{2, 1}, 320}},
+                 {o2.key, {cur3, cur2, Price{2, 1}, 660}},
+                 {o3.key, {cur4, cur3, Price{2, 1}, 830}},
+                 {o4.key, {cur1, cur4, Price{2, 1}, 920}}},
+                [&] {
+                    actual = source
+                                 .pay(destination, cur1, 2000, cur4, 10,
+                                      {cur1, cur2, cur3, cur4, cur1, cur2, cur3,
+                                       cur4})
+                                 .success()
+                                 .offers;
+                });
+            auto expected = std::vector<ClaimOfferAtom>{
+                o1.exchanged(640, 1280), o2.exchanged(320, 640),
+                o3.exchanged(160, 320),  o4.exchanged(80, 160),
+                o1.exchanged(40, 80),    o2.exchanged(20, 40),
+                o3.exchanged(10, 20)};
+            REQUIRE(actual == expected);
+            // clang-format off
+            market.requireBalances(
+                {{source, {{xlm, minBalance4 - 2 * txfee}, {cur1, 6720}, {cur2, 0}, {cur3, 0}, {cur4, 0}}},
+                {mm12, {{xlm, minBalance3 - 3 * txfee}, {cur1, 1360}, {cur2, 7320}, {cur3, 0}, {cur4, 0}}},
+                {mm23, {{xlm, minBalance3 - 3 * txfee}, {cur1, 0}, {cur2, 680}, {cur3, 7660}, {cur4, 0}}},
+                {mm34, {{xlm, minBalance3 - 3 * txfee}, {cur1, 0}, {cur2, 0}, {cur3, 340}, {cur4, 7830}}},
+                {mm41, {{xlm, minBalance3 - 3 * txfee}, {cur1, 7920}, {cur2, 0}, {cur3, 0}, {cur4, 160}}},
+                {destination, {{xlm, minBalance1 - txfee}, {cur1, 0}, {cur2, 0}, {cur3, 0}, {cur4, 10}}}});
+            // clang-format on
+        });
+    };
+
+    SECTION("no issuers missing")
+    {
+        useAllOffersInLoop(nullptr);
+    }
+
+    SECTION("outside issuers missing")
+    {
+        useAllOffersInLoop(&gateway);
+    }
+
+    SECTION("inside issuers missing")
+    {
+        useAllOffersInLoop(&gateway2);
     }
 }

@@ -24,6 +24,7 @@ namespace medida
 class Timer;
 class Counter;
 class Histogram;
+class Buckets;
 }
 
 namespace stellar
@@ -45,39 +46,31 @@ class LedgerManagerImpl : public LedgerManager
     medida::Timer& mTransactionApply;
     medida::Histogram& mTransactionCount;
     medida::Histogram& mOperationCount;
-    medida::Counter& mInternalErrorCount;
+    medida::Histogram& mPrefetchHitRate;
     medida::Timer& mLedgerClose;
-    medida::Timer& mLedgerAgeClosed;
+    medida::Buckets& mLedgerAgeClosed;
     medida::Counter& mLedgerAge;
-    medida::Counter& mPrefetchHitRate;
     VirtualClock::time_point mLastClose;
 
     std::unique_ptr<VirtualClock::time_point> mStartCatchup;
     medida::Timer& mCatchupDuration;
 
     void
-    processFeesSeqNums(std::vector<TransactionFramePtr>& txs,
+    processFeesSeqNums(std::vector<TransactionFrameBasePtr>& txs,
                        AbstractLedgerTxn& ltxOuter, int64_t baseFee,
                        std::unique_ptr<LedgerCloseMeta> const& ledgerCloseMeta);
 
     void
-    applyTransactions(std::vector<TransactionFramePtr>& txs,
+    applyTransactions(std::vector<TransactionFrameBasePtr>& txs,
                       AbstractLedgerTxn& ltx, TransactionResultSet& txResultSet,
                       std::unique_ptr<LedgerCloseMeta> const& ledgerCloseMeta);
 
     void ledgerClosed(AbstractLedgerTxn& ltx);
 
     void storeCurrentLedger(LedgerHeader const& header);
-    void prefetchTransactionData(std::vector<TransactionFramePtr>& txs);
-    void prefetchTxSourceIds(std::vector<TransactionFramePtr>& txs);
-
-    enum class CloseLedgerIfResult
-    {
-        CLOSED,
-        TOO_OLD,
-        TOO_NEW
-    };
-    CloseLedgerIfResult closeLedgerIf(LedgerCloseData const& ledgerData);
+    void prefetchTransactionData(std::vector<TransactionFrameBasePtr>& txs);
+    void prefetchTxSourceIds(std::vector<TransactionFrameBasePtr>& txs);
+    void closeLedgerIf(LedgerCloseData const& ledgerData);
 
     State mState;
     void setState(State s);

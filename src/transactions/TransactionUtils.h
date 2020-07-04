@@ -16,6 +16,8 @@ class LedgerTxnEntry;
 class LedgerTxnHeader;
 class TrustLineWrapper;
 struct LedgerKey;
+struct TransactionEnvelope;
+struct MuxedAccount;
 
 LedgerKey accountKey(AccountID const& accountID);
 LedgerKey trustlineKey(AccountID const& accountID, Asset const& asset);
@@ -115,20 +117,35 @@ int64_t getSellingLiabilities(LedgerTxnHeader const& header,
 int64_t getSellingLiabilities(LedgerTxnHeader const& header,
                               LedgerTxnEntry const& offer);
 
+uint64_t getStartingSequenceNumber(uint32_t ledgerSeq);
 uint64_t getStartingSequenceNumber(LedgerTxnHeader const& header);
 
 bool isAuthorized(LedgerEntry const& le);
 bool isAuthorized(LedgerTxnEntry const& entry);
 bool isAuthorized(ConstLedgerTxnEntry const& entry);
 
+bool isAuthorizedToMaintainLiabilities(LedgerEntry const& le);
+bool isAuthorizedToMaintainLiabilities(LedgerTxnEntry const& entry);
+bool isAuthorizedToMaintainLiabilities(ConstLedgerTxnEntry const& entry);
+
 bool isAuthRequired(ConstLedgerTxnEntry const& entry);
 
 bool isImmutableAuth(LedgerTxnEntry const& entry);
 
 void normalizeSigners(LedgerTxnEntry& entry);
+void normalizeSigners(AccountEntry& acc);
 
 void releaseLiabilities(AbstractLedgerTxn& ltx, LedgerTxnHeader const& header,
                         LedgerTxnEntry const& offer);
 
-void setAuthorized(LedgerTxnEntry& entry, bool authorized);
+AccountID toAccountID(MuxedAccount const& m);
+MuxedAccount toMuxedAccount(AccountID const& a);
+
+void setAuthorized(LedgerTxnHeader const& header, LedgerTxnEntry& entry,
+                   uint32_t authorized);
+
+bool trustLineFlagIsValid(uint32_t flag, uint32_t ledgerVersion);
+bool trustLineFlagIsValid(uint32_t flag, LedgerTxnHeader const& header);
+
+bool hasMuxedAccount(TransactionEnvelope const& e);
 }

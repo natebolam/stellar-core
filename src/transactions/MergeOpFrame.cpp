@@ -11,6 +11,7 @@
 #include "transactions/TransactionUtils.h"
 #include "util/Logging.h"
 #include "util/XDROperators.h"
+#include <Tracy.hpp>
 
 using namespace soci;
 
@@ -47,10 +48,11 @@ MergeOpFrame::isSeqnumTooFar(LedgerTxnHeader const& header,
 bool
 MergeOpFrame::doApply(AbstractLedgerTxn& ltx)
 {
+    ZoneNamedN(applyZone, "MergeOp apply", true);
     auto header = ltx.loadHeader();
 
     auto otherAccount =
-        stellar::loadAccount(ltx, mOperation.body.destination());
+        stellar::loadAccount(ltx, toAccountID(mOperation.body.destination()));
     if (!otherAccount)
     {
         innerResult().code(ACCOUNT_MERGE_NO_ACCOUNT);
@@ -125,7 +127,7 @@ bool
 MergeOpFrame::doCheckValid(uint32_t ledgerVersion)
 {
     // makes sure not merging into self
-    if (getSourceID() == mOperation.body.destination())
+    if (getSourceID() == toAccountID(mOperation.body.destination()))
     {
         innerResult().code(ACCOUNT_MERGE_MALFORMED);
         return false;

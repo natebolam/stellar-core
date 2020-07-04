@@ -102,6 +102,8 @@ class Config : public std::enable_shared_from_this<Config>
 
   public:
     static const uint32 CURRENT_LEDGER_PROTOCOL_VERSION;
+    // level = 0 when there is no nesting.
+    static const uint32 MAXIMUM_QUORUM_NESTING_LEVEL;
 
     typedef std::shared_ptr<Config> pointer;
 
@@ -267,7 +269,7 @@ class Config : public std::enable_shared_from_this<Config>
     std::vector<std::string> KNOWN_CURSORS;
 
     uint32_t LEDGER_PROTOCOL_VERSION;
-    VirtualClock::time_point TESTING_UPGRADE_DATETIME;
+    VirtualClock::system_time_point TESTING_UPGRADE_DATETIME;
 
     // maximum allowed drift for close time when joining the network for the
     // first time
@@ -370,11 +372,6 @@ class Config : public std::enable_shared_from_this<Config>
     // SQL load. Note that it should be significantly smaller than size of
     // the entry cache
     size_t PREFETCH_BATCH_SIZE;
-
-    // The version of TransactionMeta that will be generated. Acceptable values
-    // are 1 (default) and 2. Set to 2 only if downstream systems have been
-    // updated to handle TransactionMetaV2.
-    int32_t SUPPORTED_META_VERSION;
 
 #ifdef BUILD_TESTS
     // If set to true, the application will be aware this run is for a test

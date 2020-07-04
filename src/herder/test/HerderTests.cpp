@@ -21,22 +21,29 @@
 #include "lib/catch.hpp"
 #include "main/CommandHandler.h"
 #include "overlay/OverlayManager.h"
+#include "overlay/OverlayMetrics.h"
 #include "test/TxTests.h"
 #include "transactions/OperationFrame.h"
+#include "transactions/SignatureUtils.h"
+#include "transactions/TransactionBridge.h"
 #include "transactions/TransactionFrame.h"
+#include "transactions/TransactionUtils.h"
 
 #include "xdrpp/marshal.h"
 #include <algorithm>
+#include <fmt/format.h>
 
 using namespace stellar;
+using namespace stellar::txbridge;
 using namespace stellar::txtest;
 
 TEST_CASE("standalone", "[herder][acceptance]")
 {
     SIMULATION_CREATE_NODE(0);
 
-    Config cfg(getTestConfig());
+    Config cfg(getTestConfig(0, Config::TESTDB_DEFAULT));
 
+    cfg.MANUAL_CLOSE = false;
     cfg.NODE_SEED = v0SecretKey;
 
     cfg.QUORUM_SET.threshold = 1;
@@ -234,9 +241,8 @@ makeMultiPayment(stellar::TestAccount& destAccount, stellar::TestAccount& src,
         ops.emplace_back(payment(destAccount, i + paymentBase));
     }
     auto tx = src.tx(ops);
-    tx->getEnvelope().tx.fee *= feeMult;
-    tx->getEnvelope().tx.fee += extraFee;
-    tx->getEnvelope().signatures.clear();
+    setFee(tx, static_cast<uint32_t>(tx->getFeeBid()) * feeMult + extraFee);
+    getSignatures(tx).clear();
     tx->addSignature(src);
     return tx;
 }
@@ -251,12 +257,6 @@ testTxSet(uint32 protocolVersion)
     Application::pointer app = createTestApplication(clock, cfg);
 
     app->start();
-
-    LedgerHeader lhCopy;
-    {
-        LedgerTxn ltx(app->getLedgerTxnRoot());
-        lhCopy = ltx.loadHeader().current();
-    }
 
     // set up world
     auto root = TestAccount::createRoot(*app);
@@ -338,7 +338,7 @@ testTxSet(uint32 protocolVersion)
             SECTION("gap after")
             {
                 auto tx = accounts[0].tx({payment(accounts[0], 1)});
-                tx->getEnvelope().tx.seqNum += 5;
+                setSeqNum(tx, tx->getSeqNum() + 5);
                 txSet->add(tx);
                 txSet->sortForHash();
                 REQUIRE(!txSet->checkValid(*app));
@@ -348,8 +348,7 @@ testTxSet(uint32 protocolVersion)
             }
             SECTION("gap begin")
             {
-                txSet->sortForApply();
-                txSet->mTransactions.erase(txSet->mTransactions.begin());
+                txSet->removeTx(txSet->sortForApply()[0]);
                 txSet->sortForHash();
                 REQUIRE(!txSet->checkValid(*app));
 
@@ -390,11 +389,249 @@ testTxSet(uint32 protocolVersion)
         }
         SECTION("bad signature")
         {
-            auto tx = txSet->mTransactions[0];
-            tx->getEnvelope().tx.timeBounds.activate().maxTime = UINT64_MAX;
+            auto tx = std::static_pointer_cast<TransactionFrame>(
+                txSet->mTransactions[0]);
+            auto& tb = tx->getEnvelope().type() == ENVELOPE_TYPE_TX_V0
+                           ? tx->getEnvelope().v0().tx.timeBounds.activate()
+                           : tx->getEnvelope().v1().tx.timeBounds.activate();
+            tb.maxTime = UINT64_MAX;
             tx->clearCached();
             txSet->sortForHash();
             REQUIRE(!txSet->checkValid(*app));
+        }
+    }
+}
+
+static TransactionFrameBasePtr
+transaction(Application& app, TestAccount& account, int64_t sequenceDelta,
+            int64_t amount, uint32_t fee)
+{
+    return transactionFromOperations(
+        app, account, account.getLastSequenceNumber() + sequenceDelta,
+        {payment(account.getPublicKey(), amount)}, fee);
+}
+
+static TransactionFrameBasePtr
+feeBump(Application& app, TestAccount& feeSource, TransactionFrameBasePtr tx,
+        int64_t fee)
+{
+    REQUIRE(tx->getEnvelope().type() == ENVELOPE_TYPE_TX);
+    TransactionEnvelope fb(ENVELOPE_TYPE_TX_FEE_BUMP);
+    fb.feeBump().tx.feeSource = toMuxedAccount(feeSource);
+    fb.feeBump().tx.fee = fee;
+    fb.feeBump().tx.innerTx.type(ENVELOPE_TYPE_TX);
+    fb.feeBump().tx.innerTx.v1() = tx->getEnvelope().v1();
+
+    auto hash = sha256(xdr::xdr_to_opaque(
+        app.getNetworkID(), ENVELOPE_TYPE_TX_FEE_BUMP, fb.feeBump().tx));
+    fb.feeBump().signatures.emplace_back(SignatureUtils::sign(feeSource, hash));
+    return TransactionFrameBase::makeTransactionFromWire(app.getNetworkID(),
+                                                         fb);
+}
+
+static void
+testTxSetWithFeeBumps(uint32 protocolVersion)
+{
+    Config cfg(getTestConfig());
+    cfg.TESTING_UPGRADE_MAX_TX_SET_SIZE = 14;
+    cfg.LEDGER_PROTOCOL_VERSION = protocolVersion;
+    VirtualClock clock;
+    Application::pointer app = createTestApplication(clock, cfg);
+    app->start();
+
+    auto const minBalance0 = app->getLedgerManager().getLastMinBalance(0);
+    auto const minBalance2 = app->getLedgerManager().getLastMinBalance(2);
+
+    auto txSet = std::make_shared<TxSetFrame>(
+        app->getLedgerManager().getLastClosedLedgerHeader().hash);
+
+    auto root = TestAccount::createRoot(*app);
+    auto account1 = root.create("a1", minBalance2);
+    auto account2 = root.create("a2", minBalance2);
+    auto account3 = root.create("a3", minBalance2);
+
+    auto checkTrimCheck = [&](std::vector<TransactionFrameBasePtr> const& txs) {
+        txSet->sortForHash();
+        REQUIRE(!txSet->checkValid(*app));
+        REQUIRE(txSet->trimInvalid(*app) == txs);
+        REQUIRE(txSet->checkValid(*app));
+    };
+
+    SECTION("insufficient balance")
+    {
+        SECTION("two fee bumps with same sources, second insufficient")
+        {
+            auto tx1 = transaction(*app, account1, 1, 1, 100);
+            auto fb1 = feeBump(*app, account2, tx1, 200);
+            txSet->add(fb1);
+            auto tx2 = transaction(*app, account1, 2, 1, 100);
+            auto fb2 =
+                feeBump(*app, account2, tx2, minBalance2 - minBalance0 - 199);
+            txSet->add(fb2);
+
+            checkTrimCheck({fb1, fb2});
+        }
+
+        SECTION("three fee bumps, one with different fee source, "
+                "different first")
+        {
+            auto tx1 = transaction(*app, account1, 1, 1, 100);
+            auto fb1 = feeBump(*app, account3, tx1, 200);
+            txSet->add(fb1);
+            auto tx2 = transaction(*app, account1, 2, 1, 100);
+            auto fb2 = feeBump(*app, account2, tx2, 200);
+            txSet->add(fb2);
+            auto tx3 = transaction(*app, account1, 3, 1, 100);
+            auto fb3 =
+                feeBump(*app, account2, tx3, minBalance2 - minBalance0 - 199);
+            txSet->add(fb3);
+
+            checkTrimCheck({fb2, fb3});
+        }
+
+        SECTION("three fee bumps, one with different fee source, "
+                "different second")
+        {
+            auto tx1 = transaction(*app, account1, 1, 1, 100);
+            auto fb1 = feeBump(*app, account2, tx1, 200);
+            txSet->add(fb1);
+            auto tx2 = transaction(*app, account1, 2, 1, 100);
+            auto fb2 = feeBump(*app, account3, tx2, 200);
+            txSet->add(fb2);
+            auto tx3 = transaction(*app, account1, 3, 1, 100);
+            auto fb3 =
+                feeBump(*app, account2, tx3, minBalance2 - minBalance0 - 199);
+            txSet->add(fb3);
+
+            checkTrimCheck({fb1, fb2, fb3});
+        }
+
+        SECTION("three fee bumps, one with different fee source, "
+                "different third")
+        {
+            auto tx1 = transaction(*app, account1, 1, 1, 100);
+            auto fb1 = feeBump(*app, account2, tx1, 200);
+            txSet->add(fb1);
+            auto tx2 = transaction(*app, account1, 2, 1, 100);
+            auto fb2 =
+                feeBump(*app, account2, tx2, minBalance2 - minBalance0 - 199);
+            txSet->add(fb2);
+            auto tx3 = transaction(*app, account1, 3, 1, 100);
+            auto fb3 = feeBump(*app, account3, tx3, 200);
+            txSet->add(fb3);
+
+            checkTrimCheck({fb1, fb2, fb3});
+        }
+
+        SECTION("two fee bumps with same fee source but different source")
+        {
+            auto tx1 = transaction(*app, account1, 1, 1, 100);
+            auto fb1 = feeBump(*app, account2, tx1, 200);
+            txSet->add(fb1);
+            auto tx2 = transaction(*app, account2, 1, 1, 100);
+            auto fb2 =
+                feeBump(*app, account2, tx2, minBalance2 - minBalance0 - 199);
+            txSet->add(fb2);
+
+            checkTrimCheck({fb1, fb2});
+        }
+    }
+
+    SECTION("invalid transaction")
+    {
+        SECTION("one fee bump")
+        {
+            auto tx1 = transaction(*app, account1, 1, 1, 100);
+            auto fb1 = feeBump(*app, account2, tx1, minBalance2);
+            txSet->add(fb1);
+
+            checkTrimCheck({fb1});
+        }
+
+        SECTION("two fee bumps with same sources, first has high fee")
+        {
+            auto tx1 = transaction(*app, account1, 1, 1, 100);
+            auto fb1 = feeBump(*app, account2, tx1, minBalance2);
+            txSet->add(fb1);
+            auto tx2 = transaction(*app, account1, 2, 1, 100);
+            auto fb2 = feeBump(*app, account2, tx2, 200);
+            txSet->add(fb2);
+
+            checkTrimCheck({fb1, fb2});
+        }
+
+        // Compare against
+        // "two fee bumps with same sources, second insufficient"
+        SECTION("two fee bumps with same sources, second has high fee")
+        {
+            auto tx1 = transaction(*app, account1, 1, 1, 100);
+            auto fb1 = feeBump(*app, account2, tx1, 200);
+            txSet->add(fb1);
+            auto tx2 = transaction(*app, account1, 2, 1, 100);
+            auto fb2 = feeBump(*app, account2, tx2, minBalance2);
+            txSet->add(fb2);
+
+            checkTrimCheck({fb2});
+        }
+
+        // Compare against
+        // "two fee bumps with same sources, second insufficient"
+        SECTION("two fee bumps with same sources, second insufficient, "
+                "second invalid by malformed operation")
+        {
+            auto tx1 = transaction(*app, account1, 1, 1, 100);
+            auto fb1 = feeBump(*app, account2, tx1, 200);
+            txSet->add(fb1);
+            auto tx2 = transaction(*app, account1, 2, -1, 100);
+            auto fb2 =
+                feeBump(*app, account2, tx2, minBalance2 - minBalance0 - 199);
+            txSet->add(fb2);
+
+            checkTrimCheck({fb2});
+        }
+
+        SECTION("two fee bumps with same fee source but different source, "
+                "second has high fee")
+        {
+            auto tx1 = transaction(*app, account1, 1, 1, 100);
+            auto fb1 = feeBump(*app, account2, tx1, 200);
+            txSet->add(fb1);
+            auto tx2 = transaction(*app, account2, 1, 1, 100);
+            auto fb2 = feeBump(*app, account2, tx2, minBalance2);
+            txSet->add(fb2);
+
+            checkTrimCheck({fb2});
+        }
+
+        SECTION("two fee bumps with same fee source but different source, "
+                "second insufficient, second invalid by malformed operation")
+        {
+            auto tx1 = transaction(*app, account1, 1, 1, 100);
+            auto fb1 = feeBump(*app, account2, tx1, 200);
+            txSet->add(fb1);
+            auto tx2 = transaction(*app, account2, 1, -1, 100);
+            auto fb2 =
+                feeBump(*app, account2, tx2, minBalance2 - minBalance0 - 199);
+            txSet->add(fb2);
+
+            checkTrimCheck({fb2});
+        }
+
+        SECTION("three fee bumps with same fee source, third insufficient, "
+                "second invalid by malformed operation")
+        {
+            auto tx1 = transaction(*app, account1, 1, 1, 100);
+            auto fb1 = feeBump(*app, account2, tx1, 200);
+            txSet->add(fb1);
+            auto tx2 = transaction(*app, account1, 2, -1, 100);
+            auto fb2 = feeBump(*app, account2, tx2, 200);
+            txSet->add(fb2);
+            auto tx3 = transaction(*app, account1, 3, 1, 100);
+            auto fb3 =
+                feeBump(*app, account2, tx3, minBalance2 - minBalance0 - 199);
+            txSet->add(fb3);
+
+            checkTrimCheck({fb2, fb3});
         }
     }
 }
@@ -408,6 +645,7 @@ TEST_CASE("txset", "[herder][txset]")
     SECTION("protocol current")
     {
         testTxSet(Config::CURRENT_LEDGER_PROTOCOL_VERSION);
+        testTxSetWithFeeBumps(Config::CURRENT_LEDGER_PROTOCOL_VERSION);
     }
 }
 
@@ -668,8 +906,8 @@ surgeTest(uint32 protocolVersion, uint32_t nbTxs, uint32_t maxTxSetSize,
         for (uint32_t n = 0; n < nbTxs; n++)
         {
             auto tx = multiPaymentTx(accountB, n + 1, 10000 + 1000 * n);
-            tx->getEnvelope().tx.fee -= 1;
-            tx->getEnvelope().signatures.clear();
+            setFee(tx, static_cast<uint32_t>(tx->getFeeBid()) - 1);
+            getSignatures(tx).clear();
             tx->addSignature(accountB);
             txSet->add(tx);
         }
@@ -694,11 +932,11 @@ surgeTest(uint32 protocolVersion, uint32_t nbTxs, uint32_t maxTxSetSize,
             auto tx = multiPaymentTx(accountB, n + 2, 10000 + 1000 * n);
             // find corresponding root tx (should have 1 less op)
             auto rTx = txSet->mTransactions[n];
-            REQUIRE(rTx->getEnvelope().tx.operations.size() == n + 1);
-            REQUIRE(tx->getEnvelope().tx.operations.size() == n + 2);
+            REQUIRE(rTx->getNumOperations() == n + 1);
+            REQUIRE(tx->getNumOperations() == n + 2);
             // use the same fee
-            tx->getEnvelope().tx.fee = rTx->getEnvelope().tx.fee;
-            tx->getEnvelope().signatures.clear();
+            setFee(tx, static_cast<uint32_t>(rTx->getFeeBid()));
+            getSignatures(tx).clear();
             tx->addSignature(accountB);
             txSet->add(tx);
         }
@@ -725,13 +963,13 @@ surgeTest(uint32 protocolVersion, uint32_t nbTxs, uint32_t maxTxSetSize,
             auto tx = multiPaymentTx(accountB, n + 1, 10000 + 1000 * n);
             if (n == 2)
             {
-                tx->getEnvelope().tx.fee -= 1;
+                setFee(tx, static_cast<uint32_t>(tx->getFeeBid()) - 1);
             }
             else
             {
-                tx->getEnvelope().tx.fee += 1;
+                setFee(tx, static_cast<uint32_t>(tx->getFeeBid()) + 1);
             }
-            tx->getEnvelope().signatures.clear();
+            getSignatures(tx).clear();
             tx->addSignature(accountB);
             txSet->add(tx);
         }
@@ -829,7 +1067,9 @@ static void
 testSCPDriver(uint32 protocolVersion, uint32_t maxTxSize, size_t expectedOps,
               bool checkHighFee, bool withSCPsignature)
 {
-    Config cfg(getTestConfig());
+    Config cfg(getTestConfig(0, Config::TESTDB_DEFAULT));
+
+    cfg.MANUAL_CLOSE = false;
     cfg.LEDGER_PROTOCOL_VERSION = protocolVersion;
     cfg.TESTING_UPGRADE_MAX_TX_SET_SIZE = maxTxSize;
 
@@ -1380,6 +1620,190 @@ TEST_CASE("SCP State", "[herder][acceptance]")
     }
 }
 
+TEST_CASE("values externalized out of order", "[herder][quickRestart]")
+{
+    auto networkID = sha256(getTestConfig().NETWORK_PASSPHRASE);
+    auto simulation =
+        std::make_shared<Simulation>(Simulation::OVER_LOOPBACK, networkID);
+
+    auto validatorKey = SecretKey::fromSeed(sha256("validator"));
+    auto listenerKey = SecretKey::fromSeed(sha256("listener"));
+
+    SCPQuorumSet qset;
+    qset.threshold = 1;
+    qset.validators.push_back(validatorKey.getPublicKey());
+
+    simulation->addNode(validatorKey, qset);
+    simulation->addNode(listenerKey, qset);
+    simulation->addPendingConnection(validatorKey.getPublicKey(),
+                                     listenerKey.getPublicKey());
+    simulation->startAllNodes();
+    auto validator = simulation->getNode(validatorKey.getPublicKey());
+    auto listener = simulation->getNode(listenerKey.getPublicKey());
+
+    auto currentValidatorLedger = [&]() {
+        return validator->getLedgerManager().getLastClosedLedgerNum();
+    };
+    auto currentListenerLedger = [&]() {
+        return listener->getLedgerManager().getLastClosedLedgerNum();
+    };
+
+    auto waitForLedgers = [&](int nLedgers) {
+        auto destinationLedger = currentValidatorLedger() + nLedgers;
+        simulation->crankUntil(
+            [&]() {
+                return simulation->haveAllExternalized(destinationLedger, 100);
+            },
+            2 * nLedgers * Herder::EXP_LEDGER_TIMESPAN_SECONDS, false);
+        return std::min(currentListenerLedger(), currentValidatorLedger());
+    };
+
+    auto waitForValidator = [&](int nLedgers) {
+        auto destinationLedger = currentValidatorLedger() + nLedgers;
+        simulation->crankUntil(
+            [&]() { return currentValidatorLedger() >= destinationLedger; },
+            2 * nLedgers * Herder::EXP_LEDGER_TIMESPAN_SECONDS, false);
+        return currentValidatorLedger();
+    };
+
+    uint32_t currentLedger = 1;
+    REQUIRE(currentValidatorLedger() == currentLedger);
+    REQUIRE(currentListenerLedger() == currentLedger);
+
+    // externalize a few ledgers
+    auto maxSlots = validator->getConfig().MAX_SLOTS_TO_REMEMBER;
+    currentLedger = waitForLedgers(maxSlots / 2);
+
+    REQUIRE(currentValidatorLedger() >= currentLedger);
+    // listener is at most a ledger behind
+    REQUIRE(currentLedger == currentListenerLedger());
+
+    // disconnect listener
+    simulation->dropConnection(validatorKey.getPublicKey(),
+                               listenerKey.getPublicKey());
+
+    HerderImpl& herder = *static_cast<HerderImpl*>(&listener->getHerder());
+    HerderImpl& valHerder = *static_cast<HerderImpl*>(&validator->getHerder());
+    auto const& lm = listener->getLedgerManager();
+    auto const& cm = listener->getCatchupManager();
+
+    // Now construct a few future externalize messages
+    // Make sure out of order messages are still within the validity range
+    std::map<uint32_t, std::pair<SCPEnvelope, TxSetFramePtr>>
+        validatorSCPMessages;
+    Hash qSetHash = sha256(xdr::xdr_to_opaque(qset));
+
+    // Advance validator a bit further, and collect its externalize messages
+    auto destinationLedger = waitForValidator(maxSlots / 2);
+    for (auto start = currentLedger + 1; start <= destinationLedger; start++)
+    {
+        auto envs = valHerder.getSCP().getLatestMessagesSend(start);
+        for (auto const& env : envs)
+        {
+            if (env.statement.pledges.type() == SCP_ST_EXTERNALIZE)
+            {
+                StellarValue sv;
+                auto& pe = valHerder.getPendingEnvelopes();
+                valHerder.getHerderSCPDriver().toStellarValue(
+                    env.statement.pledges.externalize().commit.value, sv);
+                auto txset = pe.getTxSet(sv.txSetHash);
+                REQUIRE(txset);
+                validatorSCPMessages[start] = std::make_pair(env, txset);
+            }
+        }
+    }
+
+    REQUIRE(herder.getCurrentLedgerSeq() == currentListenerLedger());
+
+    auto testOutOfOrder = [&](bool partial) {
+        auto first = currentLedger + 1;
+        auto second = first + 1;
+        auto third = second + 1;
+
+        // Externalize future ledger
+        // This should trigger CatchupManager to start buffering ledgers
+        auto futureSlot = validatorSCPMessages[third + 1];
+        REQUIRE(herder.recvSCPEnvelope(futureSlot.first, qset,
+                                       *(futureSlot.second)) ==
+                Herder::ENVELOPE_STATUS_READY);
+
+        // Wait until listener goes out of sync
+        simulation->crankUntil([&]() { return !lm.isSynced(); },
+                               2 * Herder::CONSENSUS_STUCK_TIMEOUT_SECONDS,
+                               false);
+
+        // Ensure LM is out of sync, and Herder tracks ledger seq from latest
+        // envelope
+        REQUIRE(herder.getCurrentLedgerSeq() ==
+                futureSlot.first.statement.slotIndex);
+
+        // Next, externalize a contiguous ledger
+        // This will cause LM to apply it, and catchup manager will try to apply
+        // buffered ledgers
+        // complete - all messages are received out of order
+        // partial - only most recent ledger is received out of order
+        // CatchupManager should apply buffered ledgers and let LM get back
+        // in sync
+        std::vector<uint32_t> ledgers{first, third, second};
+        if (partial)
+        {
+            ledgers = {first, second, third};
+        }
+
+        for (auto ledger : ledgers)
+        {
+            auto it = validatorSCPMessages.find(ledger);
+            auto slot = validatorSCPMessages[it->first];
+            REQUIRE(herder.recvSCPEnvelope(slot.first, qset, *(slot.second)) ==
+                    Herder::ENVELOPE_STATUS_READY);
+            REQUIRE(herder.getCurrentLedgerSeq() ==
+                    futureSlot.first.statement.slotIndex);
+            REQUIRE(!lm.isSynced());
+        }
+
+        REQUIRE(currentListenerLedger() ==
+                futureSlot.first.statement.slotIndex);
+        // Catchup is not running, no more buffered ledgers
+        REQUIRE(!cm.hasBufferedLedger());
+        REQUIRE(!cm.isCatchupInitialized());
+
+        // Close one last ledger, LM must now get back in sync
+        auto newestSlot = validatorSCPMessages[currentListenerLedger() + 1];
+        REQUIRE(herder.recvSCPEnvelope(newestSlot.first, qset,
+                                       *(newestSlot.second)) ==
+                Herder::ENVELOPE_STATUS_READY);
+        REQUIRE(lm.isSynced());
+        REQUIRE(!cm.hasBufferedLedger());
+        REQUIRE(herder.getCurrentLedgerSeq() ==
+                newestSlot.first.statement.slotIndex);
+    };
+
+    SECTION("in order")
+    {
+        for (auto const& msgPair : validatorSCPMessages)
+        {
+            auto msg = msgPair.second;
+            REQUIRE(herder.recvSCPEnvelope(msg.first, qset, *(msg.second)) ==
+                    Herder::ENVELOPE_STATUS_READY);
+            // Tracking is updated correctly
+            REQUIRE(herder.getCurrentLedgerSeq() ==
+                    msg.first.statement.slotIndex);
+            // nothing out of ordinary in LM
+            REQUIRE(lm.isSynced());
+            // Catchup is not running, no ledgers are buffered
+            REQUIRE(!cm.hasBufferedLedger());
+        }
+    }
+    SECTION("completely out of order")
+    {
+        testOutOfOrder(/* partial */ false);
+    }
+    SECTION("partially out of order")
+    {
+        testOutOfOrder(/* partial */ true);
+    }
+}
+
 TEST_CASE("quick restart", "[herder][quickRestart]")
 {
     auto mode = Simulation::OVER_LOOPBACK;
@@ -1393,8 +1817,13 @@ TEST_CASE("quick restart", "[herder][quickRestart]")
     qSet.threshold = 1;
     qSet.validators.push_back(validatorKey.getPublicKey());
 
-    simulation->addNode(validatorKey, qSet);
-    simulation->addNode(listenerKey, qSet);
+    auto cfg1 = getTestConfig(1);
+    auto cfg2 = getTestConfig(2);
+    cfg1.MAX_SLOTS_TO_REMEMBER = 5;
+    cfg2.MAX_SLOTS_TO_REMEMBER = cfg1.MAX_SLOTS_TO_REMEMBER;
+
+    simulation->addNode(validatorKey, qSet, &cfg1);
+    simulation->addNode(listenerKey, qSet, &cfg2);
     simulation->addPendingConnection(validatorKey.getPublicKey(),
                                      listenerKey.getPublicKey());
     simulation->startAllNodes();
@@ -1441,11 +1870,14 @@ TEST_CASE("quick restart", "[herder][quickRestart]")
     simulation->dropConnection(validatorKey.getPublicKey(),
                                listenerKey.getPublicKey());
 
-    // SMALL_GAP happens to be the maximum number of ledgers
-    // that are kept in memory
     auto app = simulation->getNode(listenerKey.getPublicKey());
-    auto static const SMALL_GAP = app->getConfig().MAX_SLOTS_TO_REMEMBER + 1;
-    auto static const BIG_GAP = SMALL_GAP + 1;
+    // we pick SMALL_GAP to be as close to the maximum number of ledgers that
+    // are kept in memory, with room for the watcher node to be behind by one
+    // ledger
+    auto static const SMALL_GAP = app->getConfig().MAX_SLOTS_TO_REMEMBER - 1;
+    // BIG_GAP, we just need to pick a number greater than what we keep in
+    // memory
+    auto static const BIG_GAP = app->getConfig().MAX_SLOTS_TO_REMEMBER + 1;
 
     auto beforeGap = currentLedger;
 
@@ -1609,4 +2041,126 @@ TEST_CASE("In quorum filtering", "[quorum][herder][acceptance]")
     int expected = static_cast<int>(extraK.size() - 1);
     REQUIRE(actual == expected);
     REQUIRE(!found[0]);
+}
+
+static void
+externalize(LedgerManager& lm, HerderImpl& herder,
+            std::vector<TransactionFrameBasePtr> const& txs)
+{
+    auto const& lcl = lm.getLastClosedLedgerHeader();
+    auto ledgerSeq = lcl.header.ledgerSeq + 1;
+
+    auto txSet = std::make_shared<TxSetFrame>(lcl.hash);
+    for (auto const& tx : txs)
+    {
+        txSet->add(tx);
+    }
+    herder.getPendingEnvelopes().putTxSet(txSet->getContentsHash(), ledgerSeq,
+                                          txSet);
+
+    StellarValue sv{txSet->getContentsHash(), 2, xdr::xvector<UpgradeType, 6>{},
+                    STELLAR_VALUE_BASIC};
+    herder.getHerderSCPDriver().valueExternalized(ledgerSeq,
+                                                  xdr::xdr_to_opaque(sv));
+}
+
+TEST_CASE("do not flood invalid transactions", "[herder]")
+{
+    VirtualClock clock;
+    auto cfg = getTestConfig();
+    auto app = createTestApplication(clock, cfg);
+    app->start();
+
+    auto& om = app->getOverlayManager();
+    auto& lm = app->getLedgerManager();
+    auto& herder = static_cast<HerderImpl&>(app->getHerder());
+    auto& tq = herder.getTransactionQueue();
+
+    auto root = TestAccount::createRoot(*app);
+    auto acc = root.create("A", lm.getLastMinBalance(2));
+
+    auto tx1a = acc.tx({payment(acc, 1)});
+    auto tx1r = root.tx({bumpSequence(INT64_MAX)});
+    auto tx2r = root.tx({payment(root, 1)});
+
+    herder.recvTransaction(tx1a);
+    herder.recvTransaction(tx1r);
+    herder.recvTransaction(tx2r);
+
+    auto numBroadcast = om.getOverlayMetrics().mMessagesBroadcast.count();
+    externalize(lm, herder, {tx1r});
+    REQUIRE(numBroadcast + 1 ==
+            om.getOverlayMetrics().mMessagesBroadcast.count());
+
+    auto const& lhhe = lm.getLastClosedLedgerHeader();
+    auto txSet = tq.toTxSet(lhhe);
+    REQUIRE(txSet->mTransactions.size() == 1);
+    REQUIRE(txSet->mTransactions.front()->getContentsHash() ==
+            tx1a->getContentsHash());
+    REQUIRE(txSet->checkValid(*app));
+}
+
+TEST_CASE("do not flood too many transactions", "[herder]")
+{
+    VirtualClock clock;
+    auto cfg = getTestConfig();
+    cfg.TESTING_UPGRADE_MAX_TX_SET_SIZE = 500;
+    auto app = createTestApplication(clock, cfg);
+    app->start();
+
+    auto& om = app->getOverlayManager();
+    auto& lm = app->getLedgerManager();
+    auto& herder = static_cast<HerderImpl&>(app->getHerder());
+    auto& tq = herder.getTransactionQueue();
+
+    auto root = TestAccount::createRoot(*app);
+    auto acc = root.create("A", lm.getLastMinBalance(2));
+
+    auto genTx = [&](TestAccount& source, uint32_t numOps) {
+        std::vector<Operation> ops;
+        for (int64_t i = 1; i <= numOps; ++i)
+        {
+            ops.emplace_back(payment(source, i));
+        }
+        auto tx = source.tx(ops);
+        REQUIRE(herder.recvTransaction(tx) ==
+                TransactionQueue::AddResult::ADD_STATUS_PENDING);
+        return tx;
+    };
+
+    auto test = [&](uint32_t numOps) {
+        size_t maxOps = cfg.TESTING_UPGRADE_MAX_TX_SET_SIZE;
+
+        auto tx1a = genTx(acc, numOps);
+        auto tx1r = genTx(root, numOps);
+        size_t numTx = 2;
+        while ((numTx + 2) * numOps <= maxOps)
+        {
+            genTx(acc, numOps);
+            genTx(root, numOps);
+            numTx += 2;
+        }
+
+        REQUIRE(tq.toTxSet({})->mTransactions.size() == numTx);
+
+        auto numBroadcast = om.getOverlayMetrics().mMessagesBroadcast.count();
+        externalize(lm, herder, {tx1a, tx1r});
+        REQUIRE(numBroadcast + (numTx - 2) ==
+                om.getOverlayMetrics().mMessagesBroadcast.count());
+
+        REQUIRE(tq.toTxSet({})->mTransactions.size() == numTx - 2);
+    };
+
+    SECTION("one operation per transaction")
+    {
+        test(1);
+    }
+    SECTION("a few operations per transaction")
+    {
+        test(7);
+    }
+    SECTION("full transactions")
+    {
+        test(100);
+    }
 }

@@ -79,8 +79,8 @@
       <WarningLevel>Level4</WarningLevel>
       <Optimization>Disabled</Optimization>
       <SDLCheck>true</SDLCheck>
-      <AdditionalIncludeDirectories>src;../../src;../../lib;../../lib/libmedida/src;../../lib/soci/src/core;../../lib/autocheck/include;../../lib/cereal/include;../../lib/asio/asio/include;../../lib/xdrpp;../../lib/libsodium/src/libsodium/include;../..;src/generated;../../lib/sqlite;c:\Program Files\PostgreSQL\9.5\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>BUILD_TESTS;USE_POSTGRES;WIN32_LEAN_AND_MEAN;NOMINMAX;ASIO_STANDALONE;_WINSOCK_DEPRECATED_NO_WARNINGS;SODIUM_STATIC;ASIO_SEPARATE_COMPILATION;ASIO_ERROR_CATEGORY_NOEXCEPT=noexcept;_CRT_SECURE_NO_WARNINGS;_WIN32_WINNT=0x0601;WIN32;_MBCS;_CRT_NONSTDC_NO_DEPRECATE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>USE_POSTGRES;FMT_HEADER_ONLY=1;BUILD_TESTS;WIN32_LEAN_AND_MEAN;NOMINMAX;ASIO_STANDALONE;_WINSOCK_DEPRECATED_NO_WARNINGS;SODIUM_STATIC;ASIO_SEPARATE_COMPILATION;ASIO_ERROR_CATEGORY_NOEXCEPT=noexcept;TRACY_ENABLE;TRACY_ON_DEMAND;TRACY_NO_BROADCAST;TRACY_ONLY_LOCALHOST;USE_TRACY;_CRT_SECURE_NO_WARNINGS;_WIN32_WINNT=0x0601;WIN32;_MBCS;_CRT_NONSTDC_NO_DEPRECATE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>src;../../src;../../lib;../../lib/tracy;../../lib/libmedida/src;../../lib/soci/src/core;../../lib/autocheck/include;../../lib/cereal/include;../../lib/asio/asio/include;../../lib/xdrpp;../../lib/libsodium/src/libsodium/include;../../lib/fmt/include;../..;src/generated;../../lib/sqlite;c:\Program Files\PostgreSQL\9.5\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <MinimalRebuild>false</MinimalRebuild>
       <DisableSpecificWarnings>4060;4100;4127;4324;4408;4510;4512;4582;4583;4592</DisableSpecificWarnings>
@@ -137,8 +137,8 @@ exit /b 0
       <WarningLevel>Level4</WarningLevel>
       <Optimization>Disabled</Optimization>
       <SDLCheck>true</SDLCheck>
-      <AdditionalIncludeDirectories>src;../../src;../../lib;../../lib/libmedida/src;../../lib/soci/src/core;../../lib/autocheck/include;../../lib/cereal/include;../../lib/asio/asio/include;../../lib/xdrpp;../../lib/libsodium/src/libsodium/include;../..;src/generated;../../lib/sqlite;c:\Program Files\PostgreSQL\9.5\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>BUILD_TESTS;WIN32_LEAN_AND_MEAN;NOMINMAX;ASIO_STANDALONE;_WINSOCK_DEPRECATED_NO_WARNINGS;SODIUM_STATIC;ASIO_SEPARATE_COMPILATION;ASIO_ERROR_CATEGORY_NOEXCEPT=noexcept;_CRT_SECURE_NO_WARNINGS;_WIN32_WINNT=0x0601;WIN32;_MBCS;_CRT_NONSTDC_NO_DEPRECATE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>FMT_HEADER_ONLY=1;BUILD_TESTS;WIN32_LEAN_AND_MEAN;NOMINMAX;ASIO_STANDALONE;_WINSOCK_DEPRECATED_NO_WARNINGS;SODIUM_STATIC;ASIO_SEPARATE_COMPILATION;ASIO_ERROR_CATEGORY_NOEXCEPT=noexcept;TRACY_ENABLE;TRACY_ON_DEMAND;TRACY_NO_BROADCAST;TRACY_ONLY_LOCALHOST;USE_TRACY;_CRT_SECURE_NO_WARNINGS;_WIN32_WINNT=0x0601;WIN32;_MBCS;_CRT_NONSTDC_NO_DEPRECATE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>src;../../src;../../lib;../../lib/tracy;../../lib/libmedida/src;../../lib/soci/src/core;../../lib/autocheck/include;../../lib/cereal/include;../../lib/asio/asio/include;../../lib/xdrpp;../../lib/libsodium/src/libsodium/include;../../lib/fmt/include;../..;src/generated;../../lib/sqlite;c:\Program Files\PostgreSQL\9.5\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <MinimalRebuild>false</MinimalRebuild>
       <DisableSpecificWarnings>4060;4100;4127;4324;4408;4510;4512;4582;4583;4592</DisableSpecificWarnings>
@@ -200,8 +200,8 @@ exit /b 0
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <AdditionalIncludeDirectories>src;../../src;../../lib;../../lib/libmedida/src;../../lib/soci/src/core;../../lib/autocheck/include;../../lib/cereal/include;../../lib/asio/asio/include;../../lib/xdrpp;../../lib/libsodium/src/libsodium/include;../..;src/generated;../../lib/sqlite;c:\Program Files\PostgreSQL\9.5\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>BUILD_TESTS;USE_POSTGRES;WIN32_LEAN_AND_MEAN;NOMINMAX;ASIO_STANDALONE;_WINSOCK_DEPRECATED_NO_WARNINGS;SODIUM_STATIC;ASIO_SEPARATE_COMPILATION;ASIO_ERROR_CATEGORY_NOEXCEPT=noexcept;_CRT_SECURE_NO_WARNINGS;_WIN32_WINNT=0x0601;WIN32;_MBCS;_CRT_NONSTDC_NO_DEPRECATE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>USE_POSTGRES;FMT_HEADER_ONLY=1;BUILD_TESTS;WIN32_LEAN_AND_MEAN;NOMINMAX;ASIO_STANDALONE;_WINSOCK_DEPRECATED_NO_WARNINGS;SODIUM_STATIC;ASIO_SEPARATE_COMPILATION;ASIO_ERROR_CATEGORY_NOEXCEPT=noexcept;TRACY_ENABLE;TRACY_ON_DEMAND;TRACY_NO_BROADCAST;TRACY_ONLY_LOCALHOST;USE_TRACY;_CRT_SECURE_NO_WARNINGS;_WIN32_WINNT=0x0601;WIN32;_MBCS;_CRT_NONSTDC_NO_DEPRECATE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>src;../../src;../../lib;../../lib/tracy;../../lib/libmedida/src;../../lib/soci/src/core;../../lib/autocheck/include;../../lib/cereal/include;../../lib/asio/asio/include;../../lib/xdrpp;../../lib/libsodium/src/libsodium/include;../../lib/fmt/include;../..;src/generated;../../lib/sqlite;c:\Program Files\PostgreSQL\9.5\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <BrowseInformation>false</BrowseInformation>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <DisableSpecificWarnings>4060;4100;4127;4324;4408;4510;4512;4582;4583;4592</DisableSpecificWarnings>
@@ -251,6 +251,7 @@ exit /b 0
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="..\..\lib\tracy\TracyClient.cpp" />
     <ClCompile Include="..\..\lib\util\easylogging++.cc" />
     <ClCompile Include="..\..\lib\util\siphash.cpp" />
     <ClCompile Include="..\..\src\bucket\Bucket.cpp" />
@@ -273,9 +274,10 @@ exit /b 0
     <ClCompile Include="..\..\src\catchup\ApplyLedgerWork.cpp" />
     <ClCompile Include="..\..\src\catchup\CatchupConfiguration.cpp" />
     <ClCompile Include="..\..\src\catchup\CatchupManagerImpl.cpp" />
+    <ClCompile Include="..\..\src\catchup\CatchupRange.cpp" />
     <ClCompile Include="..\..\src\catchup\CatchupWork.cpp" />
-    <ClCompile Include="..\..\src\catchup\simulation\ApplyTransactionsWork.cpp" />
     <ClCompile Include="..\..\src\catchup\simulation\HistoryArchiveStream.cpp" />
+    <ClCompile Include="..\..\src\catchup\simulation\TxSimApplyTransactionsWork.cpp" />
     <ClCompile Include="..\..\src\catchup\test\CatchupWorkTests.cpp" />
     <ClCompile Include="..\..\src\catchup\DownloadApplyTxsWork.cpp" />
     <ClCompile Include="..\..\src\catchup\VerifyLedgerChainWork.cpp" />
@@ -303,7 +305,7 @@ exit /b 0
     <ClCompile Include="..\..\src\herder\HerderUtils.cpp" />
     <ClCompile Include="..\..\src\herder\LedgerCloseData.cpp" />
     <ClCompile Include="..\..\src\herder\PendingEnvelopes.cpp" />
-    <ClCompile Include="..\..\src\herder\simulation\SimulationTxSetFrame.cpp" />
+    <ClCompile Include="..\..\src\herder\simulation\TxSimTxSetFrame.cpp" />
     <ClCompile Include="..\..\src\herder\TransactionQueue.cpp" />
     <ClCompile Include="..\..\src\herder\QuorumTracker.cpp" />
     <ClCompile Include="..\..\src\herder\test\HerderTests.cpp" />
@@ -317,19 +319,34 @@ exit /b 0
     <ClCompile Include="..\..\src\herder\QuorumIntersectionCheckerImpl.cpp" />
     <ClCompile Include="..\..\src\herder\test\QuorumIntersectionTests.cpp" />
     <ClCompile Include="..\..\src\ledger\test\LedgerCloseMetaStreamTests.cpp" />
+    <ClCompile Include="..\..\src\main\test\CommandHandlerTests.cpp" />
     <ClCompile Include="..\..\src\overlay\SurveyManager.cpp" />
     <ClCompile Include="..\..\src\overlay\SurveyMessageLimiter.cpp" />
     <ClCompile Include="..\..\src\overlay\test\SurveyManagerTests.cpp" />
     <ClCompile Include="..\..\src\overlay\test\SurveyMessageLimiterTests.cpp" />
     <ClCompile Include="..\..\src\test\FuzzerImpl.cpp" />
+    <ClCompile Include="..\..\src\transactions\FeeBumpTransactionFrame.cpp" />
     <ClCompile Include="..\..\src\transactions\PathPaymentOpFrameBase.cpp" />
     <ClCompile Include="..\..\src\transactions\PathPaymentStrictReceiveOpFrame.cpp" />
     <ClCompile Include="..\..\src\transactions\PathPaymentStrictSendOpFrame.cpp" />
-    <ClCompile Include="..\..\src\transactions\simulation\SimulationMergeOpFrame.cpp" />
-    <ClCompile Include="..\..\src\transactions\simulation\SimulationTransactionFrame.cpp" />
+    <ClCompile Include="..\..\src\transactions\simulation\TxSimCreatePassiveSellOfferOpFrame.cpp" />
+    <ClCompile Include="..\..\src\transactions\simulation\TxSimFeeBumpTransactionFrame.cpp" />
+    <ClCompile Include="..\..\src\transactions\simulation\TxSimGenerateBucketsWork.cpp" />
+    <ClCompile Include="..\..\src\transactions\simulation\TxSimManageBuyOfferOpFrame.cpp" />
+    <ClCompile Include="..\..\src\transactions\simulation\TxSimManageSellOfferOpFrame.cpp" />
+    <ClCompile Include="..\..\src\transactions\simulation\TxSimMergeOpFrame.cpp" />
+    <ClCompile Include="..\..\src\transactions\simulation\TxSimScaleBucketlistWork.cpp" />
+    <ClCompile Include="..\..\src\transactions\simulation\TxSimTransactionFrame.cpp" />
+    <ClCompile Include="..\..\src\transactions\simulation\TxSimUtils.cpp" />
+    <ClCompile Include="..\..\src\transactions\test\FeeBumpTransactionTests.cpp" />
     <ClCompile Include="..\..\src\transactions\test\PathPaymentStrictSendTests.cpp" />
+    <ClCompile Include="..\..\src\transactions\TransactionBridge.cpp" />
+    <ClCompile Include="..\..\src\transactions\TransactionFrameBase.cpp" />
+    <ClCompile Include="..\..\src\transactions\TransactionSQL.cpp" />
     <ClCompile Include="..\..\src\util\FileSystemException.cpp" />
+    <ClCompile Include="..\..\src\util\Scheduler.cpp" />
     <ClCompile Include="..\..\src\util\test\MetricTests.cpp" />
+    <ClCompile Include="..\..\src\util\test\SchedulerTests.cpp" />
     <ClCompile Include="..\..\src\work\BatchWork.cpp" />
     <ClCompile Include="..\..\src\historywork\DownloadBucketsWork.cpp" />
     <ClCompile Include="..\..\src\historywork\DownloadVerifyTxResultsWork.cpp" />
@@ -394,7 +411,6 @@ exit /b 0
     <ClCompile Include="..\..\lib\http\server.cpp" />
     <ClCompile Include="..\..\lib\json\jsoncpp.cpp" />
     <ClCompile Include="..\..\lib\util\cbitset.c" />
-    <ClCompile Include="..\..\lib\util\format.cc" />
     <ClCompile Include="..\..\lib\util\getopt_long.c" />
     <ClCompile Include="..\..\lib\util\uint128_t.cpp" />
     <ClCompile Include="..\..\lib\xdrpp\tests\arpc.cc">
@@ -577,6 +593,8 @@ exit /b 0
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\..\lib\catch.hpp" />
+    <ClInclude Include="..\..\lib\util\finally.h" />
+    <ClInclude Include="..\..\lib\fmt\include\fmt\format.h" />
     <ClInclude Include="..\..\lib\util\siphash.h" />
     <ClInclude Include="..\..\src\bucket\Bucket.h" />
     <ClInclude Include="..\..\src\bucket\BucketApplicator.h" />
@@ -598,10 +616,11 @@ exit /b 0
     <ClInclude Include="..\..\src\catchup\CatchupConfiguration.h" />
     <ClInclude Include="..\..\src\catchup\CatchupManager.h" />
     <ClInclude Include="..\..\src\catchup\CatchupManagerImpl.h" />
+    <ClInclude Include="..\..\src\catchup\CatchupRange.h" />
     <ClInclude Include="..\..\src\catchup\CatchupWork.h" />
     <ClInclude Include="..\..\src\catchup\DownloadApplyTxsWork.h" />
-    <ClInclude Include="..\..\src\catchup\simulation\ApplyTransactionsWork.h" />
     <ClInclude Include="..\..\src\catchup\simulation\HistoryArchiveStream.h" />
+    <ClInclude Include="..\..\src\catchup\simulation\TxSimApplyTransactionsWork.h" />
     <ClInclude Include="..\..\src\catchup\test\CatchupWorkTests.h" />
     <ClInclude Include="..\..\src\catchup\VerifyLedgerChainWork.h" />
     <ClInclude Include="..\..\src\crypto\ByteSlice.h" />
@@ -628,7 +647,7 @@ exit /b 0
     <ClInclude Include="..\..\src\herder\HerderUtils.h" />
     <ClInclude Include="..\..\src\herder\LedgerCloseData.h" />
     <ClInclude Include="..\..\src\herder\PendingEnvelopes.h" />
-    <ClInclude Include="..\..\src\herder\simulation\SimulationTxSetFrame.h" />
+    <ClInclude Include="..\..\src\herder\simulation\TxSimTxSetFrame.h" />
     <ClInclude Include="..\..\src\herder\TransactionQueue.h" />
     <ClInclude Include="..\..\src\herder\QuorumTracker.h" />
     <ClInclude Include="..\..\src\herder\TxSetFrame.h" />
@@ -639,11 +658,25 @@ exit /b 0
     <ClInclude Include="..\..\src\overlay\SurveyManager.h" />
     <ClInclude Include="..\..\src\overlay\SurveyMessageLimiter.h" />
     <ClInclude Include="..\..\src\test\FuzzerImpl.h" />
+    <ClInclude Include="..\..\src\transactions\FeeBumpTransactionFrame.h" />
     <ClInclude Include="..\..\src\transactions\PathPaymentOpFrameBase.h" />
     <ClInclude Include="..\..\src\transactions\PathPaymentStrictReceiveOpFrame.h" />
     <ClInclude Include="..\..\src\transactions\PathPaymentStrictSendOpFrame.h" />
-    <ClInclude Include="..\..\src\transactions\simulation\SimulationMergeOpFrame.h" />
-    <ClInclude Include="..\..\src\transactions\simulation\SimulationTransactionFrame.h" />
+    <ClInclude Include="..\..\src\transactions\simulation\TxSimCreatePassiveSellOfferOpFrame.h" />
+    <ClInclude Include="..\..\src\transactions\simulation\TxSimFeeBumpTransactionFrame.h" />
+    <ClInclude Include="..\..\src\transactions\simulation\TxSimGenerateBucketsWork.h" />
+    <ClInclude Include="..\..\src\transactions\simulation\TxSimManageBuyOfferOpFrame.h" />
+    <ClInclude Include="..\..\src\transactions\simulation\TxSimManageSellOfferOpFrame.h" />
+    <ClInclude Include="..\..\src\transactions\simulation\TxSimMergeOpFrame.h" />
+    <ClInclude Include="..\..\src\transactions\simulation\TxSimScaleBucketlistWork.h" />
+    <ClInclude Include="..\..\src\transactions\simulation\TxSimTransactionFrame.h" />
+    <ClInclude Include="..\..\src\transactions\simulation\TxSimUtils.h" />
+    <ClInclude Include="..\..\src\transactions\TransactionBridge.h" />
+    <ClInclude Include="..\..\src\transactions\TransactionFrameBase.h" />
+    <ClInclude Include="..\..\src\transactions\TransactionSQL.h" />
+    <ClInclude Include="..\..\src\util\Decoder.h" />
+    <ClInclude Include="..\..\src\util\Scheduler.h" />
+    <ClInclude Include="..\..\src\util\XDROperators.h" />
     <ClInclude Include="..\..\src\work\BatchWork.h" />
     <ClInclude Include="..\..\src\historywork\DownloadBucketsWork.h" />
     <ClInclude Include="..\..\src\historywork\DownloadVerifyTxResultsWork.h" />
@@ -725,7 +758,6 @@ exit /b 0
     <ClInclude Include="..\..\lib\util\cbitset_portability.h" />
     <ClInclude Include="..\..\lib\util\cpptoml.h" />
     <ClInclude Include="..\..\lib\util\easylogging++.h" />
-    <ClInclude Include="..\..\lib\util\format.h" />
     <ClInclude Include="..\..\lib\util\getopt.h" />
     <ClInclude Include="..\..\lib\util\lrucache.hpp" />
     <ClInclude Include="..\..\lib\util\uint128_t.h" />
@@ -856,6 +888,7 @@ exit /b 0
     <None Include="..\..\docs\stellar-core_testnet.cfg" />
     <None Include="..\..\docs\stellar-core_testnet_legacy.cfg" />
     <None Include="..\..\docs\transaction.md" />
+    <None Include="..\..\docs\tx-simulation.md" />
     <None Include="..\..\docs\versioning.md" />
     <None Include="..\..\INSTALL.md" />
     <None Include="..\..\Makefile.am" />

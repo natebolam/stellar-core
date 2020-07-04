@@ -56,11 +56,12 @@ class HerderImpl : public Herder
         return mHerderSCPDriver;
     }
 
+    void processExternalized(uint64 slotIndex, StellarValue const& value);
     void valueExternalized(uint64 slotIndex, StellarValue const& value);
     void emitEnvelope(SCPEnvelope const& envelope);
 
     TransactionQueue::AddResult
-    recvTransaction(TransactionFramePtr tx) override;
+    recvTransaction(TransactionFrameBasePtr tx) override;
 
     EnvelopeStatus recvSCPEnvelope(SCPEnvelope const& envelope) override;
     EnvelopeStatus recvSCPEnvelope(SCPEnvelope const& envelope,
@@ -101,6 +102,8 @@ class HerderImpl : public Herder
 #ifdef BUILD_TESTS
     // used for testing
     PendingEnvelopes& getPendingEnvelopes();
+
+    TransactionQueue& getTransactionQueue();
 #endif
 
     // helper function to verify envelopes are signed
@@ -119,7 +122,7 @@ class HerderImpl : public Herder
     // * it's recent enough (if `enforceRecent` is set)
     bool checkCloseTime(SCPEnvelope const& envelope, bool enforceRecent);
 
-    void ledgerClosed();
+    void ledgerClosed(bool synchronous);
 
     void startRebroadcastTimer();
     void rebroadcast();
@@ -130,7 +133,7 @@ class HerderImpl : public Herder
     TransactionQueue mTransactionQueue;
 
     void
-    updateTransactionQueue(std::vector<TransactionFramePtr> const& applied);
+    updateTransactionQueue(std::vector<TransactionFrameBasePtr> const& applied);
 
     PendingEnvelopes mPendingEnvelopes;
     Upgrades mUpgrades;
@@ -222,5 +225,7 @@ class HerderImpl : public Herder
         }
     };
     QuorumMapIntersectionState mLastQuorumMapIntersectionState;
+
+    uint32_t getMinLedgerSeqToRemember();
 };
 }

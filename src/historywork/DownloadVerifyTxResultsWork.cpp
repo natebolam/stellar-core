@@ -9,8 +9,9 @@
 #include "historywork/GetAndUnzipRemoteFileWork.h"
 #include "historywork/Progress.h"
 #include "historywork/VerifyTxResultsWork.h"
-#include "util/format.h"
 #include "work/WorkSequence.h"
+#include <Tracy.hpp>
+#include <fmt/format.h>
 
 namespace stellar
 {
@@ -33,7 +34,7 @@ DownloadVerifyTxResultsWork::getStatus() const
     {
         auto task = fmt::format("Downloading and verifying {:s} files",
                                 HISTORY_FILE_TYPE_RESULTS);
-        return fmtProgress(mApp, task, mRange.mFirst, mRange.mLast,
+        return fmtProgress(mApp, task, mRange.getLedgerRange(),
                            mCurrCheckpoint);
     }
     return BatchWork::getStatus();
@@ -42,7 +43,7 @@ DownloadVerifyTxResultsWork::getStatus() const
 bool
 DownloadVerifyTxResultsWork::hasNext() const
 {
-    return mCurrCheckpoint <= mRange.mLast;
+    return mCurrCheckpoint < mRange.limit();
 }
 
 void
@@ -54,6 +55,7 @@ DownloadVerifyTxResultsWork::resetIter()
 std::shared_ptr<BasicWork>
 DownloadVerifyTxResultsWork::yieldMoreWork()
 {
+    ZoneScoped;
     if (!hasNext())
     {
         throw std::runtime_error("Nothing to iterate over!");

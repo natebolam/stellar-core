@@ -7,11 +7,13 @@
 #include "database/Database.h"
 #include "database/DatabaseTypeSpecificOperation.h"
 #include "ledger/LedgerTxnImpl.h"
+#include "transactions/TransactionUtils.h"
 #include "util/Decoder.h"
 #include "util/Logging.h"
 #include "util/XDROperators.h"
 #include "util/types.h"
 #include "xdrpp/marshal.h"
+#include <Tracy.hpp>
 
 namespace stellar
 {
@@ -19,6 +21,7 @@ namespace stellar
 std::shared_ptr<LedgerEntry const>
 LedgerTxnRoot::Impl::loadOffer(LedgerKey const& key) const
 {
+    ZoneScoped;
     int64_t offerID = key.offer().offerID;
     if (offerID < 0)
     {
@@ -49,6 +52,7 @@ LedgerTxnRoot::Impl::loadOffer(LedgerKey const& key) const
 std::vector<LedgerEntry>
 LedgerTxnRoot::Impl::loadAllOffers() const
 {
+    ZoneScoped;
     std::string sql = "SELECT sellerid, offerid, sellingasset, buyingasset, "
                       "amount, pricen, priced, flags, lastmodified "
                       "FROM offers";
@@ -67,6 +71,7 @@ LedgerTxnRoot::Impl::loadBestOffers(std::deque<LedgerEntry>& offers,
                                     Asset const& buying, Asset const& selling,
                                     size_t numOffers) const
 {
+    ZoneScoped;
     // price is an approximation of the actual n/d (truncated math, 15 digits)
     // ordering by offerid gives precendence to older offers for fairness
     std::string sql = "SELECT sellerid, offerid, sellingasset, buyingasset, "
@@ -97,6 +102,7 @@ LedgerTxnRoot::Impl::loadBestOffers(std::deque<LedgerEntry>& offers,
                                     OfferDescriptor const& worseThan,
                                     size_t numOffers) const
 {
+    ZoneScoped;
     // ManageOffer and related operations won't work correctly with an offerID
     // equal to or exceeding INT64_MAX, so there is no reason to support it
     // here. We are far from this limit anyway.
@@ -197,6 +203,7 @@ std::vector<LedgerEntry>
 LedgerTxnRoot::Impl::loadOffersByAccountAndAsset(AccountID const& accountID,
                                                  Asset const& asset) const
 {
+    ZoneScoped;
     std::string sql = "SELECT sellerid, offerid, sellingasset, buyingasset, "
                       "amount, pricen, priced, flags, lastmodified "
                       "FROM offers WHERE sellerid = :v1 AND "
@@ -239,6 +246,7 @@ std::deque<LedgerEntry>::const_iterator
 LedgerTxnRoot::Impl::loadOffers(StatementContext& prep,
                                 std::deque<LedgerEntry>& offers) const
 {
+    ZoneScoped;
     std::string actIDStrKey;
     std::string sellingAsset, buyingAsset;
 
@@ -277,6 +285,7 @@ LedgerTxnRoot::Impl::loadOffers(StatementContext& prep,
 std::vector<LedgerEntry>
 LedgerTxnRoot::Impl::loadOffers(StatementContext& prep) const
 {
+    ZoneScoped;
     std::vector<LedgerEntry> offers;
 
     std::string actIDStrKey;
@@ -593,6 +602,8 @@ class BulkDeleteOffersOperation : public DatabaseTypeSpecificOperation<void>
 void
 LedgerTxnRoot::Impl::bulkUpsertOffers(std::vector<EntryIterator> const& entries)
 {
+    ZoneScoped;
+    ZoneValue(static_cast<int64_t>(entries.size()));
     BulkUpsertOffersOperation op(mDatabase, entries);
     mDatabase.doDatabaseTypeSpecificOperation(op);
 }
@@ -601,6 +612,8 @@ void
 LedgerTxnRoot::Impl::bulkDeleteOffers(std::vector<EntryIterator> const& entries,
                                       LedgerTxnConsistency cons)
 {
+    ZoneScoped;
+    ZoneValue(static_cast<int64_t>(entries.size()));
     BulkDeleteOffersOperation op(mDatabase, cons, entries);
     mDatabase.doDatabaseTypeSpecificOperation(op);
 }
@@ -638,8 +651,18 @@ class BulkLoadOffersOperation
     : public DatabaseTypeSpecificOperation<std::vector<LedgerEntry>>
 {
     Database& mDb;
+    uint32_t mLedgerVersion;
     std::vector<int64_t> mOfferIDs;
+    std::unordered_set<LedgerKey> mKeys;
     std::unordered_map<int64_t, AccountID> mSellerIDsByOfferID;
+
+    bool
+    shouldIncludeOffer(int64_t offerID, AccountID sellerID)
+    {
+        // Before protocol version 13, exclude offers where sellerID in
+        // LedgerKey doesn't match sellerID in LedgerEntry
+        return mLedgerVersion >= 13 || mSellerIDsByOfferID[offerID] == sellerID;
+    }
 
     std::vector<LedgerEntry>
     executeAndFetch(soci::statement& st)
@@ -670,9 +693,7 @@ class BulkLoadOffersOperation
         {
             auto pubKey = KeyUtils::fromStrKey<PublicKey>(sellerID);
 
-            // Exclude offers where sellerID in LedgerKey doesn't match sellerID
-            // in LedgerEntry
-            if (mSellerIDsByOfferID[offerID] == pubKey)
+            if (shouldIncludeOffer(offerID, pubKey))
             {
                 res.emplace_back();
                 auto& le = res.back();
@@ -698,8 +719,9 @@ class BulkLoadOffersOperation
 
   public:
     BulkLoadOffersOperation(Database& db,
-                            std::unordered_set<LedgerKey> const& keys)
-        : mDb(db)
+                            std::unordered_set<LedgerKey> const& keys,
+                            uint32_t ledgerVersion)
+        : mDb(db), mLedgerVersion(ledgerVersion)
     {
         mOfferIDs.reserve(keys.size());
         for (auto const& k : keys)
@@ -708,7 +730,10 @@ class BulkLoadOffersOperation
             if (k.offer().offerID >= 0)
             {
                 mOfferIDs.emplace_back(k.offer().offerID);
-                mSellerIDsByOfferID[mOfferIDs.back()] = k.offer().sellerID;
+                if (mLedgerVersion < 13)
+                {
+                    mSellerIDsByOfferID[mOfferIDs.back()] = k.offer().sellerID;
+                }
             }
         }
     }
@@ -761,9 +786,11 @@ std::unordered_map<LedgerKey, std::shared_ptr<LedgerEntry const>>
 LedgerTxnRoot::Impl::bulkLoadOffers(
     std::unordered_set<LedgerKey> const& keys) const
 {
+    ZoneScoped;
+    ZoneValue(static_cast<int64_t>(keys.size()));
     if (!keys.empty())
     {
-        BulkLoadOffersOperation op(mDatabase, keys);
+        BulkLoadOffersOperation op(mDatabase, keys, mHeader->ledgerVersion);
         return populateLoadedEntries(
             keys, mDatabase.doDatabaseTypeSpecificOperation(op));
     }

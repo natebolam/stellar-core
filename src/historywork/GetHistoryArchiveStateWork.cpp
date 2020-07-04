@@ -6,10 +6,11 @@
 #include "history/HistoryArchive.h"
 #include "historywork/GetRemoteFileWork.h"
 #include "ledger/LedgerManager.h"
-#include "lib/util/format.h"
 #include "main/Application.h"
 #include "main/ErrorMessages.h"
 #include "util/Logging.h"
+#include <Tracy.hpp>
+#include <fmt/format.h>
 #include <medida/meter.h>
 #include <medida/metrics_registry.h>
 
@@ -36,6 +37,7 @@ GetHistoryArchiveStateWork::GetHistoryArchiveStateWork(
 BasicWork::State
 GetHistoryArchiveStateWork::doWork()
 {
+    ZoneScoped;
     if (mGetRemoteFile)
     {
         auto state = mGetRemoteFile->getState();
@@ -62,8 +64,7 @@ GetHistoryArchiveStateWork::doWork()
 
     else
     {
-        auto name = mSeq == 0 ? HistoryArchiveState::wellKnownRemoteName()
-                              : HistoryArchiveState::remoteName(mSeq);
+        auto name = getRemoteName();
         CLOG(INFO, "History") << "Downloading history archive state: " << name;
         mGetRemoteFile = addWork<GetRemoteFileWork>(name, mLocalFilename,
                                                     mArchive, mRetries);
@@ -84,5 +85,20 @@ GetHistoryArchiveStateWork::onSuccess()
 {
     mGetHistoryArchiveStateSuccess.Mark();
     Work::onSuccess();
+}
+
+std::string
+GetHistoryArchiveStateWork::getRemoteName() const
+{
+    return mSeq == 0 ? HistoryArchiveState::wellKnownRemoteName()
+                     : HistoryArchiveState::remoteName(mSeq);
+}
+
+std::string
+GetHistoryArchiveStateWork::getStatus() const
+{
+    std::string ledgerString = mSeq == 0 ? "current" : std::to_string(mSeq);
+    return fmt::format("Downloading state file {} for ledger {}",
+                       getRemoteName(), ledgerString);
 }
 }

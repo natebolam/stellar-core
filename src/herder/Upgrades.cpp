@@ -16,9 +16,10 @@
 #include "util/Logging.h"
 #include "util/Timer.h"
 #include "util/types.h"
+#include <Tracy.hpp>
 #include <cereal/archives/json.hpp>
 #include <cereal/cereal.hpp>
-#include <lib/util/format.h>
+#include <fmt/format.h>
 #include <xdrpp/marshal.h>
 
 namespace cereal
@@ -177,17 +178,20 @@ Upgrades::toString(LedgerUpgrade const& upgrade)
 std::string
 Upgrades::toString() const
 {
-    fmt::MemoryWriter r;
+    std::stringstream r;
+    bool first = true;
 
     auto appendInfo = [&](std::string const& s, optional<uint32> const& o) {
         if (o)
         {
-            if (!r.size())
+            if (first)
             {
-                r << "upgradetime="
-                  << VirtualClock::pointToISOString(mParams.mUpgradeTime);
+                r << fmt::format(
+                    "upgradetime={}",
+                    VirtualClock::systemPointToISOString(mParams.mUpgradeTime));
+                first = false;
             }
-            r << ", " << s << "=" << *o;
+            r << fmt::format(", {}={}", s, *o);
         }
     };
     appendInfo("protocolversion", mParams.mProtocolVersion);
@@ -387,6 +391,7 @@ Upgrades::storeUpgradeHistory(Database& db, uint32_t ledgerSeq,
                               LedgerUpgrade const& upgrade,
                               LedgerEntryChanges const& changes, int index)
 {
+    ZoneScoped;
     xdr::opaque_vec<> upgradeContent(xdr::xdr_to_opaque(upgrade));
     std::string upgradeContent64 = decoder::encode_b64(upgradeContent);
 
@@ -418,6 +423,7 @@ Upgrades::storeUpgradeHistory(Database& db, uint32_t ledgerSeq,
 void
 Upgrades::deleteOldEntries(Database& db, uint32_t ledgerSeq, uint32_t count)
 {
+    ZoneScoped;
     DatabaseUtils::deleteOldEntriesHelper(db.getSession(), ledgerSeq, count,
                                           "upgradehistory", "ledgerseq");
 }
@@ -460,7 +466,7 @@ getAvailableBalanceExcludingLiabilities(AccountID const& accountID,
     else
     {
         auto trust = stellar::loadTrustLineWithoutRecord(ltx, accountID, asset);
-        if (trust && trust.isAuthorized())
+        if (trust && trust.isAuthorizedToMaintainLiabilities())
         {
             return trust.getBalance();
         }
@@ -491,7 +497,7 @@ getAvailableLimitExcludingLiabilities(AccountID const& accountID,
         key.trustLine().accountID = accountID;
         key.trustLine().asset = asset;
         auto trust = ltx.loadWithoutRecord(key);
-        if (trust && isAuthorized(trust))
+        if (trust && isAuthorizedToMaintainLiabilities(trust))
         {
             auto const& tl = trust.current().data.trustLine();
             return tl.limit - tl.balance;
@@ -730,6 +736,14 @@ prepareLiabilities(AbstractLedgerTxn& ltx, LedgerTxnHeader const& header)
                 if (deltaSelling != 0 || deltaBuying != 0)
                 {
                     ++nChangedTrustLines;
+                }
+
+                // the deltas should only be positive when liabilities were
+                // introduced in ledgerVersion 10
+                if (header.current().ledgerVersion > 10 &&
+                    (deltaSelling > 0 || deltaBuying > 0))
+                {
+                    throw std::runtime_error("invalid liabilities delta");
                 }
 
                 if (!trustEntry.addSellingLiabilities(header, deltaSelling))

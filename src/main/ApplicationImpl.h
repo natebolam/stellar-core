@@ -74,10 +74,8 @@ class ApplicationImpl : public Application
     virtual StatusManager& getStatusManager() override;
 
     virtual asio::io_context& getWorkerIOContext() override;
-    virtual void postOnMainThread(std::function<void()>&& f,
-                                  std::string jobName) override;
-    virtual void postOnMainThreadWithDelay(std::function<void()>&& f,
-                                           std::string jobName) override;
+    virtual void postOnMainThread(std::function<void()>&& f, std::string&& name,
+                                  Scheduler::ActionType type) override;
     virtual void postOnBackgroundThread(std::function<void()>&& f,
                                         std::string jobName) override;
 
@@ -99,7 +97,9 @@ class ApplicationImpl : public Application
 #ifdef BUILD_TESTS
     virtual void generateLoad(bool isCreate, uint32_t nAccounts,
                               uint32_t offset, uint32_t nTxs, uint32_t txRate,
-                              uint32_t batchSize) override;
+                              uint32_t batchSize,
+                              std::chrono::seconds spikeInterval,
+                              uint32_t spikeSize) override;
 
     virtual LoadGenerator& getLoadGenerator() override;
 #endif
@@ -185,9 +185,8 @@ class ApplicationImpl : public Application
     std::unique_ptr<medida::MetricsRegistry> mMetrics;
     medida::Counter& mAppStateCurrent;
     medida::Timer& mPostOnMainThreadDelay;
-    medida::Timer& mPostOnMainThreadWithDelayDelay;
     medida::Timer& mPostOnBackgroundThreadDelay;
-    VirtualClock::time_point mStartedOn;
+    VirtualClock::system_time_point mStartedOn;
 
     Hash mNetworkID;
 

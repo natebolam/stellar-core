@@ -5,6 +5,8 @@
 #include "catchup/ApplyLedgerWork.h"
 #include "ledger/LedgerManager.h"
 #include "main/Application.h"
+#include <Tracy.hpp>
+#include <fmt/format.h>
 
 namespace stellar
 {
@@ -20,6 +22,7 @@ ApplyLedgerWork::ApplyLedgerWork(Application& app,
 BasicWork::State
 ApplyLedgerWork::onRun()
 {
+    ZoneScoped;
     mApp.getLedgerManager().closeLedger(mLedgerCloseData);
     return BasicWork::State::WORK_SUCCESS;
 }
@@ -28,5 +31,11 @@ bool
 ApplyLedgerWork::onAbort()
 {
     return true;
+}
+
+std::string
+ApplyLedgerWork::getStatus() const
+{
+    return fmt::format("apply ledger {}", mLedgerCloseData.getLedgerSeq());
 }
 }

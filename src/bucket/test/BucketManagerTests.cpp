@@ -272,7 +272,8 @@ TEST_CASE("skip list", "[bucket][bucketmanager]")
 TEST_CASE("bucketmanager ownership", "[bucket][bucketmanager]")
 {
     VirtualClock clock;
-    Config const& cfg = getTestConfig();
+    Config cfg = getTestConfig();
+    cfg.MANUAL_CLOSE = false;
     for_versions_with_differing_bucket_logic(cfg, [&](Config const& cfg) {
         Application::pointer app = createTestApplication(clock, cfg);
 
@@ -285,7 +286,8 @@ TEST_CASE("bucketmanager ownership", "[bucket][bucketmanager]")
         {
             std::shared_ptr<Bucket> b2 = Bucket::fresh(
                 app->getBucketManager(), getAppLedgerVersion(app), {}, live,
-                dead, /*countMergeEvents=*/true, /*doFsync=*/true);
+                dead, /*countMergeEvents=*/true, clock.getIOContext(),
+                /*doFsync=*/true);
             b1 = b2;
 
             // Bucket is referenced by b1, b2 and the BucketManager.
@@ -293,10 +295,12 @@ TEST_CASE("bucketmanager ownership", "[bucket][bucketmanager]")
 
             std::shared_ptr<Bucket> b3 = Bucket::fresh(
                 app->getBucketManager(), getAppLedgerVersion(app), {}, live,
-                dead, /*countMergeEvents=*/true, /*doFsync=*/true);
+                dead, /*countMergeEvents=*/true, clock.getIOContext(),
+                /*doFsync=*/true);
             std::shared_ptr<Bucket> b4 = Bucket::fresh(
                 app->getBucketManager(), getAppLedgerVersion(app), {}, live,
-                dead, /*countMergeEvents=*/true, /*doFsync=*/true);
+                dead, /*countMergeEvents=*/true, clock.getIOContext(),
+                /*doFsync=*/true);
             // Bucket is referenced by b1, b2, b3, b4 and the BucketManager.
             CHECK(b1.use_count() == 5);
         }
@@ -384,6 +388,7 @@ TEST_CASE("bucketmanager reattach to finished merge", "[bucket][bucketmanager]")
     VirtualClock clock;
     Config cfg(getTestConfig(0, Config::TESTDB_IN_MEMORY_SQLITE));
     cfg.ARTIFICIALLY_PESSIMIZE_MERGES_FOR_TESTING = true;
+    cfg.MANUAL_CLOSE = false;
 
     for_versions_with_differing_bucket_logic(cfg, [&](Config const& cfg) {
         Application::pointer app = createTestApplication(clock, cfg);
@@ -442,6 +447,7 @@ TEST_CASE("bucketmanager reattach to running merge", "[bucket][bucketmanager]")
     VirtualClock clock;
     Config cfg(getTestConfig(0, Config::TESTDB_IN_MEMORY_SQLITE));
     cfg.ARTIFICIALLY_PESSIMIZE_MERGES_FOR_TESTING = true;
+    cfg.MANUAL_CLOSE = false;
 
     for_versions_with_differing_bucket_logic(cfg, [&](Config const& cfg) {
         Application::pointer app = createTestApplication(clock, cfg);
@@ -510,7 +516,7 @@ TEST_CASE("bucketmanager reattach to running merge", "[bucket][bucketmanager]")
     });
 }
 
-TEST_CASE("bucketmanager don't leak empty-merge futures",
+TEST_CASE("bucketmanager do not leak empty-merge futures",
           "[bucket][bucketmanager]")
 {
     // The point of this test is to confirm that
@@ -580,6 +586,7 @@ TEST_CASE("bucketmanager reattach HAS from publish queue to finished merge",
           "[bucket][bucketmanager]")
 {
     Config cfg(getTestConfig());
+    cfg.MANUAL_CLOSE = false;
     cfg.MAX_CONCURRENT_SUBPROCESSES = 1;
     cfg.ARTIFICIALLY_ACCELERATE_TIME_FOR_TESTING = true;
     cfg.ARTIFICIALLY_PESSIMIZE_MERGES_FOR_TESTING = true;
@@ -1379,6 +1386,8 @@ TEST_CASE("bucket persistence over app restart",
     std::vector<stellar::LedgerEntry> emptySetEntry;
 
     Config cfg0(getTestConfig(0, Config::TESTDB_ON_DISK_SQLITE));
+    cfg0.MANUAL_CLOSE = false;
+
     for_versions_with_differing_bucket_logic(cfg0, [&](Config const& cfg0) {
 
         Config cfg1(getTestConfig(1, Config::TESTDB_ON_DISK_SQLITE));

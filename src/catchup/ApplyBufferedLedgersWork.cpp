@@ -8,8 +8,8 @@
 #include "catchup/ApplyLedgerWork.h"
 #include "ledger/LedgerManager.h"
 #include "main/Application.h"
-
-#include <util/format.h>
+#include <Tracy.hpp>
+#include <fmt/format.h>
 
 namespace stellar
 {
@@ -27,6 +27,7 @@ ApplyBufferedLedgersWork::onReset()
 BasicWork::State
 ApplyBufferedLedgersWork::onRun()
 {
+    ZoneScoped;
     if (mConditionalWork)
     {
         mConditionalWork->crankWork();
@@ -85,5 +86,36 @@ ApplyBufferedLedgersWork::onRun()
     mConditionalWork->startWork(wakeSelfUpCallback());
 
     return State::WORK_RUNNING;
+}
+
+std::string
+ApplyBufferedLedgersWork::getStatus() const
+{
+    return fmt::format("Applying buffered ledgers: {}",
+                       mConditionalWork ? mConditionalWork->getStatus()
+                                        : BasicWork::getStatus());
+}
+
+void
+ApplyBufferedLedgersWork::shutdown()
+{
+    ZoneScoped;
+    if (mConditionalWork)
+    {
+        mConditionalWork->shutdown();
+    }
+    BasicWork::shutdown();
+}
+
+bool
+ApplyBufferedLedgersWork::onAbort()
+{
+    ZoneScoped;
+    if (mConditionalWork && !mConditionalWork->isDone())
+    {
+        mConditionalWork->crankWork();
+        return false;
+    }
+    return true;
 }
 }
