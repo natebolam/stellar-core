@@ -16,6 +16,7 @@
 #include "bucket/BucketManagerImpl.h"
 #include "bucket/BucketTests.h"
 #include "history/HistoryArchiveManager.h"
+#include "history/test/HistoryTestsUtils.h"
 #include "ledger/LedgerTxn.h"
 #include "ledger/test/LedgerTestUtils.h"
 #include "lib/catch.hpp"
@@ -414,7 +415,8 @@ TEST_CASE("bucketmanager reattach to finished merge", "[bucket][bucketmanager]")
         REQUIRE(bl.getLevel(level).getNext().isMerging());
 
         // Serialize HAS.
-        HistoryArchiveState has(ledger, bl);
+        HistoryArchiveState has(ledger, bl,
+                                app->getConfig().NETWORK_PASSPHRASE);
         std::string serialHas = has.toString();
 
         // Simulate level committing (and the FutureBucket clearing),
@@ -471,7 +473,7 @@ TEST_CASE("bucketmanager reattach to running merge", "[bucket][bucketmanager]")
         //
         // That said, nondeterminism in tests is no fun and tests that run
         // potentially-forever are no fun. So we put a statistically-unlikely
-        // limit in here of 10,000 merges. If we consistently lose for that
+        // limit in here of 10,000 ledgers. If we consistently lose for that
         // long, there's probably something wrong with the code, and in any case
         // it's a better nondeterministic failure than timing out the entire
         // testsuite with no explanation.
@@ -489,7 +491,8 @@ TEST_CASE("bucketmanager reattach to running merge", "[bucket][bucketmanager]")
 
             bm.forgetUnreferencedBuckets();
 
-            HistoryArchiveState has(ledger, bl);
+            HistoryArchiveState has(ledger, bl,
+                                    app->getConfig().NETWORK_PASSPHRASE);
             std::string serialHas = has.toString();
 
             // Deserialize and reactivate levels of HAS. Races with the merge
@@ -511,7 +514,7 @@ TEST_CASE("bucketmanager reattach to running merge", "[bucket][bucketmanager]")
         CLOG(INFO, "Bucket")
             << "reattached to running merge at or around ledger " << ledger;
         REQUIRE(ledger < limit);
-        auto ra = bm.readMergeCounters().mFinishedMergeReattachments;
+        auto ra = bm.readMergeCounters().mRunningMergeReattachments;
         REQUIRE(ra != 0);
     });
 }
@@ -573,11 +576,11 @@ TEST_CASE("bucketmanager do not leak empty-merge futures",
 
     for (auto const& bmr : bmRefBuckets)
     {
-        CLOG(DEBUG, "Bucket") << "bucketmanager ref: " << bmr;
+        CLOG(DEBUG, "Bucket") << "bucketmanager ref: " << binToHex(bmr);
     }
     for (auto const& bmd : bmDirBuckets)
     {
-        CLOG(DEBUG, "Bucket") << "bucketmanager dir: " << bmd;
+        CLOG(DEBUG, "Bucket") << "bucketmanager dir: " << binToHex(bmd);
     }
     REQUIRE(bmRefBuckets.size() == bmDirBuckets.size());
 }
@@ -1470,7 +1473,7 @@ TEST_CASE("bucket persistence over app restart",
             REQUIRE(hexAbbrev(Blh1) == hexAbbrev(bl.getHash()));
 
             // Confirm that there are merges-in-progress in this checkpoint.
-            HistoryArchiveState has(i, bl);
+            HistoryArchiveState has(i, bl, app->getConfig().NETWORK_PASSPHRASE);
             REQUIRE(!has.futuresAllResolved());
         }
 
@@ -1493,7 +1496,7 @@ TEST_CASE("bucket persistence over app restart",
             uint32_t i = pause;
 
             // Confirm that merges-in-progress were restarted.
-            HistoryArchiveState has(i, bl);
+            HistoryArchiveState has(i, bl, app->getConfig().NETWORK_PASSPHRASE);
             REQUIRE(!has.futuresAllResolved());
 
             while (i < 100)

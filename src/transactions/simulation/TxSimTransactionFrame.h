@@ -17,8 +17,10 @@ class TxSimTransactionFrame : public TransactionFrame
     uint32_t const mCount;
 
   protected:
-    bool isTooEarly(LedgerTxnHeader const& header) const override;
-    bool isTooLate(LedgerTxnHeader const& header) const override;
+    bool isTooEarly(LedgerTxnHeader const& header,
+                    uint64_t lowerBoundCloseTimeOffset) const override;
+    bool isTooLate(LedgerTxnHeader const& header,
+                   uint64_t upperBoundCloseTimeOffset) const override;
 
     std::shared_ptr<OperationFrame> makeOperation(Operation const& op,
                                                   OperationResult& res,
@@ -26,7 +28,8 @@ class TxSimTransactionFrame : public TransactionFrame
 
     bool isBadSeq(int64_t seqNum) const override;
 
-    int64_t getFee(LedgerHeader const& header, int64_t baseFee) const override;
+    int64_t getFee(LedgerHeader const& header, int64_t baseFee,
+                   bool applying) const override;
 
     void processFeeSeqNum(AbstractLedgerTxn& ltx, int64_t baseFee) override;
     void processSeqNum(AbstractLedgerTxn& ltx) override;

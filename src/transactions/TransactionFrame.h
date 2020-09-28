@@ -4,6 +4,7 @@
 // under the Apache License, Version 2.0. See the COPYING file at the root
 // of this distribution or at http://www.apache.org/licenses/LICENSE-2.0
 
+#include "ledger/GeneralizedLedgerEntry.h"
 #include "overlay/StellarXDR.h"
 #include "transactions/TransactionFrameBase.h"
 #include "util/types.h"
@@ -43,7 +44,7 @@ class TransactionFrame : public TransactionFrameBase
     TransactionEnvelope mEnvelope;
     TransactionResult mResult;
 
-    std::shared_ptr<LedgerEntry const> mCachedAccount;
+    std::shared_ptr<GeneralizedLedgerEntry const> mCachedAccount;
 
     Hash const& mNetworkID;     // used to change the way we compute signatures
     mutable Hash mContentsHash; // the hash of the contents
@@ -64,17 +65,23 @@ class TransactionFrame : public TransactionFrameBase
         kMaybeValid
     };
 
-    virtual bool isTooEarly(LedgerTxnHeader const& header) const;
-    virtual bool isTooLate(LedgerTxnHeader const& header) const;
+    virtual bool isTooEarly(LedgerTxnHeader const& header,
+                            uint64_t lowerBoundCloseTimeOffset) const;
+    virtual bool isTooLate(LedgerTxnHeader const& header,
+                           uint64_t upperBoundCloseTimeOffset) const;
 
-    bool commonValidPreSeqNum(AbstractLedgerTxn& ltx, bool chargeFee);
+    bool commonValidPreSeqNum(AbstractLedgerTxn& ltx, bool chargeFee,
+                              uint64_t lowerBoundCloseTimeOffset,
+                              uint64_t upperBoundCloseTimeOffset);
 
     virtual bool isBadSeq(int64_t seqNum) const;
 
     ValidationType commonValid(SignatureChecker& signatureChecker,
                                AbstractLedgerTxn& ltxOuter,
                                SequenceNumber current, bool applying,
-                               bool chargeFee);
+                               bool chargeFee,
+                               uint64_t lowerBoundCloseTimeOffset,
+                               uint64_t upperBoundCloseTimeOffset);
 
     virtual std::shared_ptr<OperationFrame>
     makeOperation(Operation const& op, OperationResult& res, size_t index);
@@ -138,7 +145,8 @@ class TransactionFrame : public TransactionFrameBase
         return getResult().result.code();
     }
 
-    void resetResults(LedgerHeader const& header, int64_t baseFee);
+    void resetResults(LedgerHeader const& header, int64_t baseFee,
+                      bool applying);
 
     TransactionEnvelope const& getEnvelope() const override;
     TransactionEnvelope& getEnvelope();
@@ -154,8 +162,8 @@ class TransactionFrame : public TransactionFrameBase
 
     int64_t getMinFee(LedgerHeader const& header) const override;
 
-    virtual int64_t getFee(LedgerHeader const& header,
-                           int64_t baseFee) const override;
+    virtual int64_t getFee(LedgerHeader const& header, int64_t baseFee,
+                           bool applying) const override;
 
     void addSignature(SecretKey const& secretKey);
     void addSignature(DecoratedSignature const& signature);
@@ -167,9 +175,11 @@ class TransactionFrame : public TransactionFrameBase
                                  AccountID const& accountID);
 
     bool checkValid(AbstractLedgerTxn& ltxOuter, SequenceNumber current,
-                    bool chargeFee);
-    bool checkValid(AbstractLedgerTxn& ltxOuter,
-                    SequenceNumber current) override;
+                    bool chargeFee, uint64_t lowerBoundCloseTimeOffset,
+                    uint64_t upperBoundCloseTimeOffset);
+    bool checkValid(AbstractLedgerTxn& ltxOuter, SequenceNumber current,
+                    uint64_t lowerBoundCloseTimeOffset,
+                    uint64_t upperBoundCloseTimeOffset) override;
 
     void insertKeysForFeeProcessing(
         std::unordered_set<LedgerKey>& keys) const override;

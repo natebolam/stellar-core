@@ -179,6 +179,18 @@ struct SurgeCompare
         // compare fee/numOps between top1 and top2
         // getNumOperations >= 1 because SurgeCompare can only be used on
         // valid transactions
+        //
+        // Let f1, f2 be the two fee bids, and let n1, n2 be the two
+        // operation counts. We want to calculate the boolean comparison
+        // "f1 / n1 < f2 / n2" but, since these are uint128s, we want to
+        // avoid the truncating division or use of floating point.
+        //
+        // Therefore we multiply both sides by n1 * n2, and cancel:
+        //
+        //               f1 / n1 < f2 / n2
+        //  == f1 * n1 * n2 / n1 < f2 * n1 * n2 / n2
+        //  == f1 *      n2      < f2 * n1
+
         auto v1 = bigMultiply(top1->getFeeBid(), top2->getNumOperations());
         auto v2 = bigMultiply(top2->getFeeBid(), top1->getNumOperations());
         if (v1 < v2)
@@ -284,7 +296,8 @@ TxSetFrame::surgePricingFilter(Application& app)
 bool
 TxSetFrame::checkOrTrim(Application& app,
                         std::vector<TransactionFrameBasePtr>& trimmed,
-                        bool justCheck)
+                        bool justCheck, uint64_t lowerBoundCloseTimeOffset,
+                        uint64_t upperBoundCloseTimeOffset)
 {
     ZoneScoped;
     LedgerTxn ltx(app.getLedgerTxnRoot());
@@ -298,7 +311,8 @@ TxSetFrame::checkOrTrim(Application& app,
         while (iter != kv.second.end())
         {
             auto tx = *iter;
-            if (!tx->checkValid(ltx, lastSeq))
+            if (!tx->checkValid(ltx, lastSeq, lowerBoundCloseTimeOffset,
+                                upperBoundCloseTimeOffset))
             {
                 if (justCheck)
                 {
@@ -367,12 +381,14 @@ TxSetFrame::checkOrTrim(Application& app,
 }
 
 std::vector<TransactionFrameBasePtr>
-TxSetFrame::trimInvalid(Application& app)
+TxSetFrame::trimInvalid(Application& app, uint64_t lowerBoundCloseTimeOffset,
+                        uint64_t upperBoundCloseTimeOffset)
 {
     ZoneScoped;
     std::vector<TransactionFrameBasePtr> trimmed;
     sortForHash();
-    checkOrTrim(app, trimmed, false);
+    checkOrTrim(app, trimmed, false, lowerBoundCloseTimeOffset,
+                upperBoundCloseTimeOffset);
     return trimmed;
 }
 
@@ -380,7 +396,8 @@ TxSetFrame::trimInvalid(Application& app)
 // the fees of all the tx it has submitted in this set
 // check seq num
 bool
-TxSetFrame::checkValid(Application& app)
+TxSetFrame::checkValid(Application& app, uint64_t lowerBoundCloseTimeOffset,
+                       uint64_t upperBoundCloseTimeOffset)
 {
     ZoneScoped;
     auto& lcl = app.getLedgerManager().getLastClosedLedgerHeader();
@@ -420,7 +437,8 @@ TxSetFrame::checkValid(Application& app)
     }
 
     std::vector<TransactionFrameBasePtr> trimmed;
-    bool valid = checkOrTrim(app, trimmed, true);
+    bool valid = checkOrTrim(app, trimmed, true, lowerBoundCloseTimeOffset,
+                             upperBoundCloseTimeOffset);
     mValid = make_optional<std::pair<Hash, bool>>(lcl.hash, valid);
     return valid;
 }
@@ -442,13 +460,13 @@ TxSetFrame::getContentsHash()
     if (!mHash)
     {
         sortForHash();
-        auto hasher = SHA256::create();
-        hasher->add(mPreviousLedgerHash);
+        SHA256 hasher;
+        hasher.add(mPreviousLedgerHash);
         for (unsigned int n = 0; n < mTransactions.size(); n++)
         {
-            hasher->add(xdr::xdr_to_opaque(mTransactions[n]->getEnvelope()));
+            hasher.add(xdr::xdr_to_opaque(mTransactions[n]->getEnvelope()));
         }
-        mHash = make_optional<Hash>(hasher->finish());
+        mHash = make_optional<Hash>(hasher.finish());
     }
     return *mHash;
 }
@@ -526,7 +544,7 @@ TxSetFrame::getTotalFees(LedgerHeader const& lh) const
     return std::accumulate(mTransactions.begin(), mTransactions.end(),
                            int64_t(0),
                            [&](int64_t t, TransactionFrameBasePtr const& tx) {
-                               return t + tx->getFee(lh, baseFee);
+                               return t + tx->getFee(lh, baseFee, true);
                            });
 }
 

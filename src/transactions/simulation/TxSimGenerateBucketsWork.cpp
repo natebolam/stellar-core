@@ -11,6 +11,7 @@
 #include "crypto/SecretKey.h"
 #include "crypto/SignerKey.h"
 #include "history/HistoryArchive.h"
+#include "main/ErrorMessages.h"
 #include "src/transactions/simulation/TxSimUtils.h"
 
 namespace stellar
@@ -124,9 +125,11 @@ TxSimGenerateBucketsWork::onRun()
         mTimer->async_wait(wakeSelfUpCallback(), &VirtualTimer::onFailureNoop);
         return BasicWork::State::WORK_WAITING;
     }
-    else if (!mIntermediateBuckets.empty())
+
+    if (!mIntermediateBuckets.empty())
     {
         processGeneratedBucket();
+
         if (mLevel < BucketList::kNumLevels - 1)
         {
             if (!mIsCurr)
@@ -136,7 +139,19 @@ TxSimGenerateBucketsWork::onRun()
         }
         else
         {
-            return State::WORK_SUCCESS;
+            try
+            {
+                // Persist HAS file to avoid re-generating same buckets
+                getGeneratedHAS().save("simulate-" +
+                                       HistoryArchiveState::baseName());
+                return State::WORK_SUCCESS;
+            }
+            catch (std::exception const& e)
+            {
+                CLOG(ERROR, "History") << "Error saving HAS file: " << e.what();
+                CLOG(ERROR, "History") << POSSIBLY_CORRUPTED_LOCAL_FS;
+                return State::WORK_FAILURE;
+            }
         }
 
         mIsCurr = !mIsCurr;
@@ -148,14 +163,9 @@ TxSimGenerateBucketsWork::onRun()
         auto bucketHash = mIsCurr ? currentLevel.curr : currentLevel.snap;
         auto bucket =
             mApp.getBucketManager().getBucketByHash(hexToBin256(bucketHash));
-        Hash emptyHash;
-        if (bucket->getHash() != emptyHash)
-        {
-            CLOG(INFO, "History")
-                << "Simulating " << (mIsCurr ? "curr" : "snap")
-                << " bucketlist level: " << mLevel;
-            startBucketGeneration(bucket);
-        }
+        CLOG(INFO, "History") << "Simulating " << (mIsCurr ? "curr" : "snap")
+                              << " bucketlist level: " << mLevel;
+        startBucketGeneration(bucket);
     }
     catch (std::runtime_error const& e)
     {
@@ -256,13 +266,6 @@ TxSimGenerateBucketsWork::startBucketGeneration(
     }
 
     checkOrStartMerges();
-}
-
-void
-TxSimGenerateBucketsWork::onSuccess()
-{
-    // Persist HAS file to avoid re-generating same buckets
-    getGeneratedHAS().save("simulate-" + HistoryArchiveState::baseName());
 }
 }
 }

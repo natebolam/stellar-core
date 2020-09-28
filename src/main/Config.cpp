@@ -25,8 +25,7 @@
 
 namespace stellar
 {
-const uint32 Config::CURRENT_LEDGER_PROTOCOL_VERSION = 13;
-const uint32 Config::MAXIMUM_QUORUM_NESTING_LEVEL = 4;
+const uint32 Config::CURRENT_LEDGER_PROTOCOL_VERSION = 14;
 
 // Options that must only be used for testing
 static const std::unordered_set<std::string> TESTING_ONLY_OPTIONS = {
@@ -92,6 +91,8 @@ Config::Config() : NODE_SEED(SecretKey::random())
     MODE_ENABLES_BUCKETLIST = true;
     MODE_USES_IN_MEMORY_LEDGER = false;
     MODE_STORES_HISTORY = true;
+    MODE_DOES_CATCHUP = true;
+    MODE_AUTO_STARTS_OVERLAY = true;
     OP_APPLY_SLEEP_TIME_FOR_TESTING = 0;
 
     FORCE_SCP = false;
@@ -100,7 +101,7 @@ Config::Config() : NODE_SEED(SecretKey::random())
     MAXIMUM_LEDGER_CLOSETIME_DRIFT = 50;
 
     OVERLAY_PROTOCOL_MIN_VERSION = 13;
-    OVERLAY_PROTOCOL_VERSION = 13;
+    OVERLAY_PROTOCOL_VERSION = 14;
 
     VERSION_STR = STELLAR_CORE_VERSION;
 
@@ -253,14 +254,14 @@ readInt(ConfigItem const& item, T min = std::numeric_limits<T>::min(),
 
 void
 Config::loadQset(std::shared_ptr<cpptoml::table> group, SCPQuorumSet& qset,
-                 int level)
+                 uint32 level)
 {
     if (!group)
     {
         throw std::invalid_argument("invalid entry in quorum set definition");
     }
 
-    if (level > Config::MAXIMUM_QUORUM_NESTING_LEVEL)
+    if (level > MAXIMUM_QUORUM_NESTING_LEVEL)
     {
         throw std::invalid_argument("too many levels in quorum set");
     }
@@ -554,10 +555,12 @@ Config::load(std::string const& filename)
         else
         {
             std::ifstream ifs(filename);
-            if (!ifs.is_open())
+            if (!ifs)
             {
-                throw std::runtime_error("could not open file");
+                throw std::runtime_error(
+                    fmt::format("Error opening file {}", filename));
             }
+            ifs.exceptions(std::ios::badbit);
             load(ifs);
         }
     }
@@ -682,7 +685,7 @@ Config::processConfig(std::shared_ptr<cpptoml::table> t)
             }
             else if (item.first == "HTTP_PORT")
             {
-                HTTP_PORT = readInt<unsigned short>(item, 1);
+                HTTP_PORT = readInt<unsigned short>(item);
             }
             else if (item.first == "HTTP_MAX_CLIENT")
             {
@@ -992,6 +995,10 @@ Config::processConfig(std::shared_ptr<cpptoml::table> t)
                 throw std::invalid_argument(err);
             }
         }
+
+        // Validators default to starting the network from local state
+        FORCE_SCP = NODE_IS_VALIDATOR;
+
         // process elements that potentially depend on others
         if (t->contains("VALIDATORS"))
         {

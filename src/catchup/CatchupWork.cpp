@@ -121,8 +121,12 @@ CatchupWork::downloadVerifyLedgerChain(CatchupRange const& catchupRange,
     auto getLedgers = std::make_shared<BatchDownloadWork>(
         mApp, checkpointRange, HISTORY_FILE_TYPE_LEDGER, *mDownloadDir,
         mArchive);
+    mRangeEndPromise = std::promise<LedgerNumHashPair>();
+    mRangeEndFuture = mRangeEndPromise.get_future().share();
+    mRangeEndPromise.set_value(rangeEnd);
     mVerifyLedgers = std::make_shared<VerifyLedgerChainWork>(
-        mApp, *mDownloadDir, verifyRange, mLastClosedLedgerHashPair, rangeEnd);
+        mApp, *mDownloadDir, verifyRange, mLastClosedLedgerHashPair,
+        mRangeEndFuture);
 
     std::vector<std::shared_ptr<BasicWork>> seq{getLedgers, mVerifyLedgers};
     mDownloadVerifyLedgersSeq =
@@ -171,6 +175,12 @@ CatchupWork::assertBucketState()
 
     // Consistency check: remote state and mVerifiedLedgerRangeStart should
     // point to the same ledger and the same BucketList.
+    if (has.currentLedger != mVerifiedLedgerRangeStart.header.ledgerSeq)
+    {
+        CLOG(ERROR, "History")
+            << "Caught up to wrong ledger: wanted " << has.currentLedger
+            << ", got " << mVerifiedLedgerRangeStart.header.ledgerSeq;
+    }
     assert(has.currentLedger == mVerifiedLedgerRangeStart.header.ledgerSeq);
     assert(has.getBucketListHash() ==
            mVerifiedLedgerRangeStart.header.bucketListHash);
@@ -232,6 +242,17 @@ CatchupWork::runCatchupStep()
     }
 
     auto const& has = mGetHistoryArchiveStateWork->getHistoryArchiveState();
+    // If the HAS is a newer version and contains networkPassphrase,
+    // we should make sure that it matches the config's networkPassphrase.
+    if (!has.networkPassphrase.empty() &&
+        has.networkPassphrase != mApp.getConfig().NETWORK_PASSPHRASE)
+    {
+        CLOG(ERROR, "History")
+            << "The network passphrase of the application does not match "
+            << "that of the history archive state";
+        return State::WORK_FAILURE;
+    }
+
     // Step 2: Compare local and remote states
     if (!hasAnyLedgersToCatchupTo())
     {
@@ -362,7 +383,7 @@ CatchupWork::runCatchupStep()
         if (mDownloadVerifyLedgersSeq->getState() == State::WORK_SUCCESS)
         {
             mVerifiedLedgerRangeStart =
-                mVerifyLedgers->getVerifiedLedgerRangeStart();
+                mVerifyLedgers->getMaxVerifiedLedgerOfMinCheckpoint();
             if (catchupRange.applyBuckets() && !mBucketsAppliedEmitted)
             {
                 assertBucketState();

@@ -14,6 +14,8 @@
 #include "bucket/BucketTests.h"
 #include "bucket/Bucket.h"
 #include "bucket/BucketInputIterator.h"
+#include "bucket/BucketManager.h"
+#include "bucket/BucketOutputIterator.h"
 #include "ledger/LedgerTxn.h"
 #include "ledger/test/LedgerTestUtils.h"
 #include "lib/catch.hpp"
@@ -36,6 +38,8 @@ fileSize(std::string const& name)
 {
     assert(fs::exists(name));
     std::ifstream in(name, std::ifstream::ate | std::ifstream::binary);
+    REQUIRE(!!in);
+    in.exceptions(std::ios::badbit);
     return in.tellg();
 }
 
@@ -192,6 +196,10 @@ TEST_CASE("merging bucket entries", "[bucket]")
                     liveEntry.data.data() =
                         LedgerTestUtils::generateValidDataEntry(10);
                     break;
+                case CLAIMABLE_BALANCE:
+                    liveEntry.data.claimableBalance() =
+                        LedgerTestUtils::generateValidClaimableBalanceEntry(10);
+                    break;
                 default:
                     abort();
                 }
@@ -217,6 +225,7 @@ TEST_CASE("merging bucket entries", "[bucket]")
         checkDeadAnnihilatesLive(TRUSTLINE);
         checkDeadAnnihilatesLive(OFFER);
         checkDeadAnnihilatesLive(DATA);
+        checkDeadAnnihilatesLive(CLAIMABLE_BALANCE);
 
         SECTION("random dead entries annihilates live entries")
         {

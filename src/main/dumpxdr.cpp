@@ -7,6 +7,7 @@
 #include "transactions/TransactionUtils.h"
 #include "util/Decoder.h"
 #include "util/Fs.h"
+#include "util/XDRCereal.h"
 #include "util/XDROperators.h"
 #include "util/XDRStream.h"
 #include "util/types.h"
@@ -17,7 +18,7 @@
 #include <regex>
 #include <xdrpp/printer.h>
 
-#if !defined(USE_TERMIOS) && !MSVC
+#if !defined(USE_TERMIOS) && !defined(_WIN32)
 #define HAVE_TERMIOS 1
 #endif
 #if HAVE_TERMIOS
@@ -30,84 +31,13 @@ extern "C" {
 }
 #endif // HAVE_TERMIOS
 
-#if MSVC
+#ifdef _WIN32
 #include <io.h>
 #define isatty _isatty
-#endif // MSVC
+#include <wincred.h>
+#endif // _WIN32
 
 using namespace std::placeholders;
-
-template <uint32_t N>
-void
-cereal_override(cereal::JSONOutputArchive& ar, const xdr::opaque_array<N>& s,
-                const char* field)
-{
-    xdr::archive(ar, stellar::binToHex(stellar::ByteSlice(s.data(), s.size())),
-                 field);
-}
-
-// We still need one explicit composite-container override because cereal
-// appears to process arrays-of-arrays internally, without calling back through
-// an NVP adaptor.
-template <uint32_t N>
-void
-cereal_override(cereal::JSONOutputArchive& ar,
-                const xdr::xarray<stellar::Hash, N>& s, const char* field)
-{
-    std::vector<std::string> tmp;
-    for (auto const& h : s)
-    {
-        tmp.emplace_back(
-            stellar::binToHex(stellar::ByteSlice(h.data(), h.size())));
-    }
-    xdr::archive(ar, tmp, field);
-}
-
-template <uint32_t N>
-void
-cereal_override(cereal::JSONOutputArchive& ar, const xdr::opaque_vec<N>& s,
-                const char* field)
-{
-    xdr::archive(ar, stellar::binToHex(stellar::ByteSlice(s.data(), s.size())),
-                 field);
-}
-void
-cereal_override(cereal::JSONOutputArchive& ar, const stellar::PublicKey& s,
-                const char* field)
-{
-    xdr::archive(ar, stellar::KeyUtils::toStrKey<stellar::PublicKey>(s), field);
-}
-void
-cereal_override(cereal::JSONOutputArchive& ar, const stellar::Asset& s,
-                const char* field)
-{
-    xdr::archive(ar, stellar::assetToString(s), field);
-}
-
-template <typename T>
-void
-cereal_override(cereal::JSONOutputArchive& ar, const xdr::pointer<T>& t,
-                const char* field)
-{
-    // We tolerate a little information-loss here collapsing *T into T for
-    // the non-null case, and use JSON 'null' for the null case. This reads
-    // much better than the thing JSONOutputArchive does with PtrWrapper.
-    if (t)
-    {
-        xdr::archive(ar, *t, field);
-    }
-    else
-    {
-        ar.setNextName(field);
-        ar.writeName();
-        ar.saveValue(nullptr);
-    }
-}
-
-// This has to be included _after_ the cereal_override overloads above,
-// otherwise some interplay of name lookup and visibility during the
-// enable_if call in the cereal adaptor fails to find them.
-#include <xdrpp/cereal.h>
 
 namespace stellar
 {
@@ -137,29 +67,21 @@ xdr_printer(MuxedAccount const& muxedAccount)
 
 template <typename T>
 void
-dumpstream(XDRInputFileStream& in, bool json)
+dumpstream(XDRInputFileStream& in, bool compact)
 {
     T tmp;
-    if (json)
+    cereal::JSONOutputArchive archive(
+        std::cout, compact ? cereal::JSONOutputArchive::Options::NoIndent()
+                           : cereal::JSONOutputArchive::Options::Default());
+    archive.makeArray();
+    while (in && in.readOne(tmp))
     {
-        cereal::JSONOutputArchive archive(std::cout);
-        archive.makeArray();
-        while (in && in.readOne(tmp))
-        {
-            archive(tmp);
-        }
-    }
-    else
-    {
-        while (in && in.readOne(tmp))
-        {
-            std::cout << xdr::xdr_to_string(tmp) << std::endl;
-        }
+        archive(tmp);
     }
 }
 
 void
-dumpXdrStream(std::string const& filename, bool json)
+dumpXdrStream(std::string const& filename, bool compact)
 {
     std::regex rx(
         ".*(ledger|bucket|transactions|results|scp)-[[:xdigit:]]+\\.xdr");
@@ -171,24 +93,24 @@ dumpXdrStream(std::string const& filename, bool json)
 
         if (sm[1] == "ledger")
         {
-            dumpstream<LedgerHeaderHistoryEntry>(in, json);
+            dumpstream<LedgerHeaderHistoryEntry>(in, compact);
         }
         else if (sm[1] == "bucket")
         {
-            dumpstream<BucketEntry>(in, json);
+            dumpstream<BucketEntry>(in, compact);
         }
         else if (sm[1] == "transactions")
         {
-            dumpstream<TransactionHistoryEntry>(in, json);
+            dumpstream<TransactionHistoryEntry>(in, compact);
         }
         else if (sm[1] == "results")
         {
-            dumpstream<TransactionHistoryResultEntry>(in, json);
+            dumpstream<TransactionHistoryResultEntry>(in, compact);
         }
         else
         {
             assert(sm[1] == "scp");
-            dumpstream<SCPHistoryEntry>(in, json);
+            dumpstream<SCPHistoryEntry>(in, compact);
         }
     }
     else
@@ -215,7 +137,10 @@ readFile(const std::string& filename, bool base64 = false)
     {
         ifstream file(filename.c_str());
         if (!file)
+        {
             throw_perror(filename);
+        }
+        file.exceptions(std::ios::badbit);
         input << file.rdbuf();
     }
     string ret;
@@ -228,19 +153,23 @@ readFile(const std::string& filename, bool base64 = false)
 
 template <typename T>
 void
-printOneXdr(xdr::opaque_vec<> const& o, std::string const& desc)
+printOneXdr(xdr::opaque_vec<> const& o, std::string const& desc, bool compact)
 {
     T tmp;
     xdr::xdr_from_opaque(o, tmp);
-    std::cout << xdr::xdr_to_string(tmp, desc.c_str()) << std::endl;
+    cereal::JSONOutputArchive ar(
+        std::cout, compact ? cereal::JSONOutputArchive::Options::NoIndent()
+                           : cereal::JSONOutputArchive::Options::Default());
+    ar(tmp);
 }
 
 void
-printXdr(std::string const& filename, std::string const& filetype, bool base64)
+printXdr(std::string const& filename, std::string const& filetype, bool base64,
+         bool compact)
 {
 // need to use this pattern as there is no good way to get a human readable
 // type name from a type
-#define PRINTONEXDR(T) std::bind(printOneXdr<T>, _1, #T)
+#define PRINTONEXDR(T) std::bind(printOneXdr<T>, _1, #T, compact)
     auto dumpMap =
         std::map<std::string, std::function<void(xdr::opaque_vec<> const&)>>{
             {"ledgerheader", PRINTONEXDR(LedgerHeader)},
@@ -312,6 +241,51 @@ set_echo_flag(int fd, bool flag)
 }
 #endif
 
+#ifdef _WIN32
+static std::string
+getSecureCreds(std::string const& prompt)
+{
+    std::string res;
+    CREDUI_INFO cui;
+    TCHAR pszName[CREDUI_MAX_USERNAME_LENGTH + 1] = TEXT("default");
+    TCHAR pszPwd[CREDUI_MAX_PASSWORD_LENGTH + 1];
+    BOOL fSave;
+    DWORD dwErr;
+
+    cui.cbSize = sizeof(CREDUI_INFO);
+    cui.hwndParent = NULL;
+    cui.pszMessageText = prompt.c_str();
+    cui.pszCaptionText = TEXT("SignerUI");
+    cui.hbmBanner = NULL;
+    fSave = FALSE;
+    SecureZeroMemory(pszPwd, sizeof(pszPwd));
+    dwErr = CredUIPromptForCredentials(
+        &cui,                              // CREDUI_INFO structure
+        TEXT("Stellar"),                   // Target for credentials
+                                           //   (usually a server)
+        NULL,                              // Reserved
+        0,                                 // Reason
+        pszName,                           // User name
+        CREDUI_MAX_USERNAME_LENGTH + 1,    // Max number of char for user name
+        pszPwd,                            // Password
+        CREDUI_MAX_PASSWORD_LENGTH + 1,    // Max number of char for password
+        &fSave,                            // State of save check box
+        CREDUI_FLAGS_GENERIC_CREDENTIALS | // flags
+            CREDUI_FLAGS_ALWAYS_SHOW_UI | CREDUI_FLAGS_DO_NOT_PERSIST);
+
+    if (!dwErr)
+    {
+        res = pszPwd;
+    }
+    else
+    {
+        throw std::runtime_error("Could not get password");
+    }
+    return res;
+}
+
+#endif
+
 #if __GNUC__ >= 4 && __GLIBC__ >= 2
 // Realistically, if a write fails in one of these utility functions,
 // it should kill us with SIGPIPE.  Hence, we don't need to check the
@@ -334,12 +308,9 @@ readSecret(const std::string& prompt, bool force_tty)
         std::getline(std::cin, ret);
         return ret;
     }
-#if !HAVE_TERMIOS
-    // Sorry, Windows.  Might need to use something like this:
-    // https://msdn.microsoft.com/en-us/library/ms683167(VS.85).aspx
-    // http://stackoverflow.com/questions/1413445/read-a-password-from-stdcin/1455007#1455007
-    throw std::invalid_argument("reading secrets from terminal not supported");
-#else
+#ifdef _WIN32
+    return getSecureCreds(prompt);
+#elif HAVE_TERMIOS
     struct cleanup
     {
         std::function<void()> action_;
@@ -405,8 +376,9 @@ signtxn(std::string const& filename, std::string netId, bool base64)
             throw std::runtime_error(
                 "Evelope already contains maximum number of signatures");
 
-        SecretKey sk(SecretKey::fromStrKeySeed(
-            readSecret("Secret key seed: ", txn_stdin)));
+        SecretKey sk(SecretKey::fromStrKeySeed(readSecret(
+            fmt::format("Secret key seed [network id: '{}']: ", netId),
+            txn_stdin)));
         TransactionSignaturePayload payload;
         payload.networkId = sha256(netId);
         switch (txenv.type())

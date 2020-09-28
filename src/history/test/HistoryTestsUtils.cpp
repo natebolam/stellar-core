@@ -148,12 +148,12 @@ BucketOutputIteratorForTesting::writeTmpTestBucket()
 
     // Finish writing and close the bucket file
     REQUIRE(mBuf);
-    mOut.writeOne(*mBuf, mHasher.get(), &mBytesPut);
+    mOut.writeOne(*mBuf, &mHasher, &mBytesPut);
     mObjectsPut++;
     mBuf.reset();
     mOut.close();
 
-    return std::pair<std::string, uint256>(mFilename, mHasher->finish());
+    return std::pair<std::string, uint256>(mFilename, mHasher.finish());
 };
 
 TestBucketGenerator::TestBucketGenerator(
@@ -204,7 +204,9 @@ TestBucketGenerator::generateBucket(TestBucketState state)
         }
         else
         {
-            std::ofstream out(filename + ".gz");
+            std::ofstream out;
+            out.exceptions(std::ios::failbit | std::ios::badbit);
+            out.open(filename + ".gz");
             out.close();
             seq = {mkdir, put};
         }
@@ -614,6 +616,28 @@ CatchupSimulation::ensureOnlineCatchupPossible(uint32_t targetLedger,
     ensurePublishesComplete();
 }
 
+LedgerNumHashPair
+CatchupSimulation::getLastPublishedCheckpoint() const
+{
+    LedgerNumHashPair pair;
+    assert(mLedgerHashes.size() == mLedgerSeqs.size());
+    auto hi = mLedgerHashes.rbegin();
+    auto si = mLedgerSeqs.rbegin();
+    auto const& hm = mApp.getHistoryManager();
+    while (si != mLedgerSeqs.rend())
+    {
+        if (hm.isLastLedgerInCheckpoint(*si))
+        {
+            pair.first = *si;
+            pair.second = make_optional<Hash>(*hi);
+            break;
+        }
+        ++hi;
+        ++si;
+    }
+    return pair;
+}
+
 void
 CatchupSimulation::crankUntil(Application::pointer app,
                               std::function<bool()> const& predicate,
@@ -785,7 +809,7 @@ CatchupSimulation::catchupOnline(Application::pointer app, uint32_t initLedger,
     };
 
     auto lastLedger = lm.getLastClosedLedgerNum();
-    crankUntil(app, catchupIsDone, std::chrono::seconds{30});
+    crankUntil(app, catchupIsDone, std::chrono::seconds{60});
 
     if (lm.getLastClosedLedgerNum() == triggerLedger + bufferLedgers)
     {

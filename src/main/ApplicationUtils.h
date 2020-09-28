@@ -12,8 +12,8 @@ namespace stellar
 
 class CatchupConfiguration;
 
-int runWithConfig(Config cfg);
-void setForceSCPFlag(Config cfg, bool set);
+int runWithConfig(Config cfg, optional<CatchupConfiguration> cc);
+void setForceSCPFlag();
 void initializeDatabase(Config cfg);
 void httpCommand(std::string const& command, unsigned short port);
 void showOfflineInfo(Config cfg);

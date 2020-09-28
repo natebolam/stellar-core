@@ -55,7 +55,7 @@ class Config : public std::enable_shared_from_this<Config>
 
     void validateConfig(ValidationThresholdLevels thresholdLevel);
     void loadQset(std::shared_ptr<cpptoml::table> group, SCPQuorumSet& qset,
-                  int level);
+                  uint32 level);
 
     void processConfig(std::shared_ptr<cpptoml::table>);
 
@@ -102,8 +102,6 @@ class Config : public std::enable_shared_from_this<Config>
 
   public:
     static const uint32 CURRENT_LEDGER_PROTOCOL_VERSION;
-    // level = 0 when there is no nesting.
-    static const uint32 MAXIMUM_QUORUM_NESTING_LEVEL;
 
     typedef std::shared_ptr<Config> pointer;
 
@@ -121,12 +119,12 @@ class Config : public std::enable_shared_from_this<Config>
     // application config
 
     // The default way stellar-core starts is to load the state from disk and
-    // catch up to the network before starting SCP. If you need different
-    // behavior you need to use new-db or force-scp which sets the following
-    // flags:
+    // start a consensus round (if node is validating), then maybe trigger
+    // catchup. If you need different behavior you need to use new-db or
+    // --wait-for-consensus option which sets the following flag to false:
 
     // SCP will start running immediately using the current local state to
-    // participate in consensus. DO NOT INCLUDE THIS IN A CONFIG FILE
+    // participate in consensus
     bool FORCE_SCP;
 
     // This is a mode for testing. It prevents you from trying to connect to
@@ -208,6 +206,17 @@ class Config : public std::enable_shared_from_this<Config>
     // A config parameter that stores historical data, such as transactions,
     // fees, and scp history in the database
     bool MODE_STORES_HISTORY;
+
+    // A config parameter that controls whether core automatically catches up
+    // when it has buffered enough input; if false an out-of-sync node will
+    // remain out-of-sync, buffering ledgers from the network in memory until
+    // it is halted.
+    bool MODE_DOES_CATCHUP;
+
+    // A config parameter that controls whether the application starts the
+    // overlay on startup, or waits for a later startup after performing some
+    // other pre-overlay-start operations (eg. offline catchup).
+    bool MODE_AUTO_STARTS_OVERLAY;
 
     // A config to allow connections to localhost
     // this should only be enabled when testing as it's a security issue

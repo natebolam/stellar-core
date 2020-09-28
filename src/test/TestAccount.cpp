@@ -3,6 +3,8 @@
 // of this distribution or at http://www.apache.org/licenses/LICENSE-2.0
 
 #include "test/TestAccount.h"
+#include "crypto/SHA.h"
+#include "ledger/LedgerManager.h"
 #include "ledger/LedgerTxn.h"
 #include "ledger/LedgerTxnEntry.h"
 #include "ledger/LedgerTxnHeader.h"
@@ -45,6 +47,16 @@ TestAccount::getBalance() const
     LedgerTxn ltx(mApp.getLedgerTxnRoot());
     auto entry = stellar::loadAccount(ltx, getPublicKey());
     return entry.current().data.account().balance;
+}
+
+int64_t
+TestAccount::getAvailableBalance() const
+{
+    LedgerTxn ltx(mApp.getLedgerTxnRoot());
+    auto entry = stellar::loadAccount(ltx, getPublicKey());
+    auto header = ltx.loadHeader();
+
+    return stellar::getAvailableBalance(header, entry);
 }
 
 bool
@@ -227,6 +239,67 @@ void
 TestAccount::bumpSequence(SequenceNumber to)
 {
     applyTx(tx({txtest::bumpSequence(to)}), mApp, false);
+}
+
+ClaimableBalanceID
+TestAccount::createClaimableBalance(Asset const& asset, int64_t amount,
+                                    xdr::xvector<Claimant, 10> const& claimants)
+{
+    auto transaction =
+        tx({txtest::createClaimableBalance(asset, amount, claimants)});
+    applyTx(transaction, mApp);
+
+    auto returnedBalanceID = transaction->getResult()
+                                 .result.results()[0]
+                                 .tr()
+                                 .createClaimableBalanceResult()
+                                 .balanceID();
+
+    // validate balanceID returned is what we expect
+    REQUIRE(returnedBalanceID == getBalanceID(0));
+
+    LedgerTxn ltx(mApp.getLedgerTxnRoot());
+    auto entry = stellar::loadClaimableBalance(ltx, returnedBalanceID);
+    REQUIRE(entry);
+
+    auto const& claimableBalance = entry.current().data.claimableBalance();
+    REQUIRE(claimableBalance.asset == asset);
+    REQUIRE(claimableBalance.amount == amount);
+    REQUIRE(claimableBalance.balanceID == returnedBalanceID);
+    REQUIRE((entry.current().ext.v() == 1 &&
+             entry.current().ext.v1().sponsoringID));
+    REQUIRE(*entry.current().ext.v1().sponsoringID == getPublicKey());
+
+    return returnedBalanceID;
+}
+
+void
+TestAccount::claimClaimableBalance(ClaimableBalanceID const& balanceID)
+{
+    applyTx(tx({txtest::claimClaimableBalance(balanceID)}), mApp);
+
+    LedgerTxn ltx(mApp.getLedgerTxnRoot());
+    REQUIRE(!stellar::loadClaimableBalance(ltx, balanceID));
+}
+
+ClaimableBalanceID
+TestAccount::getBalanceID(uint32_t opIndex, SequenceNumber sn)
+{
+    if (sn == 0)
+    {
+        sn = getLastSequenceNumber();
+    }
+
+    OperationID operationID;
+    operationID.type(ENVELOPE_TYPE_OP_ID);
+    operationID.id().sourceAccount = toMuxedAccount(getPublicKey());
+    operationID.id().seqNum = sn;
+    operationID.id().opNum = opIndex;
+
+    ClaimableBalanceID balanceID;
+    balanceID.v0() = sha256(xdr::xdr_to_opaque(operationID));
+
+    return balanceID;
 }
 
 int64_t

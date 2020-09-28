@@ -21,6 +21,7 @@
 #include "main/Application.h"
 #include "transactions/SignatureChecker.h"
 #include "transactions/SignatureUtils.h"
+#include "transactions/SponsorshipUtils.h"
 #include "transactions/TransactionBridge.h"
 #include "transactions/TransactionUtils.h"
 #include "util/Algoritm.h"
@@ -148,18 +149,26 @@ TransactionFrame::getMinFee(LedgerHeader const& header) const
 }
 
 int64_t
-TransactionFrame::getFee(LedgerHeader const& header, int64_t baseFee) const
+TransactionFrame::getFee(LedgerHeader const& header, int64_t baseFee,
+                         bool applying) const
 {
-    if (header.ledgerVersion < 11)
-    {
-        return getFeeBid();
-    }
-    else
+    if (header.ledgerVersion >= 11 || !applying)
     {
         int64_t adjustedFee =
             baseFee * std::max<int64_t>(1, getNumOperations());
 
-        return std::min<int64_t>(getFeeBid(), adjustedFee);
+        if (applying)
+        {
+            return std::min<int64_t>(getFeeBid(), adjustedFee);
+        }
+        else
+        {
+            return adjustedFee;
+        }
+    }
+    else
+    {
+        return getFeeBid();
     }
 }
 
@@ -236,13 +245,13 @@ TransactionFrame::loadAccount(AbstractLedgerTxn& ltx,
 {
     ZoneScoped;
     if (header.current().ledgerVersion < 8 && mCachedAccount &&
-        mCachedAccount->data.account().accountID == accountID)
+        mCachedAccount->ledgerEntry().data.account().accountID == accountID)
     {
         // this is buggy caching that existed in old versions of the protocol
         auto res = stellar::loadAccount(ltx, accountID);
         if (res)
         {
-            res.current() = *mCachedAccount;
+            res.currentGeneralized() = *mCachedAccount;
         }
         else
         {
@@ -263,11 +272,13 @@ std::shared_ptr<OperationFrame>
 TransactionFrame::makeOperation(Operation const& op, OperationResult& res,
                                 size_t index)
 {
-    return OperationFrame::makeHelper(op, res, *this);
+    return OperationFrame::makeHelper(op, res, *this,
+                                      static_cast<uint32_t>(index));
 }
 
 void
-TransactionFrame::resetResults(LedgerHeader const& header, int64_t baseFee)
+TransactionFrame::resetResults(LedgerHeader const& header, int64_t baseFee,
+                               bool applying)
 {
     auto& ops = mEnvelope.type() == ENVELOPE_TYPE_TX_V0
                     ? mEnvelope.v0().tx.operations
@@ -288,11 +299,12 @@ TransactionFrame::resetResults(LedgerHeader const& header, int64_t baseFee)
 
     // feeCharged is updated accordingly to represent the cost of the
     // transaction regardless of the failure modes.
-    getResult().feeCharged = getFee(header, baseFee);
+    getResult().feeCharged = getFee(header, baseFee, applying);
 }
 
 bool
-TransactionFrame::isTooEarly(LedgerTxnHeader const& header) const
+TransactionFrame::isTooEarly(LedgerTxnHeader const& header,
+                             uint64_t lowerBoundCloseTimeOffset) const
 {
     auto const& tb = mEnvelope.type() == ENVELOPE_TYPE_TX_V0
                          ? mEnvelope.v0().tx.timeBounds
@@ -300,27 +312,35 @@ TransactionFrame::isTooEarly(LedgerTxnHeader const& header) const
     if (tb)
     {
         uint64 closeTime = header.current().scpValue.closeTime;
-        return tb->minTime > closeTime;
+        return tb->minTime &&
+               (tb->minTime > (closeTime + lowerBoundCloseTimeOffset));
     }
     return false;
 }
 
 bool
-TransactionFrame::isTooLate(LedgerTxnHeader const& header) const
+TransactionFrame::isTooLate(LedgerTxnHeader const& header,
+                            uint64_t upperBoundCloseTimeOffset) const
 {
     auto const& tb = mEnvelope.type() == ENVELOPE_TYPE_TX_V0
                          ? mEnvelope.v0().tx.timeBounds
                          : mEnvelope.v1().tx.timeBounds;
     if (tb)
     {
+        // Prior to consensus, we can pass in an upper bound estimate on when we
+        // expect the ledger to close so we don't accept transactions that will
+        // expire by the time they are applied
         uint64 closeTime = header.current().scpValue.closeTime;
-        return tb->maxTime && (tb->maxTime < closeTime);
+        return tb->maxTime &&
+               (tb->maxTime < (closeTime + upperBoundCloseTimeOffset));
     }
     return false;
 }
 
 bool
-TransactionFrame::commonValidPreSeqNum(AbstractLedgerTxn& ltx, bool chargeFee)
+TransactionFrame::commonValidPreSeqNum(AbstractLedgerTxn& ltx, bool chargeFee,
+                                       uint64_t lowerBoundCloseTimeOffset,
+                                       uint64_t upperBoundCloseTimeOffset)
 {
     ZoneScoped;
     // this function does validations that are independent of the account state
@@ -341,12 +361,12 @@ TransactionFrame::commonValidPreSeqNum(AbstractLedgerTxn& ltx, bool chargeFee)
         return false;
     }
 
-    if (isTooEarly(header))
+    if (isTooEarly(header, lowerBoundCloseTimeOffset))
     {
         getResult().result.code(txTOO_EARLY);
         return false;
     }
-    if (isTooLate(header))
+    if (isTooLate(header, upperBoundCloseTimeOffset))
     {
         getResult().result.code(txTOO_LATE);
         return false;
@@ -453,13 +473,23 @@ TransactionFrame::ValidationType
 TransactionFrame::commonValid(SignatureChecker& signatureChecker,
                               AbstractLedgerTxn& ltxOuter,
                               SequenceNumber current, bool applying,
-                              bool chargeFee)
+                              bool chargeFee,
+                              uint64_t lowerBoundCloseTimeOffset,
+                              uint64_t upperBoundCloseTimeOffset)
 {
     ZoneScoped;
     LedgerTxn ltx(ltxOuter);
     ValidationType res = ValidationType::kInvalid;
 
-    if (!commonValidPreSeqNum(ltx, chargeFee))
+    if (applying &&
+        (lowerBoundCloseTimeOffset != 0 || upperBoundCloseTimeOffset != 0))
+    {
+        throw std::logic_error(
+            "Applying transaction with non-current closeTime");
+    }
+
+    if (!commonValidPreSeqNum(ltx, chargeFee, lowerBoundCloseTimeOffset,
+                              upperBoundCloseTimeOffset))
     {
         return res;
     }
@@ -518,7 +548,7 @@ TransactionFrame::processFeeSeqNum(AbstractLedgerTxn& ltx, int64_t baseFee)
     mCachedAccount.reset();
 
     auto header = ltx.loadHeader();
-    resetResults(header.current(), baseFee);
+    resetResults(header.current(), baseFee, true);
 
     auto sourceAccount = loadSourceAccount(ltx, header);
     if (!sourceAccount)
@@ -587,37 +617,37 @@ TransactionFrame::removeAccountSigner(AbstractLedgerTxn& ltxOuter,
         return; // probably account was removed due to merge operation
     }
 
+    auto header = ltx.loadHeader();
     auto& signers = account.current().data.account().signers;
-    auto it = std::find_if(
-        std::begin(signers), std::end(signers),
-        [&signerKey](Signer const& signer) { return signer.key == signerKey; });
-
-    if (it != std::end(signers))
+    auto findRes = findSignerByKey(signers.begin(), signers.end(), signerKey);
+    if (findRes.second)
     {
-        auto header = ltx.loadHeader();
-        auto removed = stellar::addNumEntries(header, account, -1);
-        assert(removed == AddSubentryResult::SUCCESS);
-        signers.erase(it);
+        removeSignerWithPossibleSponsorship(ltx, header, findRes.first,
+                                            account);
         ltx.commit();
     }
 }
 
 bool
 TransactionFrame::checkValid(AbstractLedgerTxn& ltxOuter,
-                             SequenceNumber current, bool chargeFee)
+                             SequenceNumber current, bool chargeFee,
+                             uint64_t lowerBoundCloseTimeOffset,
+                             uint64_t upperBoundCloseTimeOffset)
 {
     ZoneScoped;
     mCachedAccount.reset();
 
     LedgerTxn ltx(ltxOuter);
     int64_t minBaseFee = chargeFee ? ltx.loadHeader().current().baseFee : 0;
-    resetResults(ltx.loadHeader().current(), minBaseFee);
+    resetResults(ltx.loadHeader().current(), minBaseFee, false);
 
     SignatureChecker signatureChecker{ltx.loadHeader().current().ledgerVersion,
                                       getContentsHash(),
                                       getSignatures(mEnvelope)};
-    bool res = commonValid(signatureChecker, ltx, current, false, chargeFee) ==
-               ValidationType::kMaybeValid;
+    bool res =
+        commonValid(signatureChecker, ltx, current, false, chargeFee,
+                    lowerBoundCloseTimeOffset,
+                    upperBoundCloseTimeOffset) == ValidationType::kMaybeValid;
     if (res)
     {
         for (auto& op : mOperations)
@@ -643,9 +673,12 @@ TransactionFrame::checkValid(AbstractLedgerTxn& ltxOuter,
 
 bool
 TransactionFrame::checkValid(AbstractLedgerTxn& ltxOuter,
-                             SequenceNumber current)
+                             SequenceNumber current,
+                             uint64_t lowerBoundCloseTimeOffset,
+                             uint64_t upperBoundCloseTimeOffset)
 {
-    return checkValid(ltxOuter, current, true);
+    return checkValid(ltxOuter, current, true, lowerBoundCloseTimeOffset,
+                      upperBoundCloseTimeOffset);
 }
 
 void
@@ -700,6 +733,8 @@ TransactionFrame::applyOperations(SignatureChecker& signatureChecker,
 
         // shield outer scope of any side effects with LedgerTxn
         LedgerTxn ltxTx(ltx);
+        uint32_t ledgerVersion = ltxTx.loadHeader().current().ledgerVersion;
+
         auto& opTimer =
             app.getMetrics().NewTimer({"ledger", "operation", "apply"});
         for (auto& op : mOperations)
@@ -718,13 +753,16 @@ TransactionFrame::applyOperations(SignatureChecker& signatureChecker,
                     op->getOperation(), op->getResult(), ltxOp.getDelta());
             }
 
-            newMeta.v2().operations.emplace_back(ltxOp.getChanges());
-            ltxOp.commit();
+            if (txRes || ledgerVersion < 14)
+            {
+                newMeta.v2().operations.emplace_back(ltxOp.getChanges());
+                ltxOp.commit();
+            }
         }
 
         if (success)
         {
-            if (ltxTx.loadHeader().current().ledgerVersion < 10)
+            if (ledgerVersion < 10)
             {
                 if (!signatureChecker.checkAllSignaturesUsed())
                 {
@@ -740,6 +778,23 @@ TransactionFrame::applyOperations(SignatureChecker& signatureChecker,
                 removeOneTimeSignerFromAllSourceAccounts(ltxAfter);
                 newMeta.v2().txChangesAfter = ltxAfter.getChanges();
                 ltxAfter.commit();
+            }
+            else if (ledgerVersion >= 14)
+            {
+                auto delta = ltxTx.getDelta();
+                for (auto const& kv : delta.entry)
+                {
+                    auto glk = kv.first;
+                    switch (glk.type())
+                    {
+                    case GeneralizedLedgerEntryType::SPONSORSHIP:
+                    case GeneralizedLedgerEntryType::SPONSORSHIP_COUNTER:
+                        getResult().result.code(txBAD_SPONSORSHIP);
+                        return false;
+                    default:
+                        break;
+                    }
+                }
             }
 
             ltxTx.commit();
@@ -804,7 +859,8 @@ TransactionFrame::apply(Application& app, AbstractLedgerTxn& ltx,
         // when applying, a failure during tx validation means that
         // we'll skip trying to apply operations but we'll still
         // process the sequence number if needed
-        auto cv = commonValid(signatureChecker, ltxTx, 0, true, chargeFee);
+        auto cv =
+            commonValid(signatureChecker, ltxTx, 0, true, chargeFee, 0, 0);
         if (cv >= ValidationType::kInvalidUpdateSeqNum)
         {
             processSeqNum(ltxTx);

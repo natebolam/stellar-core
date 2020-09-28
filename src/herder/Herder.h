@@ -44,7 +44,8 @@ class Herder
     static std::chrono::seconds const CONSENSUS_STUCK_TIMEOUT_SECONDS;
 
     // Maximum time slip between nodes.
-    static std::chrono::seconds const MAX_TIME_SLIP_SECONDS;
+    static std::chrono::seconds constexpr MAX_TIME_SLIP_SECONDS =
+        std::chrono::seconds{60};
 
     // How many seconds of inactivity before evicting a node.
     static std::chrono::seconds const NODE_EXPIRATION_SECONDS;
@@ -124,7 +125,9 @@ class Herder
     // sender in the pending or recent tx sets.
     virtual SequenceNumber getMaxSeqInPendingTxs(AccountID const&) = 0;
 
-    virtual void triggerNextLedger(uint32_t ledgerSeqToTrigger) = 0;
+    virtual void triggerNextLedger(uint32_t ledgerSeqToTrigger,
+                                   bool forceTrackingSCP) = 0;
+    virtual void setInSyncAndTriggerNextLedger() = 0;
 
     // lookup a nodeID in config and in SCP messages
     virtual bool resolveNodeID(std::string const& s, PublicKey& retKey) = 0;
@@ -133,6 +136,8 @@ class Herder
     virtual void setUpgrades(Upgrades::UpgradeParameters const& upgrades) = 0;
     // gets the upgrades that are scheduled by this node
     virtual std::string getUpgradesJson() = 0;
+
+    virtual void forceSCPStateIntoSyncWithLastClosedLedger() = 0;
 
     virtual ~Herder()
     {

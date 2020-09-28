@@ -85,7 +85,9 @@ TEST_CASE("HistoryManager compress", "[history]")
     HistoryManager& hm = catchupSimulation.getApp().getHistoryManager();
     std::string fname = hm.localFilename("compressme");
     {
-        std::ofstream out(fname, std::ofstream::binary);
+        std::ofstream out;
+        out.exceptions(std::ios::failbit | std::ios::badbit);
+        out.open(fname, std::ofstream::binary);
         out.write(s.data(), s.size());
     }
     std::string compressed = fname + ".gz";
@@ -227,8 +229,12 @@ TEST_CASE("Ledger chain verification", "[ledgerheaderverification]")
                                          make_optional<Hash>(lcl.hash));
         auto ledgerRangeEnd = LedgerNumHashPair(last.header.ledgerSeq,
                                                 make_optional<Hash>(last.hash));
-        auto w = wm.executeWork<VerifyLedgerChainWork>(tmpDir, ledgerRange,
-                                                       lclPair, ledgerRangeEnd);
+        std::promise<LedgerNumHashPair> ledgerRangeEndPromise;
+        std::shared_future<LedgerNumHashPair> ledgerRangeEndFuture =
+            ledgerRangeEndPromise.get_future().share();
+        ledgerRangeEndPromise.set_value(ledgerRangeEnd);
+        auto w = wm.executeWork<VerifyLedgerChainWork>(
+            tmpDir, ledgerRange, lclPair, ledgerRangeEndFuture);
         REQUIRE(expectedState == w->getState());
     };
 
@@ -1335,20 +1341,15 @@ TEST_CASE("Introduce and fix gap without starting catchup",
     catchupSimulation.externalizeLedger(herder, nextLedger + 1);
     REQUIRE(!lm.isSynced());
     REQUIRE(cm.hasBufferedLedger());
-    REQUIRE(cm.getBufferedLedger().getLedgerSeq() == nextLedger + 5);
+    REQUIRE(cm.getFirstBufferedLedger().getLedgerSeq() == nextLedger + 5);
 
     // Fill in the second gap. All buffered ledgers should be applied, but we
     // wait for another ledger to close to get in sync
     catchupSimulation.externalizeLedger(herder, nextLedger + 4);
-    REQUIRE(!lm.isSynced());
+    REQUIRE(lm.isSynced());
     REQUIRE(!cm.hasBufferedLedger());
     REQUIRE(!cm.isCatchupInitialized());
     REQUIRE(lm.getLastClosedLedgerNum() == nextLedger + 5);
-
-    // Externalize new ledger. Should be back in sync
-    catchupSimulation.externalizeLedger(herder, nextLedger + 6);
-    REQUIRE(lm.isSynced());
-    REQUIRE(lm.getLastClosedLedgerNum() == nextLedger + 6);
 }
 
 TEST_CASE("Receive trigger and checkpoint ledger out of order",

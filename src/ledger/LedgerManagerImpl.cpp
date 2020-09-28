@@ -135,7 +135,7 @@ LedgerManagerImpl::LedgerManagerImpl(Application& app)
 }
 
 void
-LedgerManagerImpl::bootstrap()
+LedgerManagerImpl::moveToSynced()
 {
     setState(LM_SYNCED_STATE);
 }
@@ -432,7 +432,17 @@ LedgerManagerImpl::valueExternalized(LedgerCloseData const& ledgerData)
 
     closeLedgerIf(ledgerData);
 
-    mApp.getCatchupManager().processLedger(ledgerData);
+    auto& cm = mApp.getCatchupManager();
+
+    cm.processLedger(ledgerData);
+
+    // Invariant: if catchup is running or waiting to run, buffered ledgers are
+    // never empty
+    if (!cm.hasBufferedLedger())
+    {
+        setState(LM_SYNCED_STATE);
+    }
+
     FrameMark;
 }
 
@@ -456,11 +466,6 @@ LedgerManagerImpl::closeLedgerIf(LedgerCloseData const& ledgerData)
         closeLedger(ledgerData);
         CLOG(INFO, "Ledger")
             << "Closed ledger: " << ledgerAbbrev(mLastClosedLedger);
-
-        if (!cm.hasBufferedLedger())
-        {
-            setState(LM_SYNCED_STATE);
-        }
     }
     else if (ledgerData.getLedgerSeq() <= mLastClosedLedger.header.ledgerSeq)
     {
@@ -756,6 +761,18 @@ LedgerManagerImpl::setLastClosedLedger(
 }
 
 void
+LedgerManagerImpl::manuallyAdvanceLedgerHeader(LedgerHeader const& header)
+{
+    if (!mApp.getConfig().MANUAL_CLOSE || !mApp.getConfig().RUN_STANDALONE)
+    {
+        throw std::logic_error(
+            "May only manually advance ledger header sequence number with "
+            "MANUAL_CLOSE and RUN_STANDALONE");
+    }
+    advanceLedgerPointers(header, false);
+}
+
+void
 LedgerManagerImpl::setupLedgerCloseMetaStream()
 {
     if (mMetaStream)
@@ -789,12 +806,17 @@ LedgerManagerImpl::setupLedgerCloseMetaStream()
 }
 
 void
-LedgerManagerImpl::advanceLedgerPointers(LedgerHeader const& header)
+LedgerManagerImpl::advanceLedgerPointers(LedgerHeader const& header,
+                                         bool debugLog)
 {
     auto ledgerHash = sha256(xdr::xdr_to_opaque(header));
-    CLOG(DEBUG, "Ledger") << "Advancing LCL: "
-                          << ledgerAbbrev(mLastClosedLedger) << " -> "
-                          << ledgerAbbrev(header, ledgerHash);
+
+    if (debugLog)
+    {
+        CLOG(DEBUG, "Ledger")
+            << "Advancing LCL: " << ledgerAbbrev(mLastClosedLedger) << " -> "
+            << ledgerAbbrev(header, ledgerHash);
+    }
 
     mLastClosedLedger.hash = ledgerHash;
     mLastClosedLedger.header = header;
@@ -1000,7 +1022,8 @@ LedgerManagerImpl::storeCurrentLedger(LedgerHeader const& header)
     }
     // Store the current HAS in the database; this is really just to checkpoint
     // the bucketlist so we can survive a restart and re-attach to the buckets.
-    HistoryArchiveState has(header.ledgerSeq, bl);
+    HistoryArchiveState has(header.ledgerSeq, bl,
+                            mApp.getConfig().NETWORK_PASSPHRASE);
 
     mApp.getPersistentState().setState(PersistentState::kHistoryArchiveState,
                                        has.toString());

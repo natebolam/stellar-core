@@ -100,6 +100,7 @@ TEST_CASE("subprocess redirect to file", "[process]")
 
     std::ifstream in(filename);
     CHECK(in);
+    in.exceptions(std::ios::badbit);
     std::string s;
     in >> s;
     CLOG(DEBUG, "Process") << "opened redirect file, read: " << s;
@@ -128,7 +129,9 @@ TEST_CASE("subprocess storm", "[process]")
         std::string dst(fmt::format("{:s}/dst/{:d}", dir, i));
         CLOG(INFO, "Process") << "making file " << src;
         {
-            std::ofstream out(src);
+            std::ofstream out;
+            out.exceptions(std::ios::failbit | std::ios::badbit);
+            out.open(src);
             out << i;
         }
         auto evt = app.getProcessManager()

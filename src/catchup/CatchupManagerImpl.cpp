@@ -69,9 +69,9 @@ CatchupManagerImpl::processLedger(LedgerCloseData const& ledgerData)
     uint32_t lastReceivedLedgerSeq = ledgerData.getLedgerSeq();
 
     // 1. CatchupWork is not running yet
-    // 2. The ledger just received is equal to lcl
-    // then it's possible we're back in sync and we can attempt to apply
-    // mSyncingLedgers
+    // 2. CatchupManager received  ledger that was immediately applied by
+    // LedgerManager: check if we have any sequential ledgers.
+    // If so, attempt to apply mSyncingLedgers and possibly get back in sync
     if (!mCatchupWork && lastReceivedLedgerSeq ==
                              mApp.getLedgerManager().getLastClosedLedgerNum())
     {
@@ -129,7 +129,8 @@ CatchupManagerImpl::processLedger(LedgerCloseData const& ledgerData)
 
     std::string message;
     uint32_t lastLedgerInBuffer = mSyncingLedgers.crbegin()->first;
-    if (it != mSyncingLedgers.end() && it->first < lastLedgerInBuffer)
+    if (mApp.getConfig().MODE_DOES_CATCHUP && it != mSyncingLedgers.end() &&
+        it->first < lastLedgerInBuffer)
     {
         message = fmt::format("Starting catchup after ensuring checkpoint "
                               "ledger {} was closed on network",
@@ -259,15 +260,27 @@ CatchupManagerImpl::hasBufferedLedger() const
 }
 
 LedgerCloseData const&
-CatchupManagerImpl::getBufferedLedger() const
+CatchupManagerImpl::getFirstBufferedLedger() const
 {
     if (!hasBufferedLedger())
     {
         throw std::runtime_error(
-            "getBufferedLedger called when mSyncingLedgers is empty!");
+            "getFirstBufferedLedger called when mSyncingLedgers is empty!");
     }
 
     return mSyncingLedgers.cbegin()->second;
+}
+
+LedgerCloseData const&
+CatchupManagerImpl::getLastBufferedLedger() const
+{
+    if (!hasBufferedLedger())
+    {
+        throw std::runtime_error(
+            "getLastBufferedLedger called when mSyncingLedgers is empty!");
+    }
+
+    return mSyncingLedgers.crbegin()->second;
 }
 
 void
@@ -356,7 +369,7 @@ CatchupManagerImpl::tryApplySyncingLedgers()
     auto const& ledgerHeader =
         mApp.getLedgerManager().getLastClosedLedgerHeader();
 
-    // We can apply mutiple ledgers here, which might be slow. This is a rare
+    // We can apply multiple ledgers here, which might be slow. This is a rare
     // occurrence so we should be fine.
     auto it = mSyncingLedgers.cbegin();
     while (it != mSyncingLedgers.cend())

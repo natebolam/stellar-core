@@ -78,6 +78,11 @@ The `manualclose` command allows to close a ledger, this is used when the instan
 configured with `MANUAL_CLOSE=true`.
 With this you can test various scenario where ledger boundaries could be important.
 
+If `RUN_STANDALONE=true` along with `MANUAL_CLOSE=true`, then
+the `manualclose` command may also control some of the parameters of the
+ledger that it causes to close.  (The `closeTime` parameter may be no later
+than the first second of the year 2200, GMT.)
+
 On private networks, you can use the `generateload` command to create accounts and generate
 synthetic traffic.
 
@@ -102,8 +107,47 @@ to disable that if that's not what you want to do!
 
 `catchup` may exit with a publish backlog (see below).
 
+##### Trusted ledger hashes
+
+By default the offline `catchup` command will trust and replay whatever it downloads from an
+archive. If the archive contents are malformed or tampered with, or corrupted in transit over an
+insecure connection, this will only be discovered after catchup is complete, when the node tries to
+join a network and acquire consensus. Until then, the node risks being exposed to (and replaying)
+malformed input from the archive.
+
+In order to mitigate this risk, stellar-core can emit a "reference file" full of trusted hashes for
+the ledgers of checkpoints, anchored in an SCP consensus ledger value observed on the network it is
+configured to trust.
+
+This reference file can then be reused by running `catchup` with the `--trusted-checkpoint-hashes`
+argument, passing the reference filename. Catchup will then check the target checkpoint against
+the reference file _before_ replaying them, and fail if there is a hash mismatch.
+
+To construct such a reference file, run the `verify-checkpoints` command, passing a config file as
+usual (to specify the trusted network and quorum slice) and an `--output-filename` argument
+specifying the reference file to save the trusted hashes in.
+
+The emitted content of the refernce file will be a single JSON array of pairs of checkpoint ledger
+numbers and strings holding hashes of ledger headers. For example, it might read:
+
+```
+[
+[30393791, "a691c7cb9ea89f2936ab4a7f717856b0ecd7fd4f9e13662c03b77db931d53583"],
+[30393727, "b911ef040b3babd021c40548d9f4c47f07d4f94481d65d51356450ac4357e62a"],
+[30393663, "6785f25a9357d73001d33ad1883867f68e88d83f5dddf699324ecc0fa60dfa10"],
+[30393599, "87cbd968a01c92658224e518d7cc7e9ab421c21a969cc726a0d2cff3c4300e0a"],
+...
+]
+```
+
+The file will contain one line per checkpoint for the entire history of the archive. This may be
+quite large: hundreds of thousands of lines. Furthermore, generating the reference file will take
+some time, as the entire sequence of ledger _headers_ in the archive (though none of the
+transactions or ledger states) must be downloaded and verified sequentially. It may therefore be
+worthwhile to save and reuse such a trusted reference file multiple times before regenerating it.
+
 ##### Experimental fast "meta data generation"
-`catchup` has a command line flag `--replay-in-memory` that when combined with the
+`catchup` has a command line flag `--in-memory` that when combined with the
 `METADATA_OUTPUT_STREAM` allows a stellar-core instance to stream meta data instead
 of using a database as intermediate store.
 
@@ -112,6 +156,17 @@ of history.
 
 If you don't specify any value for stream the command will just replay transactions
 in memory and throw away all meta. This can be useful for performance testing the transaction processing subsystem.
+
+The `--in-memory` flag is also supported by the `run` command, which can be used to
+run a lightweight, stateless validator or watcher node, and this can be combined with
+`METADATA_OUTPUT_STREAM` to stream network activity to another process.
+
+By default, such a stateless node in `run` mode will catch up to the network starting from the
+network's most recent checkpoint, but this behaviour can be further modified using two flags
+(that must be used together) called `--start-at-ledger <N>` and `--start-at-hash <HEXHASH>`. These
+cause the node to start with a fast in-memory catchup to ledger `N` with hash `HEXHASH`, and then
+replay ledgers forward to the current state of the network.
+
 
 #### Publish backlog
 There is a command `publish` that allows to flush the publish backlog without starting

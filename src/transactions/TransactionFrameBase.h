@@ -28,15 +28,16 @@ class TransactionFrameBase
     virtual bool apply(Application& app, AbstractLedgerTxn& ltx,
                        TransactionMeta& meta) = 0;
 
-    virtual bool checkValid(AbstractLedgerTxn& ltxOuter,
-                            SequenceNumber current) = 0;
+    virtual bool checkValid(AbstractLedgerTxn& ltxOuter, SequenceNumber current,
+                            uint64_t lowerBoundCloseTimeOffset,
+                            uint64_t upperBoundCloseTimeOffset) = 0;
 
     virtual TransactionEnvelope const& getEnvelope() const = 0;
 
     virtual int64_t getFeeBid() const = 0;
     virtual int64_t getMinFee(LedgerHeader const& header) const = 0;
-    virtual int64_t getFee(LedgerHeader const& header,
-                           int64_t baseFee) const = 0;
+    virtual int64_t getFee(LedgerHeader const& header, int64_t baseFee,
+                           bool applying) const = 0;
 
     virtual Hash const& getContentsHash() const = 0;
     virtual Hash const& getFullHash() const = 0;

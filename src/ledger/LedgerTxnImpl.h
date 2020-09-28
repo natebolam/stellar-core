@@ -37,11 +37,11 @@ class EntryIterator::AbstractImpl
 
     virtual bool atEnd() const = 0;
 
-    virtual LedgerEntry const& entry() const = 0;
+    virtual GeneralizedLedgerEntry const& entry() const = 0;
 
     virtual bool entryExists() const = 0;
 
-    virtual LedgerKey const& key() const = 0;
+    virtual GeneralizedLedgerKey const& key() const = 0;
 
     virtual std::unique_ptr<AbstractImpl> clone() const = 0;
 };
@@ -80,6 +80,8 @@ class BulkLedgerEntryChangeAccumulator
     std::vector<EntryIterator> mAccountsToDelete;
     std::vector<EntryIterator> mAccountDataToUpsert;
     std::vector<EntryIterator> mAccountDataToDelete;
+    std::vector<EntryIterator> mClaimableBalanceToUpsert;
+    std::vector<EntryIterator> mClaimableBalanceToDelete;
     std::vector<EntryIterator> mOffersToUpsert;
     std::vector<EntryIterator> mOffersToDelete;
     std::vector<EntryIterator> mTrustLinesToUpsert;
@@ -134,6 +136,18 @@ class BulkLedgerEntryChangeAccumulator
         return mAccountDataToDelete;
     }
 
+    std::vector<EntryIterator>&
+    getClaimableBalanceToUpsert()
+    {
+        return mClaimableBalanceToUpsert;
+    }
+
+    std::vector<EntryIterator>&
+    getClaimableBalanceToDelete()
+    {
+        return mClaimableBalanceToDelete;
+    }
+
     void accumulate(EntryIterator const& iter);
 };
 
@@ -152,7 +166,8 @@ class LedgerTxn::Impl
     class EntryIteratorImpl;
     class WorstBestOfferIteratorImpl;
 
-    typedef std::unordered_map<LedgerKey, std::shared_ptr<LedgerEntry>>
+    typedef std::unordered_map<GeneralizedLedgerKey,
+                               std::shared_ptr<GeneralizedLedgerEntry>>
         EntryMap;
 
     AbstractLedgerTxnParent& mParent;
@@ -160,7 +175,8 @@ class LedgerTxn::Impl
     std::unique_ptr<LedgerHeader> mHeader;
     std::shared_ptr<LedgerTxnHeader::Impl> mActiveHeader;
     EntryMap mEntry;
-    std::unordered_map<LedgerKey, std::shared_ptr<EntryImplBase>> mActive;
+    std::unordered_map<GeneralizedLedgerKey, std::shared_ptr<EntryImplBase>>
+        mActive;
     bool const mShouldUpdateLastModified;
     bool mIsSealed;
     LedgerTxnConsistency mConsistency;
@@ -379,11 +395,15 @@ class LedgerTxn::Impl
 
     // updateEntryIfRecorded and updateEntry have the strong exception safety
     // guarantee
-    void updateEntryIfRecorded(LedgerKey const& key, bool effectiveActive);
-    void updateEntry(LedgerKey const& key, std::shared_ptr<LedgerEntry> lePtr);
-    void updateEntry(LedgerKey const& key, std::shared_ptr<LedgerEntry> lePtr,
+    void updateEntryIfRecorded(GeneralizedLedgerKey const& key,
+                               bool effectiveActive);
+    void updateEntry(GeneralizedLedgerKey const& key,
+                     std::shared_ptr<GeneralizedLedgerEntry> lePtr);
+    void updateEntry(GeneralizedLedgerKey const& key,
+                     std::shared_ptr<GeneralizedLedgerEntry> lePtr,
                      bool effectiveActive);
-    void updateEntry(LedgerKey const& key, std::shared_ptr<LedgerEntry> lePtr,
+    void updateEntry(GeneralizedLedgerKey const& key,
+                     std::shared_ptr<GeneralizedLedgerEntry> lePtr,
                      bool effectiveActive, bool eraseIfNull);
 
     // updateWorstBestOffer has the strong exception safety guarantee
@@ -409,10 +429,10 @@ class LedgerTxn::Impl
     // - the prepared statement cache may be, but is not guaranteed to be,
     //   modified
     // - the entry cache may be, but is not guaranteed to be, cleared.
-    LedgerTxnEntry create(LedgerTxn& self, LedgerEntry const& entry);
+    LedgerTxnEntry create(LedgerTxn& self, GeneralizedLedgerEntry const& entry);
 
     // deactivate has the strong exception safety guarantee
-    void deactivate(LedgerKey const& key);
+    void deactivate(GeneralizedLedgerKey const& key);
 
     // deactivateHeader has the strong exception safety guarantee
     void deactivateHeader();
@@ -422,7 +442,7 @@ class LedgerTxn::Impl
     // - the prepared statement cache may be, but is not guaranteed to be,
     //   modified
     // - the entry cache may be, but is not guaranteed to be, cleared.
-    void erase(LedgerKey const& key);
+    void erase(GeneralizedLedgerKey const& key);
 
     // getAllOffers has the basic exception safety guarantee. If it throws an
     // exception, then
@@ -495,24 +515,24 @@ class LedgerTxn::Impl
     // - the prepared statement cache may be, but is not guaranteed to be,
     //   modified
     // - the entry cache may be, but is not guaranteed to be, cleared.
-    std::shared_ptr<LedgerEntry const>
-    getNewestVersion(LedgerKey const& key) const;
+    std::shared_ptr<GeneralizedLedgerEntry const>
+    getNewestVersion(GeneralizedLedgerKey const& key) const;
 
     // load has the basic exception safety guarantee. If it throws an exception,
     // then
     // - the prepared statement cache may be, but is not guaranteed to be,
     //   modified
     // - the entry cache may be, but is not guaranteed to be, cleared.
-    LedgerTxnEntry load(LedgerTxn& self, LedgerKey const& key);
+    LedgerTxnEntry load(LedgerTxn& self, GeneralizedLedgerKey const& key);
 
     // createOrUpdateWithoutLoading has the strong exception safety guarantee.
     // If it throws an exception, then the current LedgerTxn::Impl is unchanged.
     void createOrUpdateWithoutLoading(LedgerTxn& self,
-                                      LedgerEntry const& entry);
+                                      GeneralizedLedgerEntry const& entry);
 
     // eraseWithoutLoading has the strong exception safety guarantee. If it
     // throws an exception, then the current LedgerTxn::Impl is unchanged.
-    void eraseWithoutLoading(LedgerKey const& key);
+    void eraseWithoutLoading(GeneralizedLedgerKey const& key);
 
     // loadAllOffers has the basic exception safety guarantee. If it throws an
     // exception, then
@@ -551,7 +571,7 @@ class LedgerTxn::Impl
     //   modified
     // - the entry cache may be, but is not guaranteed to be, cleared.
     ConstLedgerTxnEntry loadWithoutRecord(LedgerTxn& self,
-                                          LedgerKey const& key);
+                                          GeneralizedLedgerKey const& key);
 
     // rollback does not throw
     void rollback();
@@ -584,11 +604,11 @@ class LedgerTxn::Impl::EntryIteratorImpl : public EntryIterator::AbstractImpl
 
     bool atEnd() const override;
 
-    LedgerEntry const& entry() const override;
+    GeneralizedLedgerEntry const& entry() const override;
 
     bool entryExists() const override;
 
-    LedgerKey const& key() const override;
+    GeneralizedLedgerKey const& key() const override;
 
     std::unique_ptr<EntryIterator::AbstractImpl> clone() const override;
 };
@@ -694,6 +714,8 @@ class LedgerTxnRoot::Impl
                                                       int64_t minBalance) const;
     std::shared_ptr<LedgerEntry const>
     loadTrustLine(LedgerKey const& key) const;
+    std::shared_ptr<LedgerEntry const>
+    loadClaimableBalance(LedgerKey const& key) const;
 
     void bulkApply(BulkLedgerEntryChangeAccumulator& bleca,
                    size_t bufferThreshold, LedgerTxnConsistency cons);
@@ -709,6 +731,9 @@ class LedgerTxnRoot::Impl
     void bulkUpsertAccountData(std::vector<EntryIterator> const& entries);
     void bulkDeleteAccountData(std::vector<EntryIterator> const& entries,
                                LedgerTxnConsistency cons);
+    void bulkUpsertClaimableBalance(std::vector<EntryIterator> const& entries);
+    void bulkDeleteClaimableBalance(std::vector<EntryIterator> const& entries,
+                                    LedgerTxnConsistency cons);
 
     static std::string tableFromLedgerEntryType(LedgerEntryType let);
 
@@ -725,7 +750,7 @@ class LedgerTxnRoot::Impl
     //  - It is therefore always kept in exact correspondence with the
     //    database for the keyset that it has entries for. It's a precise
     //    image of a subset of the database.
-    std::shared_ptr<LedgerEntry const>
+    std::shared_ptr<GeneralizedLedgerEntry const>
     getFromEntryCache(LedgerKey const& key) const;
     void putInEntryCache(LedgerKey const& key,
                          std::shared_ptr<LedgerEntry const> const& entry,
@@ -742,6 +767,15 @@ class LedgerTxnRoot::Impl
     bulkLoadOffers(std::unordered_set<LedgerKey> const& keys) const;
     std::unordered_map<LedgerKey, std::shared_ptr<LedgerEntry const>>
     bulkLoadData(std::unordered_set<LedgerKey> const& keys) const;
+    std::unordered_map<LedgerKey, std::shared_ptr<LedgerEntry const>>
+    bulkLoadClaimableBalance(std::unordered_set<LedgerKey> const& keys) const;
+
+    std::deque<LedgerEntry>::const_iterator
+    loadNextBestOffersIntoCache(BestOffersCacheEntryPtr cached,
+                                Asset const& buying, Asset const& selling);
+    void populateEntryCacheFromBestOffers(
+        std::deque<LedgerEntry>::const_iterator iter,
+        std::deque<LedgerEntry>::const_iterator const& end);
 
   public:
     // Constructor has the strong exception safety guarantee
@@ -770,6 +804,7 @@ class LedgerTxnRoot::Impl
     void dropData();
     void dropOffers();
     void dropTrustLines();
+    void dropClaimableBalances();
 
 #ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
     void resetForFuzzer();
@@ -789,11 +824,9 @@ class LedgerTxnRoot::Impl
     //   cleared
     // - the best offers cache may be, but is not guaranteed to be, modified or
     //   even cleared
-    std::shared_ptr<LedgerEntry const> getBestOffer(Asset const& buying,
-                                                    Asset const& selling);
     std::shared_ptr<LedgerEntry const>
     getBestOffer(Asset const& buying, Asset const& selling,
-                 OfferDescriptor const& worseThan);
+                 OfferDescriptor const* worseThan);
 
     // getOffersByAccountAndAsset has the basic exception safety guarantee. If
     // it throws an exception, then
@@ -817,8 +850,8 @@ class LedgerTxnRoot::Impl
     // - the prepared statement cache may be, but is not guaranteed to be,
     //   modified
     // - the entry cache may be, but is not guaranteed to be, cleared.
-    std::shared_ptr<LedgerEntry const>
-    getNewestVersion(LedgerKey const& key) const;
+    std::shared_ptr<GeneralizedLedgerEntry const>
+    getNewestVersion(GeneralizedLedgerKey const& key) const;
 
     // rollbackChild has the strong exception safety guarantee.
     void rollbackChild();

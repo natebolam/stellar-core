@@ -80,14 +80,15 @@ class LedgerManagerImpl : public LedgerManager
                                                    uint32_t ledgerSeq,
                                                    uint32_t ledgerVers);
 
-    void advanceLedgerPointers(LedgerHeader const& header);
+    void advanceLedgerPointers(LedgerHeader const& header,
+                               bool debugLog = true);
     void logTxApplyMetrics(AbstractLedgerTxn& ltx, size_t numTxs,
                            size_t numOps);
 
   public:
     LedgerManagerImpl(Application& app);
 
-    void bootstrap() override;
+    void moveToSynced() override;
     State getState() const override;
     std::string getStateHuman() const override;
 
@@ -123,6 +124,8 @@ class LedgerManagerImpl : public LedgerManager
 
     void
     setLastClosedLedger(LedgerHeaderHistoryEntry const& lastClosed) override;
+
+    void manuallyAdvanceLedgerHeader(LedgerHeader const& header) override;
 
     void setupLedgerCloseMetaStream();
 };

@@ -2,6 +2,7 @@
 // under the Apache License, Version 2.0. See the COPYING file at the root
 // of this distribution or at http://www.apache.org/licenses/LICENSE-2.0
 
+#include <limits>
 #define STELLAR_CORE_REAL_TIMER_FOR_CERTAIN_NOT_JUST_VIRTUAL_TIME
 #include "ApplicationImpl.h"
 
@@ -133,7 +134,7 @@ ApplicationImpl::ApplicationImpl(VirtualClock& clock, Config const& cfg)
 void
 ApplicationImpl::initialize(bool createNewDB)
 {
-    mDatabase = std::make_unique<Database>(*this);
+    mDatabase = createDatabase();
     mPersistentState = std::make_unique<PersistentState>(*this);
     mOverlayManager = createOverlayManager();
     mLedgerManager = createLedgerManager();
@@ -348,10 +349,21 @@ ApplicationImpl::getNetworkID() const
 ApplicationImpl::~ApplicationImpl()
 {
     LOG(INFO) << "Application destructing";
-    shutdownWorkScheduler();
-    if (mProcessManager)
+    try
     {
-        mProcessManager->shutdown();
+        shutdownWorkScheduler();
+        if (mProcessManager)
+        {
+            mProcessManager->shutdown();
+        }
+        if (mBucketManager)
+        {
+            mBucketManager->shutdown();
+        }
+    }
+    catch (std::exception const& e)
+    {
+        LOG(ERROR) << "While shutting down " << e.what();
     }
     reportCfgMetrics();
     shutdownMainIOContext();
@@ -381,32 +393,29 @@ ApplicationImpl::start()
         mHerder->setUpgrades(mConfig);
     }
 
-    if (mPersistentState->getState(PersistentState::kForceSCPOnNextLaunch) ==
-        "true")
+    if (mConfig.FORCE_SCP && !mConfig.NODE_IS_VALIDATOR)
     {
-        if (!mConfig.NODE_IS_VALIDATOR)
-        {
-            LOG(ERROR) << "Starting stellar-core in FORCE_SCP mode requires "
-                          "NODE_IS_VALIDATOR to be set";
-            throw std::invalid_argument("NODE_IS_VALIDATOR not set");
-        }
-        mConfig.FORCE_SCP = true;
+        throw std::invalid_argument(
+            "FORCE_SCP is set but NODE_IS_VALIDATOR not set");
     }
 
-    if (mConfig.METADATA_OUTPUT_STREAM != "" && mConfig.NODE_IS_VALIDATOR)
+    auto const isNetworkedValidator =
+        mConfig.NODE_IS_VALIDATOR && !mConfig.RUN_STANDALONE;
+
+    if (mConfig.METADATA_OUTPUT_STREAM != "" && isNetworkedValidator)
     {
-        LOG(ERROR) << "Starting stellar-core with METADATA_OUTPUT_STREAM "
-                      "requires NODE_IS_VALIDATOR to be unset";
-        throw std::invalid_argument("NODE_IS_VALIDATOR is set");
+        throw std::invalid_argument(
+            "METADATA_OUTPUT_STREAM is set, NODE_IS_VALIDATOR is set, and "
+            "RUN_STANDALONE is not set");
     }
 
-    if (mConfig.NODE_IS_VALIDATOR)
+    if (isNetworkedValidator)
     {
         if (mConfig.MODE_USES_IN_MEMORY_LEDGER)
         {
-            LOG(ERROR) << "Starting stellar-core with in-memory ledger mode "
-                          "requires NODE_IS_VALIDATOR to be unset";
-            throw std::invalid_argument("NODE_IS_VALIDATOR is set");
+            throw std::invalid_argument(
+                "MODE_USES_IN_MEMORY_LEDGER is set, NODE_IS_VALIDATOR is set, "
+                "and RUN_STANDALONE is not set");
         }
     }
 
@@ -414,10 +423,8 @@ ApplicationImpl::start()
     {
         if (!mConfig.MODE_STORES_HISTORY)
         {
-            LOG(ERROR) << "Starting stellar-core in a mode that does not store "
-                          "history data requires all history archives to be "
-                          "non-writable";
-            throw std::invalid_argument("some history archives are writable");
+            throw std::invalid_argument("MODE_STORES_HISTORY is not set, but "
+                                        "some history archives are writable");
         }
     }
 
@@ -443,7 +450,10 @@ ApplicationImpl::start()
             ExternalQueue ps(*this);
             ps.setInitialCursors(mConfig.KNOWN_CURSORS);
             mMaintainer->start();
-            mOverlayManager->start();
+            if (mConfig.MODE_AUTO_STARTS_OVERLAY)
+            {
+                mOverlayManager->start();
+            }
             auto npub = mHistoryManager->publishQueuedHistory();
             if (npub != 0)
             {
@@ -452,18 +462,8 @@ ApplicationImpl::start()
             }
             if (mConfig.FORCE_SCP)
             {
-                std::string flagClearedMsg = "";
-                if (mPersistentState->getState(
-                        PersistentState::kForceSCPOnNextLaunch) == "true")
-                {
-                    flagClearedMsg = " (`force scp` flag cleared in the db)";
-                    mPersistentState->setState(
-                        PersistentState::kForceSCPOnNextLaunch, "false");
-                }
-
                 LOG(INFO) << "* ";
-                LOG(INFO) << "* Force-starting scp from the current db state."
-                          << flagClearedMsg;
+                LOG(INFO) << "* Force-starting scp from the current db state.";
                 LOG(INFO) << "* ";
 
                 mHerder->bootstrap();
@@ -553,16 +553,197 @@ ApplicationImpl::joinAllThreads()
     LOG(DEBUG) << "Joined all " << mWorkerThreads.size() << " threads";
 }
 
-bool
-ApplicationImpl::manualClose()
+std::string
+ApplicationImpl::manualClose(optional<uint32_t> const& manualLedgerSeq,
+                             optional<TimePoint> const& manualCloseTime)
 {
+    assertThreadIsMain();
+
+    // Manual close only makes sense for validating nodes
+    if (!mConfig.NODE_IS_VALIDATOR)
+    {
+        throw std::invalid_argument(
+            "Issuing a manual ledger close requires NODE_IS_VALIDATOR to be "
+            "set to true.");
+    }
+
     if (mConfig.MANUAL_CLOSE)
     {
-        mHerder->triggerNextLedger(mLedgerManager->getLastClosedLedgerNum() +
-                                   1);
-        return true;
+        auto const targetLedgerSeq =
+            targetManualCloseLedgerSeqNum(manualLedgerSeq);
+
+        if (mConfig.RUN_STANDALONE)
+        {
+            setManualCloseVirtualTime(manualCloseTime);
+            advanceToLedgerBeforeManualCloseTarget(targetLedgerSeq);
+        }
+        else
+        {
+            // These may only be specified if RUN_STANDALONE is configured.
+            releaseAssert(!manualCloseTime);
+            releaseAssert(!manualLedgerSeq);
+        }
+
+        mHerder->triggerNextLedger(targetLedgerSeq, true);
+
+        if (mConfig.RUN_STANDALONE)
+        {
+            auto const newLedgerSeq =
+                getLedgerManager().getLastClosedLedgerNum();
+            if (newLedgerSeq != targetLedgerSeq)
+            {
+                throw std::runtime_error(fmt::format(
+                    FMT_STRING(
+                        "Standalone manual close failed to produce expected "
+                        "sequence number increment (expected {}; got {})"),
+                    targetLedgerSeq, newLedgerSeq));
+            }
+
+            return fmt::format(
+                FMT_STRING("Manually closed ledger with sequence "
+                           "number {} and closeTime {}"),
+                targetLedgerSeq,
+                getLedgerManager()
+                    .getLastClosedLedgerHeader()
+                    .header.scpValue.closeTime);
+        }
+
+        return fmt::format(
+            FMT_STRING("Manually triggered a ledger close with sequence "
+                       "number {}"),
+            targetLedgerSeq);
     }
-    return false;
+    else if (!mConfig.FORCE_SCP)
+    {
+        mHerder->setInSyncAndTriggerNextLedger();
+        return "Triggered a new consensus round";
+    }
+
+    throw std::invalid_argument(
+        "Set MANUAL_CLOSE=true in the stellar-core.cfg if you want to "
+        "close every ledger manually. Otherwise, run stellar-core "
+        "with --wait-for-consensus flag to close ledger once and "
+        "trigger consensus. Ensure NODE_IS_VALIDATOR is set to true.");
+}
+
+uint32_t
+ApplicationImpl::targetManualCloseLedgerSeqNum(
+    optional<uint32_t> const& explicitlyProvidedSeqNum)
+{
+    auto const startLedgerSeq = getLedgerManager().getLastClosedLedgerNum();
+
+    // The "scphistory" stores ledger sequence numbers as INTs.
+    if (startLedgerSeq >=
+        static_cast<uint32>(std::numeric_limits<int32_t>::max()))
+    {
+        throw std::invalid_argument(fmt::format(
+            FMT_STRING(
+                "Manually closed ledger sequence number ({}) already at max"),
+            startLedgerSeq));
+    }
+
+    auto const nextLedgerSeq = startLedgerSeq + 1;
+
+    if (explicitlyProvidedSeqNum)
+    {
+        if (*explicitlyProvidedSeqNum >
+            static_cast<uint32>(std::numeric_limits<int32_t>::max()))
+        {
+            // The "scphistory" stores ledger sequence numbers as INTs.
+            throw std::invalid_argument(fmt::format(
+                FMT_STRING("Manual close ledger sequence number {} beyond max"),
+                *explicitlyProvidedSeqNum,
+                std::numeric_limits<int32_t>::max()));
+        }
+
+        if (*explicitlyProvidedSeqNum <= startLedgerSeq)
+        {
+            throw std::invalid_argument(fmt::format(
+                FMT_STRING("Invalid manual close ledger sequence number {} "
+                           "(must exceed current sequence number {})"),
+                *explicitlyProvidedSeqNum, startLedgerSeq));
+        }
+    }
+
+    return explicitlyProvidedSeqNum ? *explicitlyProvidedSeqNum : nextLedgerSeq;
+}
+
+void
+ApplicationImpl::setManualCloseVirtualTime(
+    optional<TimePoint> const& explicitlyProvidedCloseTime)
+{
+    TimePoint constexpr firstSecondOfYear2200GMT = 7'258'118'400ULL;
+
+    static_assert(
+        firstSecondOfYear2200GMT <=
+            std::min(static_cast<TimePoint>(
+                         std::chrono::duration_cast<std::chrono::seconds>(
+                             VirtualClock::system_time_point::duration::max())
+                             .count()),
+                     static_cast<TimePoint>(
+                         std::numeric_limits<std::time_t>::max())) -
+                Herder::MAX_TIME_SLIP_SECONDS.count(),
+        "Documented limit (first second of year 2200 GMT) of manual "
+        "close time would allow runtime overflow in Herder");
+
+    TimePoint const lastCloseTime = getLedgerManager()
+                                        .getLastClosedLedgerHeader()
+                                        .header.scpValue.closeTime;
+    uint64_t const now = VirtualClock::to_time_t(getClock().system_now());
+    uint64_t nextCloseTime = std::max(now, lastCloseTime + 1);
+
+    TimePoint const maxCloseTime = firstSecondOfYear2200GMT;
+
+    if (explicitlyProvidedCloseTime)
+    {
+        if (*explicitlyProvidedCloseTime < nextCloseTime)
+        {
+            throw std::invalid_argument(
+                fmt::format(FMT_STRING("Manual close time {} too early (last "
+                                       "close time={}, now={})"),
+                            *explicitlyProvidedCloseTime, lastCloseTime, now));
+        }
+        nextCloseTime = *explicitlyProvidedCloseTime;
+    }
+    else
+    {
+        // Without an explicitly-provided closeTime, imitate what
+        // HerderImpl::triggerNextLedger() would do in REAL_TIME
+        // (unless that would move the virtual clock backwards).
+        uint64_t const defaultNextCloseTime =
+            VirtualClock::to_time_t(std::chrono::system_clock::now());
+        nextCloseTime = std::max(nextCloseTime, defaultNextCloseTime);
+    }
+
+    if (nextCloseTime > maxCloseTime)
+    {
+        throw std::invalid_argument(
+            fmt::format(FMT_STRING("New close time {} would exceed max ({})"),
+                        nextCloseTime, maxCloseTime));
+    }
+
+    getClock().setCurrentVirtualTime(VirtualClock::from_time_t(nextCloseTime));
+}
+
+void
+ApplicationImpl::advanceToLedgerBeforeManualCloseTarget(
+    uint32_t const& targetLedgerSeq)
+{
+    if (targetLedgerSeq != getLedgerManager().getLastClosedLedgerNum() + 1)
+    {
+        LOG(INFO) << "manually advancing to ledger with sequence number "
+                  << targetLedgerSeq - 1 << " to prepare to close number "
+                  << targetLedgerSeq << " (last ledger to close was number "
+                  << getLedgerManager().getLastClosedLedgerNum() << ")";
+
+        LedgerTxn ltx(getLedgerTxnRoot());
+        ltx.loadHeader().current().ledgerSeq = targetLedgerSeq - 1;
+        getLedgerManager().manuallyAdvanceLedgerHeader(
+            ltx.loadHeader().current());
+        ltx.commit();
+
+        getHerder().forceSCPStateIntoSyncWithLastClosedLedger();
+    }
 }
 
 #ifdef BUILD_TESTS
@@ -893,6 +1074,12 @@ std::unique_ptr<LedgerManager>
 ApplicationImpl::createLedgerManager()
 {
     return LedgerManager::create(*this);
+}
+
+std::unique_ptr<Database>
+ApplicationImpl::createDatabase()
+{
+    return std::make_unique<Database>(*this);
 }
 
 AbstractLedgerTxnParent&

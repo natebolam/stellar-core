@@ -158,7 +158,7 @@ AC_ARG_ENABLE([extrachecks],
         [build with additional debugging checks enabled]))
 AS_IF([test "x$enable_extrachecks" = "xyes"], [
   # don't try to detect which c++ library we're using
-  CXXFLAGS="$CXXFLAGS -D_GLIBCXX_DEBUG=1 -D_LIBCPP_DEBUG=1"
+  CXXFLAGS="$CXXFLAGS -D_GLIBCXX_DEBUG=1 -D_GLIBCXX_SANITIZE_VECTOR=1 -D_LIBCPP_DEBUG=0"
 ])
 
 AC_ARG_ENABLE([ccache],
@@ -232,7 +232,7 @@ sqlite3_LIBS=
 AC_SUBST(sqlite3_CFLAGS)
 AC_SUBST(sqlite3_LIBS)
 
-PKG_CHECK_MODULES(libsodium, [libsodium >= 1.0.13], :, libsodium_INTERNAL=yes)
+PKG_CHECK_MODULES(libsodium, [libsodium >= 1.0.17], :, libsodium_INTERNAL=yes)
 
 AX_PKGCONFIG_SUBDIR(lib/libsodium)
 if test -n "$libsodium_INTERNAL"; then
@@ -298,7 +298,7 @@ AC_ARG_ENABLE(tracy,
     AS_HELP_STRING([--enable-tracy],
         [Enable 'tracy' profiler/tracer client stub]))
 AM_CONDITIONAL(USE_TRACY, [test x$enable_tracy = xyes])
-tracy_CFLAGS='-DTRACY_ENABLE -DTRACY_ON_DEMAND -DTRACY_NO_BROADCAST -DTRACY_ONLY_LOCALHOST'
+tracy_CFLAGS='-DTRACY_ENABLE -DTRACY_ON_DEMAND -DTRACY_NO_BROADCAST -DTRACY_ONLY_LOCALHOST -DTRACY_ONLY_IPV4'
 if test x"$enable_tracy" = xyes; then
     case "${host_os}" in
         *darwin*)
@@ -331,6 +331,11 @@ AC_ARG_ENABLE(tracy-capture,
     AS_HELP_STRING([--enable-tracy-capture],
         [Enable 'tracy' profiler/tracer capture program]))
 AM_CONDITIONAL(USE_TRACY_CAPTURE, [test x$enable_tracy_capture = xyes])
+
+AC_ARG_ENABLE(easylogging,
+    AS_HELP_STRING([--disable-easylogging],
+        [Disable easylogging]))
+AM_CONDITIONAL(USE_EASYLOGGING, [test x$enable_easylogging != xno])
 
 # Need this to pass through ccache for xdrpp, libsodium
 esc() {

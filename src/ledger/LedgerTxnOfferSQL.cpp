@@ -31,7 +31,8 @@ LedgerTxnRoot::Impl::loadOffer(LedgerKey const& key) const
     std::string actIDStrKey = KeyUtils::toStrKey(key.offer().sellerID);
 
     std::string sql = "SELECT sellerid, offerid, sellingasset, buyingasset, "
-                      "amount, pricen, priced, flags, lastmodified "
+                      "amount, pricen, priced, flags, lastmodified, extension, "
+                      "ledgerext "
                       "FROM offers "
                       "WHERE sellerid= :id AND offerid= :offerid";
     auto prep = mDatabase.getPreparedStatement(sql);
@@ -54,8 +55,8 @@ LedgerTxnRoot::Impl::loadAllOffers() const
 {
     ZoneScoped;
     std::string sql = "SELECT sellerid, offerid, sellingasset, buyingasset, "
-                      "amount, pricen, priced, flags, lastmodified "
-                      "FROM offers";
+                      "amount, pricen, priced, flags, lastmodified, extension, "
+                      "ledgerext FROM offers";
     auto prep = mDatabase.getPreparedStatement(sql);
 
     std::vector<LedgerEntry> offers;
@@ -75,8 +76,8 @@ LedgerTxnRoot::Impl::loadBestOffers(std::deque<LedgerEntry>& offers,
     // price is an approximation of the actual n/d (truncated math, 15 digits)
     // ordering by offerid gives precendence to older offers for fairness
     std::string sql = "SELECT sellerid, offerid, sellingasset, buyingasset, "
-                      "amount, pricen, priced, flags, lastmodified "
-                      "FROM offers "
+                      "amount, pricen, priced, flags, lastmodified, extension, "
+                      "ledgerext FROM offers "
                       "WHERE sellingasset = :v1 AND buyingasset = :v2 "
                       "ORDER BY price, offerid LIMIT :n";
 
@@ -116,16 +117,19 @@ LedgerTxnRoot::Impl::loadBestOffers(std::deque<LedgerEntry>& offers,
     std::string sql =
         "WITH r1 AS "
         "(SELECT sellerid, offerid, sellingasset, buyingasset, amount, price, "
-        "pricen, priced, flags, lastmodified FROM offers "
+        "pricen, priced, flags, lastmodified, extension, "
+        "ledgerext FROM offers "
         "WHERE sellingasset = :v1 AND buyingasset = :v2 AND price > :v3 "
         "ORDER BY price, offerid LIMIT :v4), "
         "r2 AS "
         "(SELECT sellerid, offerid, sellingasset, buyingasset, amount, price, "
-        "pricen, priced, flags, lastmodified FROM offers "
+        "pricen, priced, flags, lastmodified, extension, "
+        "ledgerext FROM offers "
         "WHERE sellingasset = :v5 AND buyingasset = :v6 AND price = :v7 "
         "AND offerid >= :v8 ORDER BY price, offerid LIMIT :v9) "
         "SELECT sellerid, offerid, sellingasset, buyingasset, "
-        "amount, pricen, priced, flags, lastmodified "
+        "amount, pricen, priced, flags, lastmodified, extension, "
+        "ledgerext "
         "FROM (SELECT * FROM r1 UNION ALL SELECT * FROM r2) AS res "
         "ORDER BY price, offerid LIMIT :v10";
 
@@ -205,7 +209,8 @@ LedgerTxnRoot::Impl::loadOffersByAccountAndAsset(AccountID const& accountID,
 {
     ZoneScoped;
     std::string sql = "SELECT sellerid, offerid, sellingasset, buyingasset, "
-                      "amount, pricen, priced, flags, lastmodified "
+                      "amount, pricen, priced, flags, lastmodified, extension, "
+                      "ledgerext "
                       "FROM offers WHERE sellerid = :v1 AND "
                       "(sellingasset = :v2 OR buyingasset = :v3)";
     // Note: v2 == v3 but positional parameters are faster
@@ -249,6 +254,10 @@ LedgerTxnRoot::Impl::loadOffers(StatementContext& prep,
     ZoneScoped;
     std::string actIDStrKey;
     std::string sellingAsset, buyingAsset;
+    std::string extensionStr;
+    soci::indicator extensionInd;
+    std::string ledgerExtStr;
+    soci::indicator ledgerExtInd;
 
     LedgerEntry le;
     le.data.type(OFFER);
@@ -264,6 +273,8 @@ LedgerTxnRoot::Impl::loadOffers(StatementContext& prep,
     st.exchange(soci::into(oe.price.d));
     st.exchange(soci::into(oe.flags));
     st.exchange(soci::into(le.lastModifiedLedgerSeq));
+    st.exchange(soci::into(extensionStr, extensionInd));
+    st.exchange(soci::into(ledgerExtStr, ledgerExtInd));
     st.define_and_bind();
     st.execute(true);
 
@@ -274,6 +285,10 @@ LedgerTxnRoot::Impl::loadOffers(StatementContext& prep,
         oe.sellerID = KeyUtils::fromStrKey<PublicKey>(actIDStrKey);
         oe.selling = processAsset(sellingAsset);
         oe.buying = processAsset(buyingAsset);
+
+        decodeOpaqueXDR(extensionStr, extensionInd, oe.ext);
+
+        decodeOpaqueXDR(ledgerExtStr, ledgerExtInd, le.ext);
 
         offers.emplace_back(le);
         st.fetch();
@@ -290,6 +305,10 @@ LedgerTxnRoot::Impl::loadOffers(StatementContext& prep) const
 
     std::string actIDStrKey;
     std::string sellingAsset, buyingAsset;
+    std::string extensionStr;
+    soci::indicator extensionInd;
+    std::string ledgerExtStr;
+    soci::indicator ledgerExtInd;
 
     LedgerEntry le;
     le.data.type(OFFER);
@@ -305,6 +324,8 @@ LedgerTxnRoot::Impl::loadOffers(StatementContext& prep) const
     st.exchange(soci::into(oe.price.d));
     st.exchange(soci::into(oe.flags));
     st.exchange(soci::into(le.lastModifiedLedgerSeq));
+    st.exchange(soci::into(extensionStr, extensionInd));
+    st.exchange(soci::into(ledgerExtStr, ledgerExtInd));
     st.define_and_bind();
     st.execute(true);
 
@@ -313,6 +334,10 @@ LedgerTxnRoot::Impl::loadOffers(StatementContext& prep) const
         oe.sellerID = KeyUtils::fromStrKey<PublicKey>(actIDStrKey);
         oe.selling = processAsset(sellingAsset);
         oe.buying = processAsset(buyingAsset);
+
+        decodeOpaqueXDR(extensionStr, extensionInd, oe.ext);
+
+        decodeOpaqueXDR(ledgerExtStr, ledgerExtInd, le.ext);
 
         offers.emplace_back(le);
         st.fetch();
@@ -334,6 +359,8 @@ class BulkUpsertOffersOperation : public DatabaseTypeSpecificOperation<void>
     std::vector<double> mPrices;
     std::vector<int32_t> mFlags;
     std::vector<int32_t> mLastModifieds;
+    std::vector<std::string> mExtensions;
+    std::vector<std::string> mLedgerExtensions;
 
     void
     accumulateEntry(LedgerEntry const& entry)
@@ -358,6 +385,10 @@ class BulkUpsertOffersOperation : public DatabaseTypeSpecificOperation<void>
         mFlags.emplace_back(unsignedToSigned(offer.flags));
         mLastModifieds.emplace_back(
             unsignedToSigned(entry.lastModifiedLedgerSeq));
+        mExtensions.emplace_back(
+            decoder::encode_b64(xdr::xdr_to_opaque(offer.ext)));
+        mLedgerExtensions.emplace_back(
+            decoder::encode_b64(xdr::xdr_to_opaque(entry.ext)));
     }
 
   public:
@@ -375,6 +406,8 @@ class BulkUpsertOffersOperation : public DatabaseTypeSpecificOperation<void>
         mPrices.reserve(entries.size());
         mFlags.reserve(entries.size());
         mLastModifieds.reserve(entries.size());
+        mExtensions.reserve(entries.size());
+        mLedgerExtensions.reserve(entries.size());
 
         for (auto const& e : entries)
         {
@@ -396,32 +429,40 @@ class BulkUpsertOffersOperation : public DatabaseTypeSpecificOperation<void>
         mPrices.reserve(entries.size());
         mFlags.reserve(entries.size());
         mLastModifieds.reserve(entries.size());
+        mExtensions.reserve(entries.size());
+        mLedgerExtensions.reserve(entries.size());
 
         for (auto const& e : entries)
         {
             assert(e.entryExists());
-            accumulateEntry(e.entry());
+            assert(e.entry().type() ==
+                   GeneralizedLedgerEntryType::LEDGER_ENTRY);
+            accumulateEntry(e.entry().ledgerEntry());
         }
     }
 
     void
     doSociGenericOperation()
     {
-        std::string sql = "INSERT INTO offers ( "
-                          "sellerid, offerid, sellingasset, buyingasset, "
-                          "amount, pricen, priced, price, flags, lastmodified "
-                          ") VALUES ( "
-                          ":v1, :v2, :v3, :v4, :v5, :v6, :v7, :v8, :v9, :v10 "
-                          ") ON CONFLICT (offerid) DO UPDATE SET "
-                          "sellerid = excluded.sellerid, "
-                          "sellingasset = excluded.sellingasset, "
-                          "buyingasset = excluded.buyingasset, "
-                          "amount = excluded.amount, "
-                          "pricen = excluded.pricen, "
-                          "priced = excluded.priced, "
-                          "price = excluded.price, "
-                          "flags = excluded.flags, "
-                          "lastmodified = excluded.lastmodified ";
+        std::string sql =
+            "INSERT INTO offers ( "
+            "sellerid, offerid, sellingasset, buyingasset, "
+            "amount, pricen, priced, price, flags, lastmodified, extension, "
+            "ledgerext "
+            ") VALUES ( "
+            ":v1, :v2, :v3, :v4, :v5, :v6, :v7, :v8, :v9, :v10, :v11, :v12 "
+            ") ON CONFLICT (offerid) DO UPDATE SET "
+            "sellerid = excluded.sellerid, "
+            "sellingasset = excluded.sellingasset, "
+            "buyingasset = excluded.buyingasset, "
+            "amount = excluded.amount, "
+            "pricen = excluded.pricen, "
+            "priced = excluded.priced, "
+            "price = excluded.price, "
+            "flags = excluded.flags, "
+            "lastmodified = excluded.lastmodified, "
+            "extension = excluded.extension, "
+            "ledgerext = excluded.ledgerext";
         auto prep = mDB.getPreparedStatement(sql);
         soci::statement& st = prep.statement();
         st.exchange(soci::use(mSellerIDs));
@@ -434,6 +475,8 @@ class BulkUpsertOffersOperation : public DatabaseTypeSpecificOperation<void>
         st.exchange(soci::use(mPrices));
         st.exchange(soci::use(mFlags));
         st.exchange(soci::use(mLastModifieds));
+        st.exchange(soci::use(mExtensions));
+        st.exchange(soci::use(mLedgerExtensions));
         st.define_and_bind();
         {
             auto timer = mDB.getUpsertTimer("offer");
@@ -458,7 +501,7 @@ class BulkUpsertOffersOperation : public DatabaseTypeSpecificOperation<void>
 
         std::string strSellerIDs, strOfferIDs, strSellingAssets,
             strBuyingAssets, strAmounts, strPriceNs, strPriceDs, strPrices,
-            strFlags, strLastModifieds;
+            strFlags, strLastModifieds, strExtensions, strLedgerExtensions;
 
         PGconn* conn = pg->conn_;
         marshalToPGArray(conn, strSellerIDs, mSellerIDs);
@@ -473,33 +516,41 @@ class BulkUpsertOffersOperation : public DatabaseTypeSpecificOperation<void>
         marshalToPGArray(conn, strPrices, mPrices);
         marshalToPGArray(conn, strFlags, mFlags);
         marshalToPGArray(conn, strLastModifieds, mLastModifieds);
+        marshalToPGArray(conn, strExtensions, mExtensions);
+        marshalToPGArray(conn, strLedgerExtensions, mLedgerExtensions);
 
-        std::string sql = "WITH r AS (SELECT "
-                          "unnest(:v1::TEXT[]), "
-                          "unnest(:v2::BIGINT[]), "
-                          "unnest(:v3::TEXT[]), "
-                          "unnest(:v4::TEXT[]), "
-                          "unnest(:v5::BIGINT[]), "
-                          "unnest(:v6::INT[]), "
-                          "unnest(:v7::INT[]), "
-                          "unnest(:v8::DOUBLE PRECISION[]), "
-                          "unnest(:v9::INT[]), "
-                          "unnest(:v10::INT[]) "
-                          ")"
-                          "INSERT INTO offers ( "
-                          "sellerid, offerid, sellingasset, buyingasset, "
-                          "amount, pricen, priced, price, flags, lastmodified "
-                          ") SELECT * from r "
-                          "ON CONFLICT (offerid) DO UPDATE SET "
-                          "sellerid = excluded.sellerid, "
-                          "sellingasset = excluded.sellingasset, "
-                          "buyingasset = excluded.buyingasset, "
-                          "amount = excluded.amount, "
-                          "pricen = excluded.pricen, "
-                          "priced = excluded.priced, "
-                          "price = excluded.price, "
-                          "flags = excluded.flags, "
-                          "lastmodified = excluded.lastmodified ";
+        std::string sql =
+            "WITH r AS (SELECT "
+            "unnest(:v1::TEXT[]), "
+            "unnest(:v2::BIGINT[]), "
+            "unnest(:v3::TEXT[]), "
+            "unnest(:v4::TEXT[]), "
+            "unnest(:v5::BIGINT[]), "
+            "unnest(:v6::INT[]), "
+            "unnest(:v7::INT[]), "
+            "unnest(:v8::DOUBLE PRECISION[]), "
+            "unnest(:v9::INT[]), "
+            "unnest(:v10::INT[]), "
+            "unnest(:v11::TEXT[]), "
+            "unnest(:v12::TEXT[]) "
+            ")"
+            "INSERT INTO offers ( "
+            "sellerid, offerid, sellingasset, buyingasset, "
+            "amount, pricen, priced, price, flags, lastmodified, extension, "
+            "ledgerext "
+            ") SELECT * from r "
+            "ON CONFLICT (offerid) DO UPDATE SET "
+            "sellerid = excluded.sellerid, "
+            "sellingasset = excluded.sellingasset, "
+            "buyingasset = excluded.buyingasset, "
+            "amount = excluded.amount, "
+            "pricen = excluded.pricen, "
+            "priced = excluded.priced, "
+            "price = excluded.price, "
+            "flags = excluded.flags, "
+            "lastmodified = excluded.lastmodified, "
+            "extension = excluded.extension, "
+            "ledgerext = excluded.ledgerext";
         auto prep = mDB.getPreparedStatement(sql);
         soci::statement& st = prep.statement();
         st.exchange(soci::use(strSellerIDs));
@@ -512,6 +563,8 @@ class BulkUpsertOffersOperation : public DatabaseTypeSpecificOperation<void>
         st.exchange(soci::use(strPrices));
         st.exchange(soci::use(strFlags));
         st.exchange(soci::use(strLastModifieds));
+        st.exchange(soci::use(strExtensions));
+        st.exchange(soci::use(strLedgerExtensions));
         st.define_and_bind();
         {
             auto timer = mDB.getUpsertTimer("offer");
@@ -539,8 +592,9 @@ class BulkDeleteOffersOperation : public DatabaseTypeSpecificOperation<void>
         for (auto const& e : entries)
         {
             assert(!e.entryExists());
-            assert(e.key().type() == OFFER);
-            auto const& offer = e.key().offer();
+            assert(e.key().type() == GeneralizedLedgerEntryType::LEDGER_ENTRY);
+            assert(e.key().ledgerKey().type() == OFFER);
+            auto const& offer = e.key().ledgerKey().offer();
             mOfferIDs.emplace_back(offer.offerID);
         }
     }
@@ -644,25 +698,25 @@ LedgerTxnRoot::Impl::dropOffers()
            "PRIMARY KEY      (offerid)"
            ");";
     mDatabase.getSession() << "CREATE INDEX bestofferindex ON offers "
-                              "(sellingasset,buyingasset,price);";
+                              "(sellingasset,buyingasset,price,offerid);";
+    if (!mDatabase.isSqlite())
+    {
+        mDatabase.getSession() << "ALTER TABLE offers "
+                               << "ALTER COLUMN sellerid "
+                               << "TYPE VARCHAR(56) COLLATE \"C\", "
+                               << "ALTER COLUMN buyingasset "
+                               << "TYPE TEXT COLLATE \"C\", "
+                               << "ALTER COLUMN sellingasset "
+                               << "TYPE TEXT COLLATE \"C\"";
+    }
 }
 
 class BulkLoadOffersOperation
     : public DatabaseTypeSpecificOperation<std::vector<LedgerEntry>>
 {
     Database& mDb;
-    uint32_t mLedgerVersion;
     std::vector<int64_t> mOfferIDs;
     std::unordered_set<LedgerKey> mKeys;
-    std::unordered_map<int64_t, AccountID> mSellerIDsByOfferID;
-
-    bool
-    shouldIncludeOffer(int64_t offerID, AccountID sellerID)
-    {
-        // Before protocol version 13, exclude offers where sellerID in
-        // LedgerKey doesn't match sellerID in LedgerEntry
-        return mLedgerVersion >= 13 || mSellerIDsByOfferID[offerID] == sellerID;
-    }
 
     std::vector<LedgerEntry>
     executeAndFetch(soci::statement& st)
@@ -671,6 +725,10 @@ class BulkLoadOffersOperation
         int64_t amount;
         int64_t offerID;
         uint32_t flags, lastModified;
+        std::string extension;
+        soci::indicator extensionInd;
+        std::string ledgerExtension;
+        soci::indicator ledgerExtInd;
         Price price;
 
         st.exchange(soci::into(sellerID));
@@ -682,6 +740,8 @@ class BulkLoadOffersOperation
         st.exchange(soci::into(price.d));
         st.exchange(soci::into(flags));
         st.exchange(soci::into(lastModified));
+        st.exchange(soci::into(extension, extensionInd));
+        st.exchange(soci::into(ledgerExtension, ledgerExtInd));
         st.define_and_bind();
         {
             auto timer = mDb.getSelectTimer("offer");
@@ -693,24 +753,25 @@ class BulkLoadOffersOperation
         {
             auto pubKey = KeyUtils::fromStrKey<PublicKey>(sellerID);
 
-            if (shouldIncludeOffer(offerID, pubKey))
-            {
-                res.emplace_back();
-                auto& le = res.back();
-                le.data.type(OFFER);
-                auto& oe = le.data.offer();
+            res.emplace_back();
+            auto& le = res.back();
+            le.data.type(OFFER);
+            auto& oe = le.data.offer();
 
-                oe.sellerID = pubKey;
-                oe.offerID = offerID;
+            oe.sellerID = pubKey;
+            oe.offerID = offerID;
 
-                oe.selling = processAsset(sellingAsset);
-                oe.buying = processAsset(buyingAsset);
+            oe.selling = processAsset(sellingAsset);
+            oe.buying = processAsset(buyingAsset);
 
-                oe.amount = amount;
-                oe.price = price;
-                oe.flags = flags;
-                le.lastModifiedLedgerSeq = lastModified;
-            }
+            oe.amount = amount;
+            oe.price = price;
+            oe.flags = flags;
+            le.lastModifiedLedgerSeq = lastModified;
+
+            decodeOpaqueXDR(extension, extensionInd, oe.ext);
+
+            decodeOpaqueXDR(ledgerExtension, ledgerExtInd, le.ext);
 
             st.fetch();
         }
@@ -719,9 +780,8 @@ class BulkLoadOffersOperation
 
   public:
     BulkLoadOffersOperation(Database& db,
-                            std::unordered_set<LedgerKey> const& keys,
-                            uint32_t ledgerVersion)
-        : mDb(db), mLedgerVersion(ledgerVersion)
+                            std::unordered_set<LedgerKey> const& keys)
+        : mDb(db)
     {
         mOfferIDs.reserve(keys.size());
         for (auto const& k : keys)
@@ -730,10 +790,6 @@ class BulkLoadOffersOperation
             if (k.offer().offerID >= 0)
             {
                 mOfferIDs.emplace_back(k.offer().offerID);
-                if (mLedgerVersion < 13)
-                {
-                    mSellerIDsByOfferID[mOfferIDs.back()] = k.offer().sellerID;
-                }
             }
         }
     }
@@ -743,7 +799,8 @@ class BulkLoadOffersOperation
     {
         std::string sql =
             "SELECT sellerid, offerid, sellingasset, buyingasset, "
-            "amount, pricen, priced, flags, lastmodified "
+            "amount, pricen, priced, flags, lastmodified, extension, "
+            "ledgerext "
             "FROM offers WHERE offerid IN carray(?, ?, 'int64')";
 
         auto prep = mDb.getPreparedStatement(sql);
@@ -772,7 +829,8 @@ class BulkLoadOffersOperation
         std::string sql =
             "WITH r AS (SELECT unnest(:v1::BIGINT[])) "
             "SELECT sellerid, offerid, sellingasset, buyingasset, "
-            "amount, pricen, priced, flags, lastmodified "
+            "amount, pricen, priced, flags, lastmodified, extension, "
+            "ledgerext "
             "FROM offers WHERE offerid IN (SELECT * FROM r)";
         auto prep = mDb.getPreparedStatement(sql);
         auto& st = prep.statement();
@@ -790,7 +848,7 @@ LedgerTxnRoot::Impl::bulkLoadOffers(
     ZoneValue(static_cast<int64_t>(keys.size()));
     if (!keys.empty())
     {
-        BulkLoadOffersOperation op(mDatabase, keys, mHeader->ledgerVersion);
+        BulkLoadOffersOperation op(mDatabase, keys);
         return populateLoadedEntries(
             keys, mDatabase.doDatabaseTypeSpecificOperation(op));
     }

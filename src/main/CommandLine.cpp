@@ -3,7 +3,9 @@
 // of this distribution or at http://www.apache.org/licenses/LICENSE-2.0
 
 #include "main/CommandLine.h"
+#include "bucket/BucketManager.h"
 #include "catchup/CatchupConfiguration.h"
+#include "herder/Herder.h"
 #include "history/HistoryArchiveManager.h"
 #include "history/InferredQuorumUtils.h"
 #include "ledger/LedgerManager.h"
@@ -13,12 +15,14 @@
 #include "main/ErrorMessages.h"
 #include "main/StellarCoreVersion.h"
 #include "main/dumpxdr.h"
+#include "overlay/OverlayManager.h"
 #include "scp/QuorumSetUtils.h"
 #include "util/Logging.h"
 #include "util/optional.h"
 #include "util/types.h"
 
 #include "historywork/BatchDownloadWork.h"
+#include "historywork/WriteVerifiedCheckpointHashesWork.h"
 #include "src/catchup/simulation/TxSimApplyTransactionsWork.h"
 #include "src/transactions/simulation/TxSimScaleBucketlistWork.h"
 #include "work/WorkScheduler.h"
@@ -197,6 +201,12 @@ metricsParser(std::vector<std::string>& value)
 }
 
 clara::Opt
+compactParser(bool& compact)
+{
+    return clara::Opt{compact}["--compact"]("no indent");
+}
+
+clara::Opt
 base64Parser(bool& base64)
 {
     return clara::Opt{base64}["--base64"]("use base64");
@@ -207,6 +217,14 @@ disableBucketGCParser(bool& disableBucketGC)
 {
     return clara::Opt{disableBucketGC}["--disable-bucket-gc"](
         "keeps all, even old, buckets on disk");
+}
+
+clara::Opt
+waitForConsensusParser(bool& waitForConsensus)
+{
+    return clara::Opt{waitForConsensus}["--wait-for-consensus"](
+        "wait to hear from the network before voting, for validating nodes "
+        "only");
 }
 
 clara::Opt
@@ -221,6 +239,13 @@ historyLedgerNumber(uint32_t& ledgerNum)
 {
     return clara::Opt{ledgerNum, "HISTORY-LEDGER"}["--history-ledger"](
         "specify a ledger number to examine in history");
+}
+
+clara::Opt
+historyHashParser(std::string& hash)
+{
+    return clara::Opt(hash, "HISTORY_HASH")["--history-hash"](
+        "specify a hash to trust for the provided ledger");
 }
 
 clara::Parser
@@ -254,6 +279,75 @@ maybeSetMetadataOutputStream(Config& cfg, std::string const& stream)
         cfg.METADATA_OUTPUT_STREAM = stream;
     }
 }
+
+optional<CatchupConfiguration>
+maybeEnableInMemoryLedgerMode(Config& config, bool inMemory,
+                              uint32_t startAtLedger,
+                              std::string const& startAtHash)
+{
+    if (!inMemory)
+    {
+        if (startAtLedger != 0)
+        {
+            throw std::runtime_error("--start-at-ledger requires --in-memory");
+        }
+        if (!startAtHash.empty())
+        {
+            throw std::runtime_error("--start-at-hash requires --in-memory");
+        }
+        return nullptr;
+    }
+
+    // Adjust configs for in-memory-replay mode
+    config.DATABASE = SecretValue{"sqlite3://:memory:"};
+    config.MODE_STORES_HISTORY = false;
+    config.MODE_USES_IN_MEMORY_LEDGER = true;
+    config.MODE_ENABLES_BUCKETLIST = true;
+    // And don't bother fsyncing buckets without a DB,
+    // they're temporary anyways.
+    config.DISABLE_XDR_FSYNC = true;
+
+    if (startAtLedger != 0 && startAtHash.empty())
+    {
+        throw std::runtime_error("--start-at-ledger requires --start-at-hash");
+    }
+    else if (startAtLedger == 0 && !startAtHash.empty())
+    {
+        throw std::runtime_error("--start-at-hash requires --start-at-ledger");
+    }
+    else if (startAtLedger != 0 && !startAtHash.empty())
+    {
+        config.MODE_AUTO_STARTS_OVERLAY = false;
+        LedgerNumHashPair pair;
+        pair.first = startAtLedger;
+        pair.second = make_optional<Hash>(hexToBin256(startAtHash));
+        uint32_t count = 0;
+        auto mode = CatchupConfiguration::Mode::OFFLINE_COMPLETE;
+        return make_optional<CatchupConfiguration>(pair, count, mode);
+    }
+    return nullptr;
+}
+
+clara::Opt
+inMemoryParser(bool& inMemory)
+{
+    return clara::Opt{inMemory}["--in-memory"](
+        "store working ledger in memory rather than database");
+};
+
+clara::Opt
+startAtLedgerParser(uint32_t& startAtLedger)
+{
+    return clara::Opt{startAtLedger, "LEDGER"}["--start-at-ledger"](
+        "start in-memory run with replay from historical ledger number");
+};
+
+clara::Opt
+startAtHashParser(std::string& startAtHash)
+{
+    return clara::Opt{startAtHash, "HASH"}["--start-at-hash"](
+        "start in-memory run with replay from historical ledger hash");
+};
 
 int
 runWithHelp(CommandLineArgs const& args,
@@ -495,8 +589,12 @@ runCatchup(CommandLineArgs const& args)
     std::string catchupString;
     std::string outputFile;
     std::string archive;
+    std::string trustedCheckpointHashesFile;
     bool completeValidation = false;
     bool replayInMemory = false;
+    bool inMemory = false;
+    uint32_t startAtLedger = 0;
+    std::string startAtHash;
     std::string stream;
 
     auto validateCatchupString = [&] {
@@ -528,6 +626,11 @@ runCatchup(CommandLineArgs const& args)
     auto catchupStringParser = ParserWithValidation{
         clara::Arg(catchupString, "DESTINATION-LEDGER/LEDGER-COUNT").required(),
         validateCatchupString};
+    auto trustedCheckpointHashesParser = [](std::string& file) {
+        return clara::Opt{file, "FILE-NAME"}["--trusted-checkpoint-hashes"](
+            "get destination ledger hash from trusted output of "
+            "'verify-checkpoints'");
+    };
     auto catchupArchiveParser = ParserWithValidation{
         historyArchiveParser(archive), validateCatchupArchive};
     auto disableBucketGC = false;
@@ -539,20 +642,25 @@ runCatchup(CommandLineArgs const& args)
 
     auto replayInMemoryParser = [](bool& replayInMemory) {
         return clara::Opt{replayInMemory}["--replay-in-memory"](
-            "don't use a database, just replay ledgers in memory");
+            "deprecated: use --in-memory flag, common to 'catchup' and 'run'");
     };
 
     return runWithHelp(
         args,
         {configurationParser(configOption), catchupStringParser,
-         catchupArchiveParser, outputFileParser(outputFile),
-         disableBucketGCParser(disableBucketGC),
+         catchupArchiveParser,
+         trustedCheckpointHashesParser(trustedCheckpointHashesFile),
+         outputFileParser(outputFile), disableBucketGCParser(disableBucketGC),
          validationParser(completeValidation),
-         replayInMemoryParser(replayInMemory),
+         replayInMemoryParser(replayInMemory), inMemoryParser(inMemory),
+         startAtLedgerParser(startAtLedger), startAtHashParser(startAtHash),
          metadataOutputStreamParser(stream)},
         [&] {
             auto config = configOption.getConfig();
-            config.setNoListen();
+            // Don't call config.setNoListen() here as we might want to
+            // access the /info HTTP endpoint during catchup.
+            config.RUN_STANDALONE = true;
+            config.MANUAL_CLOSE = true;
             config.DISABLE_BUCKET_GC = disableBucketGC;
 
             if (config.AUTOMATIC_MAINTENANCE_PERIOD.count() > 0 &&
@@ -566,18 +674,8 @@ runCatchup(CommandLineArgs const& args)
                 config.AUTOMATIC_MAINTENANCE_COUNT = 1000000;
             }
 
-            if (replayInMemory)
-            {
-                // Adjust configs for in-memory-replay mode
-                config.DATABASE = SecretValue{"sqlite3://:memory:"};
-                config.MODE_STORES_HISTORY = false;
-                config.MODE_USES_IN_MEMORY_LEDGER = true;
-                config.MODE_ENABLES_BUCKETLIST = true;
-                // And don't bother fsyncing buckets without a DB,
-                // they're temporary anyways.
-                config.DISABLE_XDR_FSYNC = true;
-            }
-
+            maybeEnableInMemoryLedgerMode(config, (inMemory || replayInMemory),
+                                          startAtLedger, startAtHash);
             maybeSetMetadataOutputStream(config, stream);
 
             VirtualClock clock(VirtualClock::REAL_TIME);
@@ -591,10 +689,35 @@ runCatchup(CommandLineArgs const& args)
                     archivePtr = ham.selectRandomReadableHistoryArchive();
                 }
 
+                CatchupConfiguration cc =
+                    parseCatchup(catchupString, completeValidation);
+                if (!trustedCheckpointHashesFile.empty())
+                {
+                    auto const& hm = app->getHistoryManager();
+                    if (!hm.isLastLedgerInCheckpoint(cc.toLedger()))
+                    {
+                        throw std::runtime_error(
+                            "destination ledger is not a checkpoint boundary,"
+                            " but trusted checkpoints file was provided");
+                    }
+                    Hash h = WriteVerifiedCheckpointHashesWork::
+                        loadHashFromJsonOutput(cc.toLedger(),
+                                               trustedCheckpointHashesFile);
+                    if (isZero(h))
+                    {
+                        throw std::runtime_error("destination ledger not found "
+                                                 "in trusted checkpoints file");
+                    }
+                    LedgerNumHashPair pair;
+                    pair.first = cc.toLedger();
+                    pair.second = make_optional<Hash>(h);
+                    LOG(INFO) << "Found trusted hash " << hexAbbrev(h)
+                              << " for ledger " << cc.toLedger();
+                    cc = CatchupConfiguration(pair, cc.count(), cc.mode());
+                }
+
                 Json::Value catchupInfo;
-                result = catchup(
-                    app, parseCatchup(catchupString, completeValidation),
-                    catchupInfo, archivePtr);
+                result = catchup(app, cc, catchupInfo, archivePtr);
                 if (!catchupInfo.isNull())
                 {
                     writeCatchupInfo(catchupInfo, outputFile);
@@ -634,6 +757,94 @@ runCheckQuorum(CommandLineArgs const& args)
 }
 
 int
+runWriteVerifiedCheckpointHashes(CommandLineArgs const& args)
+{
+    std::string outputFile;
+    uint32_t startLedger = 0;
+    std::string startHash;
+    CommandLine::ConfigOption configOption;
+    return runWithHelp(
+        args,
+        {configurationParser(configOption), historyLedgerNumber(startLedger),
+         historyHashParser(startHash), outputFileParser(outputFile).required()},
+        [&] {
+            VirtualClock clock(VirtualClock::REAL_TIME);
+            auto cfg = configOption.getConfig();
+
+            // Set up for quick in-memory no-catchup mode.
+            cfg.QUORUM_INTERSECTION_CHECKER = false;
+            cfg.DATABASE = SecretValue{"sqlite3://:memory:"};
+            cfg.MODE_STORES_HISTORY = false;
+            cfg.MODE_DOES_CATCHUP = false;
+            cfg.MODE_USES_IN_MEMORY_LEDGER = true;
+            cfg.MODE_ENABLES_BUCKETLIST = true;
+            cfg.DISABLE_XDR_FSYNC = true;
+
+            auto app = Application::create(clock, cfg, false);
+            app->start();
+            auto const& lm = app->getLedgerManager();
+            auto const& hm = app->getHistoryManager();
+            auto const& cm = app->getCatchupManager();
+            auto& io = clock.getIOContext();
+            asio::io_context::work mainWork(io);
+            LedgerNumHashPair authPair;
+            auto tryCheckpoint = [&](uint32_t seq, Hash h) {
+                if (hm.isLastLedgerInCheckpoint(seq))
+                {
+                    LOG(INFO) << "Found authenticated checkpoint hash "
+                              << hexAbbrev(h) << " for ledger " << seq;
+                    authPair.first = seq;
+                    authPair.second = make_optional<Hash>(h);
+                }
+                else if (authPair.first != seq)
+                {
+                    authPair.first = seq;
+                    LOG(INFO) << "Ledger " << seq
+                              << " is not a checkpoint boundary, waiting.";
+                }
+            };
+
+            if (startLedger != 0 && !startHash.empty())
+            {
+                Hash h = hexToBin256(startHash);
+                tryCheckpoint(startLedger, h);
+            }
+
+            while (!(io.stopped() || authPair.second))
+            {
+                clock.crank();
+                if (lm.isSynced())
+                {
+                    auto const& lhe = lm.getLastClosedLedgerHeader();
+                    tryCheckpoint(lhe.header.ledgerSeq, lhe.hash);
+                }
+                else if (cm.hasBufferedLedger())
+                {
+                    auto const& lcd = cm.getLastBufferedLedger();
+                    uint32_t seq = lcd.getLedgerSeq() - 1;
+                    Hash hash = lcd.getTxSet()->previousLedgerHash();
+                    tryCheckpoint(seq, hash);
+                }
+            }
+            if (authPair.second)
+            {
+                app->getOverlayManager().shutdown();
+                app->getHerder().shutdown();
+                app->getWorkScheduler()
+                    .executeWork<WriteVerifiedCheckpointHashesWork>(authPair,
+                                                                    outputFile);
+                app->gracefulStop();
+                return 0;
+            }
+            else
+            {
+                app->gracefulStop();
+                return 1;
+            }
+        });
+}
+
+int
 runConvertId(CommandLineArgs const& args)
 {
     std::string id;
@@ -648,13 +859,13 @@ int
 runDumpXDR(CommandLineArgs const& args)
 {
     std::string xdr;
-    bool json = false;
-    auto jsonOption = clara::Opt{json}["--json"]("dump json");
+    bool compact = false;
 
-    return runWithHelp(args, {jsonOption, fileNameParser(xdr)}, [&] {
-        dumpXdrStream(xdr, json);
-        return 0;
-    });
+    return runWithHelp(args, {compactParser(compact), fileNameParser(xdr)},
+                       [&] {
+                           dumpXdrStream(xdr, compact);
+                           return 0;
+                       });
 }
 
 int
@@ -670,7 +881,7 @@ runForceSCP(CommandLineArgs const& args)
 
     return runWithHelp(args, {configurationParser(configOption), resetOption},
                        [&] {
-                           setForceSCPFlag(configOption.getConfig(), !reset);
+                           setForceSCPFlag();
                            return 0;
                        });
 }
@@ -771,15 +982,18 @@ runPrintXdr(CommandLineArgs const& args)
     std::string xdr;
     std::string fileType{"auto"};
     auto base64 = false;
+    auto compact = false;
 
     auto fileTypeOpt = clara::Opt(fileType, "FILE-TYPE")["--filetype"](
         "[auto|ledgerheader|meta|result|resultpair|tx|txfee]");
 
-    return runWithHelp(
-        args, {fileNameParser(xdr), fileTypeOpt, base64Parser(base64)}, [&] {
-            printXdr(xdr, fileType, base64);
-            return 0;
-        });
+    return runWithHelp(args,
+                       {fileNameParser(xdr), fileTypeOpt, base64Parser(base64),
+                        compactParser(compact)},
+                       [&] {
+                           printXdr(xdr, fileType, base64, compact);
+                           return 0;
+                       });
 }
 
 int
@@ -803,6 +1017,10 @@ run(CommandLineArgs const& args)
     auto disableBucketGC = false;
     uint32_t simulateSleepPerOp = 0;
     std::string stream;
+    bool inMemory = false;
+    bool waitForConsensus = false;
+    uint32_t startAtLedger = 0;
+    std::string startAtHash;
 
     auto simulateParser = [](uint32_t& simulateSleepPerOp) {
         return clara::Opt{simulateSleepPerOp,
@@ -810,41 +1028,47 @@ run(CommandLineArgs const& args)
             "simulate application time per operation");
     };
 
-    return runWithHelp(args,
-                       {configurationParser(configOption),
-                        disableBucketGCParser(disableBucketGC),
-                        simulateParser(simulateSleepPerOp),
-                        metadataOutputStreamParser(stream)},
-                       [&] {
-                           Config cfg;
-                           try
-                           {
-                               cfg = configOption.getConfig();
-                               cfg.DISABLE_BUCKET_GC = disableBucketGC;
-                               if (simulateSleepPerOp > 0)
-                               {
-                                   cfg.DATABASE =
-                                       SecretValue{"sqlite3://:memory:"};
-                                   cfg.OP_APPLY_SLEEP_TIME_FOR_TESTING =
-                                       simulateSleepPerOp;
-                                   cfg.MODE_STORES_HISTORY = false;
-                                   cfg.MODE_USES_IN_MEMORY_LEDGER = false;
-                                   cfg.MODE_ENABLES_BUCKETLIST = false;
-                                   cfg.PREFETCH_BATCH_SIZE = 0;
-                               }
+    return runWithHelp(
+        args,
+        {configurationParser(configOption),
+         disableBucketGCParser(disableBucketGC),
+         simulateParser(simulateSleepPerOp), metadataOutputStreamParser(stream),
+         inMemoryParser(inMemory), waitForConsensusParser(waitForConsensus),
+         startAtLedgerParser(startAtLedger), startAtHashParser(startAtHash)},
+        [&] {
+            Config cfg;
+            optional<CatchupConfiguration> cc;
+            try
+            {
+                cfg = configOption.getConfig();
+                cfg.DISABLE_BUCKET_GC = disableBucketGC;
+                if (simulateSleepPerOp > 0)
+                {
+                    cfg.DATABASE = SecretValue{"sqlite3://:memory:"};
+                    cfg.OP_APPLY_SLEEP_TIME_FOR_TESTING = simulateSleepPerOp;
+                    cfg.MODE_STORES_HISTORY = false;
+                    cfg.MODE_USES_IN_MEMORY_LEDGER = false;
+                    cfg.MODE_ENABLES_BUCKETLIST = false;
+                    cfg.PREFETCH_BATCH_SIZE = 0;
+                }
 
-                               maybeSetMetadataOutputStream(cfg, stream);
-                           }
-                           catch (std::exception& e)
-                           {
-                               LOG(FATAL) << "Got an exception: " << e.what();
-                               LOG(FATAL) << REPORT_INTERNAL_BUG;
-                               return 1;
-                           }
-                           // run outside of catch block so that we properly
-                           // capture crashes
-                           return runWithConfig(cfg);
-                       });
+                cc = maybeEnableInMemoryLedgerMode(cfg, inMemory, startAtLedger,
+                                                   startAtHash);
+                maybeSetMetadataOutputStream(cfg, stream);
+                cfg.FORCE_SCP =
+                    cfg.NODE_IS_VALIDATOR ? !waitForConsensus : false;
+            }
+            catch (std::exception& e)
+            {
+                LOG(FATAL) << "Got an exception: " << e.what();
+                LOG(FATAL) << REPORT_INTERNAL_BUG;
+                return 1;
+            }
+
+            // run outside of catch block so that we properly
+            // capture crashes
+            return runWithConfig(cfg, cc);
+        });
 }
 
 int
@@ -1218,12 +1442,11 @@ handleCommandLine(int argc, char* const* argv)
           runCatchup},
          {"check-quorum", "check quorum intersection of last network activity",
           runCheckQuorum},
+         {"verify-checkpoints", "write verified checkpoint ledger hashes",
+          runWriteVerifiedCheckpointHashes},
          {"convert-id", "displays ID in all known forms", runConvertId},
          {"dump-xdr", "dump an XDR file, for debugging", runDumpXDR},
-         {"force-scp",
-          "next time stellar-core is run, SCP will start with "
-          "the local ledger rather than waiting to hear from the "
-          "network",
+         {"force-scp", "deprecated, use --wait-for-consensus option instead",
           runForceSCP},
          {"gen-seed", "generate and print a random node seed", runGenSeed},
          {"http-command", "send a command to local stellar-core",

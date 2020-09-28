@@ -61,7 +61,7 @@ class LedgerManager
         LM_NUM_STATE
     };
 
-    virtual void bootstrap() = 0;
+    virtual void moveToSynced() = 0;
     virtual State getState() const = 0;
     virtual std::string getStateHuman() const = 0;
 
@@ -157,6 +157,8 @@ class LedgerManager
 
     virtual void
     setLastClosedLedger(LedgerHeaderHistoryEntry const& lastClosed) = 0;
+
+    virtual void manuallyAdvanceLedgerHeader(LedgerHeader const& header) = 0;
 
     virtual ~LedgerManager()
     {

@@ -13,6 +13,7 @@
 #include "main/Application.h"
 #include "transactions/SignatureChecker.h"
 #include "transactions/SignatureUtils.h"
+#include "transactions/SponsorshipUtils.h"
 #include "transactions/TransactionUtils.h"
 #include "util/GlobalChecks.h"
 #include "xdrpp/marshal.h"
@@ -143,11 +144,13 @@ FeeBumpTransactionFrame::checkSignature(SignatureChecker& signatureChecker,
 
 bool
 FeeBumpTransactionFrame::checkValid(AbstractLedgerTxn& ltxOuter,
-                                    SequenceNumber current)
+                                    SequenceNumber current,
+                                    uint64_t lowerBoundCloseTimeOffset,
+                                    uint64_t upperBoundCloseTimeOffset)
 {
     LedgerTxn ltx(ltxOuter);
     auto minBaseFee = ltx.loadHeader().current().baseFee;
-    resetResults(ltx.loadHeader().current(), minBaseFee);
+    resetResults(ltx.loadHeader().current(), minBaseFee, false);
 
     SignatureChecker signatureChecker{ltx.loadHeader().current().ledgerVersion,
                                       getContentsHash(),
@@ -163,7 +166,9 @@ FeeBumpTransactionFrame::checkValid(AbstractLedgerTxn& ltxOuter,
         return false;
     }
 
-    bool res = mInnerTx->checkValid(ltx, current, false);
+    bool res =
+        mInnerTx->checkValid(ltx, current, false, lowerBoundCloseTimeOffset,
+                             upperBoundCloseTimeOffset);
     updateResult(getResult(), mInnerTx);
     return res;
 }
@@ -192,6 +197,11 @@ FeeBumpTransactionFrame::commonValidPreSeqNum(AbstractLedgerTxn& ltx)
     auto v2 = bigMultiply(mInnerTx->getFeeBid(), getMinFee(lh));
     if (v1 < v2)
     {
+        if (!bigDivide(getResult().feeCharged, v2, mInnerTx->getMinFee(lh),
+                       Rounding::ROUND_UP))
+        {
+            getResult().feeCharged = INT64_MAX;
+        }
         getResult().result.code(txINSUFFICIENT_FEE);
         return false;
     }
@@ -263,11 +273,18 @@ FeeBumpTransactionFrame::getMinFee(LedgerHeader const& header) const
 }
 
 int64_t
-FeeBumpTransactionFrame::getFee(LedgerHeader const& header,
-                                int64_t baseFee) const
+FeeBumpTransactionFrame::getFee(LedgerHeader const& header, int64_t baseFee,
+                                bool applying) const
 {
     int64_t adjustedFee = baseFee * std::max<int64_t>(1, getNumOperations());
-    return std::min<int64_t>(getFeeBid(), adjustedFee);
+    if (applying)
+    {
+        return std::min<int64_t>(getFeeBid(), adjustedFee);
+    }
+    else
+    {
+        return adjustedFee;
+    }
 }
 
 Hash const&
@@ -352,7 +369,7 @@ void
 FeeBumpTransactionFrame::processFeeSeqNum(AbstractLedgerTxn& ltx,
                                           int64_t baseFee)
 {
-    resetResults(ltx.loadHeader().current(), baseFee);
+    resetResults(ltx.loadHeader().current(), baseFee, true);
 
     auto feeSource = stellar::loadAccount(ltx, getFeeSourceID());
     if (!feeSource)
@@ -374,26 +391,6 @@ FeeBumpTransactionFrame::processFeeSeqNum(AbstractLedgerTxn& ltx,
     }
 }
 
-bool
-FeeBumpTransactionFrame::removeAccountSigner(LedgerTxnHeader const& header,
-                                             LedgerTxnEntry& account,
-                                             SignerKey const& signerKey) const
-{
-    auto& acc = account.current().data.account();
-    auto it = std::find_if(
-        std::begin(acc.signers), std::end(acc.signers),
-        [&signerKey](Signer const& signer) { return signer.key == signerKey; });
-    if (it != std::end(acc.signers))
-    {
-        auto removed = stellar::addNumEntries(header, account, -1);
-        assert(removed == AddSubentryResult::SUCCESS);
-        acc.signers.erase(it);
-        return true;
-    }
-
-    return false;
-}
-
 void
 FeeBumpTransactionFrame::removeOneTimeSignerKeyFromFeeSource(
     AbstractLedgerTxn& ltx) const
@@ -406,22 +403,25 @@ FeeBumpTransactionFrame::removeOneTimeSignerKeyFromFeeSource(
 
     auto header = ltx.loadHeader();
     auto signerKey = SignerKeyUtils::preAuthTxKey(*this);
-    if (removeAccountSigner(header, account, signerKey))
+    auto& signers = account.current().data.account().signers;
+    auto findRes = findSignerByKey(signers.begin(), signers.end(), signerKey);
+    if (findRes.second)
     {
-        normalizeSigners(account);
+        removeSignerWithPossibleSponsorship(ltx, header, findRes.first,
+                                            account);
     }
 }
 
 void
 FeeBumpTransactionFrame::resetResults(LedgerHeader const& header,
-                                      int64_t baseFee)
+                                      int64_t baseFee, bool applying)
 {
-    mInnerTx->resetResults(header, baseFee);
+    mInnerTx->resetResults(header, baseFee, applying);
     mResult.result.code(txFEE_BUMP_INNER_SUCCESS);
 
     // feeCharged is updated accordingly to represent the cost of the
     // transaction regardless of the failure modes.
-    mResult.feeCharged = getFee(header, baseFee);
+    mResult.feeCharged = getFee(header, baseFee, applying);
 }
 
 StellarMessage

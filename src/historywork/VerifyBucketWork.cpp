@@ -79,8 +79,9 @@ VerifyBucketWork::spawnVerifier()
         std::static_pointer_cast<VerifyBucketWork>(shared_from_this()));
     app.postOnBackgroundThread(
         [&app, filename, weak, hash]() {
-            auto hasher = SHA256::create();
+            SHA256 hasher;
             asio::error_code ec;
+            try
             {
                 ZoneNamedN(verifyZone, "bucket verify", true);
                 CLOG(INFO, "History")
@@ -89,13 +90,19 @@ VerifyBucketWork::spawnVerifier()
                 // ensure that the stream gets its own scope to avoid race with
                 // main thread
                 std::ifstream in(filename, std::ifstream::binary);
+                if (!in)
+                {
+                    throw std::runtime_error(
+                        fmt::format("Error opening file {}", filename));
+                }
+                in.exceptions(std::ios::badbit);
                 char buf[4096];
                 while (in)
                 {
                     in.read(buf, sizeof(buf));
-                    hasher->add(ByteSlice(buf, in.gcount()));
+                    hasher.add(ByteSlice(buf, in.gcount()));
                 }
-                uint256 vHash = hasher->finish();
+                uint256 vHash = hasher.finish();
                 if (vHash == hash)
                 {
                     CLOG(DEBUG, "History")
@@ -113,6 +120,12 @@ VerifyBucketWork::spawnVerifier()
                     CLOG(WARNING, "History") << POSSIBLY_CORRUPTED_HISTORY;
                     ec = std::make_error_code(std::errc::io_error);
                 }
+            }
+            catch (std::exception const& e)
+            {
+                CLOG(WARNING, "History")
+                    << "Failed verification : " << e.what();
+                ec = std::make_error_code(std::errc::io_error);
             }
 
             // Not ideal, but needed to prevent race conditions with

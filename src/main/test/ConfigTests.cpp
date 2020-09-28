@@ -2,9 +2,11 @@
 // under the Apache License, Version 2.0. See the COPYING file at the root
 // of this distribution or at http://www.apache.org/licenses/LICENSE-2.0
 
+#include "crypto/SHA.h"
 #include "crypto/SecretKey.h"
 #include "lib/catch.hpp"
 #include "main/Config.h"
+#include "scp/QuorumSetUtils.h"
 #include "test/test.h"
 #include <fmt/format.h>
 
@@ -401,7 +403,7 @@ TEST_CASE("load example configs", "[config]")
 TEST_CASE("nesting level", "[config]")
 {
     auto makePublicKey = [](int i) {
-        auto hash = sha256(std::string{"NODE_SEED_"} + std::to_string(i));
+        auto hash = sha256(fmt::format("NODE_SEED_{}", i));
         auto secretKey = SecretKey::fromSeed(hash);
         return secretKey.getStrKeyPublic();
     };
@@ -416,17 +418,17 @@ VALIDATORS=[
     "{} {}"
 ]
 )";
-    for (int nestingLevel = 0; nestingLevel < 10; nestingLevel++)
+    for (uint32 nestingLevel = 0; nestingLevel < 10; nestingLevel++)
     {
         configNesting += fmt::format(
             quorumSetTemplate, quorumSetNumber, makePublicKey(nestingLevel * 2),
             char('A' + nestingLevel * 2), makePublicKey(nestingLevel * 2 + 1),
             char('A' + nestingLevel * 2 + 1));
-        SECTION(std::string{"nesting level = "} + std::to_string(nestingLevel))
+        SECTION(fmt::format("nesting level = {}", nestingLevel))
         {
             Config c;
             std::stringstream ss(configNesting);
-            if (nestingLevel <= Config::MAXIMUM_QUORUM_NESTING_LEVEL)
+            if (nestingLevel <= MAXIMUM_QUORUM_NESTING_LEVEL)
             {
                 REQUIRE_NOTHROW(c.load(ss));
             }

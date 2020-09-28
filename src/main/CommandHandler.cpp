@@ -81,29 +81,37 @@ CommandHandler::CommandHandler(Application& app) : mApp(app)
         addRoute("maintenance", &CommandHandler::maintenance);
     }
 
-    addRoute("bans", &CommandHandler::bans);
+    if (!mApp.getConfig().RUN_STANDALONE)
+    {
+        addRoute("bans", &CommandHandler::bans);
+        addRoute("connect", &CommandHandler::connect);
+        addRoute("droppeer", &CommandHandler::dropPeer);
+        addRoute("peers", &CommandHandler::peers);
+        addRoute("quorum", &CommandHandler::quorum);
+        addRoute("scp", &CommandHandler::scpInfo);
+        addRoute("stopsurvey", &CommandHandler::stopSurvey);
+#ifndef BUILD_TESTS
+        addRoute("getsurveyresult", &CommandHandler::getSurveyResult);
+        addRoute("surveytopology", &CommandHandler::surveyTopology);
+#endif
+        addRoute("unban", &CommandHandler::unban);
+    }
+
     addRoute("clearmetrics", &CommandHandler::clearMetrics);
-    addRoute("connect", &CommandHandler::connect);
-    addRoute("droppeer", &CommandHandler::dropPeer);
     addRoute("info", &CommandHandler::info);
     addRoute("ll", &CommandHandler::ll);
     addRoute("logrotate", &CommandHandler::logRotate);
     addRoute("manualclose", &CommandHandler::manualClose);
     addRoute("metrics", &CommandHandler::metrics);
-    addRoute("peers", &CommandHandler::peers);
-    addRoute("quorum", &CommandHandler::quorum);
-    addRoute("scp", &CommandHandler::scpInfo);
     addRoute("tx", &CommandHandler::tx);
-    addRoute("unban", &CommandHandler::unban);
     addRoute("upgrades", &CommandHandler::upgrades);
-    addRoute("surveytopology", &CommandHandler::surveyTopology);
-    addRoute("stopsurvey", &CommandHandler::stopSurvey);
-    addRoute("getsurveyresult", &CommandHandler::getSurveyResult);
 
 #ifdef BUILD_TESTS
     addRoute("generateload", &CommandHandler::generateLoad);
     addRoute("testacc", &CommandHandler::testAcc);
     addRoute("testtx", &CommandHandler::testTx);
+    addRoute("getsurveyresult", &CommandHandler::getSurveyResult);
+    addRoute("surveytopology", &CommandHandler::surveyTopology);
 #endif
 }
 
@@ -156,21 +164,6 @@ CommandHandler::fileNotFound(std::string const& params, std::string& retStr)
         "<p>Have fun!</p>";
 }
 
-void
-CommandHandler::manualClose(std::string const& params, std::string& retStr)
-{
-    if (mApp.manualClose())
-    {
-        retStr = "Forcing ledger to close...";
-    }
-    else
-    {
-        retStr =
-            "Set MANUAL_CLOSE=true in the stellar-core.cfg if you want this "
-            "behavior";
-    }
-}
-
 template <typename T>
 optional<T>
 maybeParseParam(std::map<std::string, std::string> const& map,
@@ -208,6 +201,28 @@ parseParam(std::map<std::string, std::string> const& map,
         throw std::runtime_error(errorMsg);
     }
     return val;
+}
+
+void
+CommandHandler::manualClose(std::string const& params, std::string& retStr)
+{
+    ZoneScoped;
+    std::map<std::string, std::string> retMap;
+    http::server::server::parseParams(params, retMap);
+
+    if (!retMap.empty() && !mApp.getConfig().RUN_STANDALONE)
+    {
+        throw std::invalid_argument(
+            "The 'manualclose' command accepts parameters only if the "
+            "configuration includes RUN_STANDALONE=true.");
+    }
+
+    uint32_t ledgerSeq;
+    auto manualLedgerSeq = maybeParseParam(retMap, "ledgerSeq", ledgerSeq);
+    TimePoint closeTime;
+    auto manualCloseTime = maybeParseParam(retMap, "closeTime", closeTime);
+
+    retStr = mApp.manualClose(manualLedgerSeq, manualCloseTime);
 }
 
 void

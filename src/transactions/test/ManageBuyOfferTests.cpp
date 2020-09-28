@@ -6,6 +6,7 @@
 #include "ledger/LedgerTxn.h"
 #include "ledger/LedgerTxnEntry.h"
 #include "ledger/TrustLineWrapper.h"
+#include "lib/catch.hpp"
 #include "main/Application.h"
 #include "main/Config.h"
 #include "test/TestAccount.h"
@@ -359,7 +360,7 @@ TEST_CASE("manage buy offer liabilities", "[tx][offers]")
 
             {
                 LedgerTxn ltx(app->getLedgerTxnRoot());
-                tx->checkValid(ltx, 0);
+                tx->checkValid(ltx, 0, 0, 0);
             }
 
             auto buyOp = std::static_pointer_cast<ManageBuyOfferOpFrame>(

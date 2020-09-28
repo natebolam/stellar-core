@@ -84,6 +84,12 @@ generateLedgerEntryWithSameKey(LedgerEntry const& leBase)
             le.data.trustLine().accountID = leBase.data.trustLine().accountID;
             le.data.trustLine().asset = leBase.data.trustLine().asset;
             break;
+        case CLAIMABLE_BALANCE:
+            le.data.claimableBalance() =
+                LedgerTestUtils::generateValidClaimableBalanceEntry();
+            le.data.claimableBalance().balanceID =
+                leBase.data.claimableBalance().balanceID;
+            break;
         default:
             REQUIRE(false);
         }
@@ -147,9 +153,10 @@ TEST_CASE("LedgerTxn commit into LedgerTxn", "[ledgertxn]")
             REQUIRE(ltx2.create(le1));
             ltx2.commit();
 
-            validate(
-                ltx1,
-                {{key, {std::make_shared<LedgerEntry const>(le1), nullptr}}});
+            validate(ltx1,
+                     {{key,
+                       {std::make_shared<GeneralizedLedgerEntry const>(le1),
+                        nullptr}}});
         }
 
         SECTION("loaded in child")
@@ -161,9 +168,10 @@ TEST_CASE("LedgerTxn commit into LedgerTxn", "[ledgertxn]")
             REQUIRE(ltx2.load(key));
             ltx2.commit();
 
-            validate(
-                ltx1,
-                {{key, {std::make_shared<LedgerEntry const>(le1), nullptr}}});
+            validate(ltx1,
+                     {{key,
+                       {std::make_shared<GeneralizedLedgerEntry const>(le1),
+                        nullptr}}});
         }
 
         SECTION("modified in child")
@@ -177,9 +185,10 @@ TEST_CASE("LedgerTxn commit into LedgerTxn", "[ledgertxn]")
             ltxe1.current() = le2;
             ltx2.commit();
 
-            validate(
-                ltx1,
-                {{key, {std::make_shared<LedgerEntry const>(le2), nullptr}}});
+            validate(ltx1,
+                     {{key,
+                       {std::make_shared<GeneralizedLedgerEntry const>(le2),
+                        nullptr}}});
         }
 
         SECTION("erased in child")
@@ -231,9 +240,10 @@ TEST_CASE("LedgerTxn rollback into LedgerTxn", "[ledgertxn]")
                 REQUIRE(ltx2.load(key));
                 ltx2.rollback();
 
-                validate(ltx1, {{key,
-                                 {std::make_shared<LedgerEntry const>(le1),
-                                  nullptr}}});
+                validate(ltx1,
+                         {{key,
+                           {std::make_shared<GeneralizedLedgerEntry const>(le1),
+                            nullptr}}});
             }
 
             SECTION("modified in child")
@@ -247,9 +257,10 @@ TEST_CASE("LedgerTxn rollback into LedgerTxn", "[ledgertxn]")
                 ltxe1.current() = le2;
                 ltx2.rollback();
 
-                validate(ltx1, {{key,
-                                 {std::make_shared<LedgerEntry const>(le1),
-                                  nullptr}}});
+                validate(ltx1,
+                         {{key,
+                           {std::make_shared<GeneralizedLedgerEntry const>(le1),
+                            nullptr}}});
             }
 
             SECTION("erased in child")
@@ -261,9 +272,10 @@ TEST_CASE("LedgerTxn rollback into LedgerTxn", "[ledgertxn]")
                 REQUIRE_NOTHROW(ltx2.erase(key));
                 ltx2.rollback();
 
-                validate(ltx1, {{key,
-                                 {std::make_shared<LedgerEntry const>(le1),
-                                  nullptr}}});
+                validate(ltx1,
+                         {{key,
+                           {std::make_shared<GeneralizedLedgerEntry const>(le1),
+                            nullptr}}});
             }
         }
     };
@@ -527,8 +539,9 @@ TEST_CASE("LedgerTxn create", "[ledgertxn]")
     {
         LedgerTxn ltx1(app->getLedgerTxnRoot());
         REQUIRE(ltx1.create(le));
-        validate(ltx1,
-                 {{key, {std::make_shared<LedgerEntry const>(le), nullptr}}});
+        validate(ltx1, {{key,
+                         {std::make_shared<GeneralizedLedgerEntry const>(le),
+                          nullptr}}});
     }
 
     SECTION("when key exists in self or parent")
@@ -552,8 +565,9 @@ TEST_CASE("LedgerTxn create", "[ledgertxn]")
 
         LedgerTxn ltx3(ltx2);
         REQUIRE(ltx3.create(le));
-        validate(ltx3,
-                 {{key, {std::make_shared<LedgerEntry const>(le), nullptr}}});
+        validate(ltx3, {{key,
+                         {std::make_shared<GeneralizedLedgerEntry const>(le),
+                          nullptr}}});
     }
 }
 
@@ -588,9 +602,10 @@ TEST_CASE("LedgerTxn createOrUpdateWithoutLoading", "[ledgertxn]")
         {
             LedgerTxn ltx1(app->getLedgerTxnRoot());
             REQUIRE_NOTHROW(ltx1.createOrUpdateWithoutLoading(le));
-            validate(
-                ltx1,
-                {{key, {std::make_shared<LedgerEntry const>(le), nullptr}}});
+            validate(ltx1,
+                     {{key,
+                       {std::make_shared<GeneralizedLedgerEntry const>(le),
+                        nullptr}}});
         }
 
         SECTION("when key exists in self or parent")
@@ -601,9 +616,10 @@ TEST_CASE("LedgerTxn createOrUpdateWithoutLoading", "[ledgertxn]")
 
             LedgerTxn ltx2(ltx1);
             REQUIRE_NOTHROW(ltx2.createOrUpdateWithoutLoading(le));
-            validate(ltx2, {{key,
-                             {std::make_shared<LedgerEntry const>(le),
-                              std::make_shared<LedgerEntry const>(le)}}});
+            validate(ltx2,
+                     {{key,
+                       {std::make_shared<GeneralizedLedgerEntry const>(le),
+                        std::make_shared<GeneralizedLedgerEntry const>(le)}}});
         }
 
         SECTION("when key is active during overwrite")
@@ -625,9 +641,10 @@ TEST_CASE("LedgerTxn createOrUpdateWithoutLoading", "[ledgertxn]")
 
             LedgerTxn ltx3(ltx2);
             REQUIRE_NOTHROW(ltx3.createOrUpdateWithoutLoading(le));
-            validate(
-                ltx3,
-                {{key, {std::make_shared<LedgerEntry const>(le), nullptr}}});
+            validate(ltx3,
+                     {{key,
+                       {std::make_shared<GeneralizedLedgerEntry const>(le),
+                        nullptr}}});
         }
     };
 
@@ -686,9 +703,10 @@ TEST_CASE("LedgerTxn erase", "[ledgertxn]")
 
             LedgerTxn ltx2(ltx1);
             REQUIRE_NOTHROW(ltx2.erase(key));
-            validate(
-                ltx2,
-                {{key, {nullptr, std::make_shared<LedgerEntry const>(le)}}});
+            validate(ltx2,
+                     {{key,
+                       {nullptr,
+                        std::make_shared<GeneralizedLedgerEntry const>(le)}}});
         }
 
         SECTION("when key exists in grandparent, erased in parent")
@@ -1294,9 +1312,10 @@ TEST_CASE("LedgerTxn load", "[ledgertxn]")
 
             LedgerTxn ltx2(ltx1);
             REQUIRE(ltx2.load(key));
-            validate(ltx2, {{key,
-                             {std::make_shared<LedgerEntry const>(le),
-                              std::make_shared<LedgerEntry const>(le)}}});
+            validate(ltx2,
+                     {{key,
+                       {std::make_shared<GeneralizedLedgerEntry const>(le),
+                        std::make_shared<GeneralizedLedgerEntry const>(le)}}});
         }
 
         SECTION("when key exists in grandparent, erased in parent")
@@ -3349,12 +3368,7 @@ TEST_CASE("LedgerTxn bulk-load offers", "[ledgertxn]")
             ltx.commit();
         }
 
-        for_versions({12}, *app, [&]() {
-            app->getLedgerTxnRoot().prefetch({lk1, lk2});
-            LedgerTxn ltx(app->getLedgerTxnRoot());
-            REQUIRE(!ltx.load(lk1));
-        });
-        for_versions_from(13, *app, [&]() {
+        for_all_versions(*app, [&]() {
             app->getLedgerTxnRoot().prefetch({lk1, lk2});
             LedgerTxn ltx(app->getLedgerTxnRoot());
             REQUIRE(ltx.load(lk1));
@@ -3372,4 +3386,47 @@ TEST_CASE("LedgerTxn bulk-load offers", "[ledgertxn]")
         runTest(Config::TESTDB_POSTGRESQL);
     }
 #endif
+}
+
+TEST_CASE("LedgerTxn generalized ledger entries", "[ledgertxn]")
+{
+    VirtualClock clock;
+    auto app = createTestApplication(clock, getTestConfig());
+    app->start();
+
+    GeneralizedLedgerEntry gle(GeneralizedLedgerEntryType::SPONSORSHIP);
+    gle.sponsorshipEntry().sponsoredID = autocheck::generator<AccountID>()(5);
+    gle.sponsorshipEntry().sponsoringID = autocheck::generator<AccountID>()(5);
+
+    SECTION("create then load")
+    {
+        LedgerTxn ltx(app->getLedgerTxnRoot());
+        REQUIRE(ltx.create(gle));
+        REQUIRE(ltx.load(gle.toKey()));
+    }
+
+    SECTION("create then commit then load")
+    {
+        LedgerTxn ltx1(app->getLedgerTxnRoot());
+        {
+            LedgerTxn ltx2(ltx1);
+            REQUIRE(ltx2.create(gle));
+            ltx2.commit();
+        }
+        REQUIRE(ltx1.load(gle.toKey()));
+    }
+
+    SECTION("create then commit then load in child")
+    {
+        LedgerTxn ltx1(app->getLedgerTxnRoot());
+        {
+            LedgerTxn ltx2(ltx1);
+            REQUIRE(ltx2.create(gle));
+            ltx2.commit();
+        }
+        {
+            LedgerTxn ltx2(ltx1);
+            REQUIRE(ltx2.load(gle.toKey()));
+        }
+    }
 }

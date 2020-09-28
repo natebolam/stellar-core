@@ -7,7 +7,6 @@
 #include "crypto/SecretKey.h"
 #include "herder/LedgerCloseData.h"
 #include "overlay/StellarXDR.h"
-#include "test/TestPrinter.h"
 #include "util/optional.h"
 
 namespace stellar
@@ -17,6 +16,7 @@ class ConstLedgerTxnEntry;
 class TransactionFrame;
 class OperationFrame;
 class TxSetFrame;
+class TestAccount;
 
 namespace txtest
 {
@@ -122,6 +122,11 @@ Operation payment(PublicKey const& to, int64_t amount);
 
 Operation payment(PublicKey const& to, Asset const& asset, int64_t amount);
 
+Operation createClaimableBalance(Asset const& asset, int64_t amount,
+                                 xdr::xvector<Claimant, 10> const& claimants);
+
+Operation claimClaimableBalance(ClaimableBalanceID const& balanceID);
+
 TransactionFramePtr createPaymentTx(Application& app, SecretKey const& from,
                                     PublicKey const& to, SequenceNumber seq,
                                     int64_t amount);
@@ -180,6 +185,11 @@ SetOptionsArguments clearFlags(uint32_t clearFlags);
 SetOptionsArguments setInflationDestination(AccountID inflationDest);
 SetOptionsArguments setHomeDomain(std::string const& homeDomain);
 
+Operation sponsorFutureReserves(PublicKey const& sponsoredID);
+Operation confirmAndClearSponsor();
+Operation updateSponsorship(LedgerKey const& key);
+Operation updateSponsorship(AccountID const& accID, SignerKey const& key);
+
 Asset makeNativeAsset();
 Asset makeInvalidAsset();
 Asset makeAsset(SecretKey const& issuer, std::string const& code);
@@ -194,5 +204,9 @@ void checkTx(int index, TxSetResultMeta& r, TransactionResultCode expected);
 void checkTx(int index, TxSetResultMeta& r, TransactionResultCode expected,
              OperationResultCode code);
 
+TransactionFrameBasePtr
+transactionFrameFromOps(Hash const& networkID, TestAccount& source,
+                        std::vector<Operation> const& ops,
+                        std::vector<SecretKey> const& opKeys);
 } // end txtest namespace
 }

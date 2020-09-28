@@ -26,6 +26,7 @@
 #include "transactions/SignatureUtils.h"
 #include "transactions/TransactionBridge.h"
 #include "transactions/TransactionUtils.h"
+#include "transactions/test/SponsorshipTestUtils.h"
 #include "util/Logging.h"
 #include "util/Timer.h"
 
@@ -467,7 +468,7 @@ TEST_CASE("txenvelope", "[tx][envelope]")
                             setup();
                             {
                                 LedgerTxn ltx(app->getLedgerTxnRoot());
-                                REQUIRE(!tx->checkValid(ltx, 0));
+                                REQUIRE(!tx->checkValid(ltx, 0, 0, 0));
                             }
                             REQUIRE(tx->getResultCode() == txBAD_SEQ);
                             REQUIRE(getAccountSigners(a1, *app).size() == 1);
@@ -597,7 +598,6 @@ TEST_CASE("txenvelope", "[tx][envelope]")
                         closeLedgerOn(*app, 2, 1, 1, 2016);
 
                         auto runTest = [&](bool txAccountMissing) {
-
                             // Create merge tx
                             auto txMerge = b1.tx({accountMerge(a1)});
 
@@ -1024,6 +1024,119 @@ TEST_CASE("txenvelope", "[tx][envelope]")
                         });
                     }
 
+                    SECTION("success complex sponsored signatures + " +
+                            alternative.name)
+                    {
+                        for_versions_from(14, *app, [&] {
+                            auto a2 = root.create("A2", paymentAmount);
+
+                            TransactionFramePtr tx;
+                            tx = a1.tx({payment(root, 1000)});
+                            getSignatures(tx).clear();
+                            tx->addSignature(s1);
+
+                            SignerKey sk = alternative.createSigner(*tx);
+                            Signer sk1(sk, 5); // below low rights
+
+                            // add two more signers. We want to sandwich the
+                            // signer that will be removed (sk1), so we can
+                            // verify how signerSponsoringIDs changes
+                            Signer signer1 = makeSigner(getAccount("1"), 5);
+                            Signer signer2(SignerKeyUtils::hashXKey("5"), 5);
+
+                            REQUIRE(signer1.key < sk);
+                            REQUIRE(sk < signer2.key);
+
+                            // sk1 is sponsored by a2, while signer1 and signer2
+                            // are sponsored by root
+                            auto insideSignerTx = transactionFrameFromOps(
+                                app->getNetworkID(), a2,
+                                {a2.op(sponsorFutureReserves(a1)),
+                                 a1.op(setOptions(setSigner(sk1))),
+                                 a1.op(confirmAndClearSponsor())},
+                                {a1});
+                            {
+                                LedgerTxn ltx(app->getLedgerTxnRoot());
+                                TransactionMeta txm(2);
+                                REQUIRE(
+                                    insideSignerTx->checkValid(ltx, 0, 0, 0));
+                                REQUIRE(insideSignerTx->apply(*app, ltx, txm));
+                                REQUIRE(insideSignerTx->getResultCode() ==
+                                        txSUCCESS);
+                                ltx.commit();
+                            }
+
+                            auto outsideSignerTx = transactionFrameFromOps(
+                                app->getNetworkID(), root,
+                                {root.op(sponsorFutureReserves(a1)),
+                                 a1.op(setOptions(setSigner(signer1))),
+                                 a1.op(setOptions(setSigner(signer2))),
+                                 a1.op(confirmAndClearSponsor())},
+                                {a1});
+                            {
+                                LedgerTxn ltx(app->getLedgerTxnRoot());
+                                TransactionMeta txm(2);
+                                REQUIRE(
+                                    outsideSignerTx->checkValid(ltx, 0, 0, 0));
+                                REQUIRE(outsideSignerTx->apply(*app, ltx, txm));
+                                REQUIRE(outsideSignerTx->getResultCode() ==
+                                        txSUCCESS);
+                                ltx.commit();
+                            }
+
+                            {
+                                LedgerTxn ltx(app->getLedgerTxnRoot());
+                                checkSponsorship(ltx, a1.getPublicKey(),
+                                                 signer1.key, 2,
+                                                 &root.getPublicKey());
+                                checkSponsorship(ltx, a1.getPublicKey(),
+                                                 signer2.key, 2,
+                                                 &root.getPublicKey());
+                                checkSponsorship(ltx, a1.getPublicKey(), sk, 2,
+                                                 &a2.getPublicKey());
+
+                                checkSponsorship(ltx, root.getPublicKey(), 0,
+                                                 nullptr, 0, 2, 2, 0);
+                                checkSponsorship(ltx, a2.getPublicKey(), 0,
+                                                 nullptr, 0, 2, 1, 0);
+                            }
+
+                            REQUIRE(getAccountSigners(a1, *app).size() == 4);
+                            alternative.sign(*tx);
+
+                            applyTx(tx, *app);
+                            REQUIRE(tx->getResultCode() == txSUCCESS);
+                            REQUIRE(PaymentOpFrame::getInnerCode(getFirstResult(
+                                        *tx)) == PAYMENT_SUCCESS);
+                            REQUIRE(getAccountSigners(a1, *app).size() ==
+                                    (alternative.autoRemove ? 3 : 4));
+
+                            if (alternative.autoRemove)
+                            {
+                                LedgerTxn ltx(app->getLedgerTxnRoot());
+                                checkSponsorship(ltx, root.getPublicKey(), 0,
+                                                 nullptr, 0, 2, 2, 0);
+                                checkSponsorship(ltx, a2.getPublicKey(), 0,
+                                                 nullptr, 0, 2, 0, 0);
+
+                                auto ltxe = stellar::loadAccount(ltx, a1);
+                                auto const& a1Entry =
+                                    ltxe.current().data.account();
+                                auto const& sponsoringIDs =
+                                    a1Entry.ext.v1()
+                                        .ext.v2()
+                                        .signerSponsoringIDs;
+
+                                REQUIRE(sponsoringIDs.size() == 3);
+                                REQUIRE(!sponsoringIDs[0]);
+                                REQUIRE((sponsoringIDs[1] && sponsoringIDs[2]));
+                                REQUIRE(*sponsoringIDs[1] ==
+                                        root.getPublicKey());
+                                REQUIRE(*sponsoringIDs[1] == *sponsoringIDs[2]);
+                            }
+                        });
+                    }
+
                     SECTION("success signature + " + alternative.name)
                     {
                         TransactionFramePtr tx;
@@ -1185,7 +1298,7 @@ TEST_CASE("txenvelope", "[tx][envelope]")
 
                 {
                     LedgerTxn ltx(app->getLedgerTxnRoot());
-                    REQUIRE(!tx->checkValid(ltx, 0));
+                    REQUIRE(!tx->checkValid(ltx, 0, 0, 0));
                 }
 
                 applyCheck(tx, *app);
@@ -1209,7 +1322,7 @@ TEST_CASE("txenvelope", "[tx][envelope]")
 
                         {
                             LedgerTxn ltx(app->getLedgerTxnRoot());
-                            REQUIRE(!tx->checkValid(ltx, 0));
+                            REQUIRE(!tx->checkValid(ltx, 0, 0, 0));
                         }
                         applyCheck(tx, *app);
                         REQUIRE(tx->getResultCode() == txFAILED);
@@ -1223,7 +1336,7 @@ TEST_CASE("txenvelope", "[tx][envelope]")
 
                         {
                             LedgerTxn ltx(app->getLedgerTxnRoot());
-                            REQUIRE(tx->checkValid(ltx, 0));
+                            REQUIRE(tx->checkValid(ltx, 0, 0, 0));
                         }
                         applyCheck(tx, *app);
                         REQUIRE(tx->getResultCode() == txSUCCESS);
@@ -1240,7 +1353,7 @@ TEST_CASE("txenvelope", "[tx][envelope]")
 
                         {
                             LedgerTxn ltx(app->getLedgerTxnRoot());
-                            REQUIRE(tx->checkValid(ltx, 0));
+                            REQUIRE(tx->checkValid(ltx, 0, 0, 0));
                         }
                         applyCheck(tx, *app);
                         REQUIRE(tx->getResultCode() == txSUCCESS);
@@ -1265,7 +1378,7 @@ TEST_CASE("txenvelope", "[tx][envelope]")
 
                         {
                             LedgerTxn ltx(app->getLedgerTxnRoot());
-                            REQUIRE(!tx->checkValid(ltx, 0));
+                            REQUIRE(!tx->checkValid(ltx, 0, 0, 0));
                         }
 
                         applyCheck(tx, *app);
@@ -1292,7 +1405,7 @@ TEST_CASE("txenvelope", "[tx][envelope]")
 
                         {
                             LedgerTxn ltx(app->getLedgerTxnRoot());
-                            REQUIRE(tx->checkValid(ltx, 0));
+                            REQUIRE(tx->checkValid(ltx, 0, 0, 0));
                         }
 
                         applyCheck(tx, *app);
@@ -1318,7 +1431,7 @@ TEST_CASE("txenvelope", "[tx][envelope]")
 
                         {
                             LedgerTxn ltx(app->getLedgerTxnRoot());
-                            REQUIRE(tx->checkValid(ltx, 0));
+                            REQUIRE(tx->checkValid(ltx, 0, 0, 0));
                         }
 
                         applyCheck(tx, *app);
@@ -1399,6 +1512,9 @@ TEST_CASE("txenvelope", "[tx][envelope]")
                     applyCheck(txFrame, *app);
 
                     REQUIRE(txFrame->getResultCode() == txINSUFFICIENT_FEE);
+                    // during apply, feeCharged is smaller in this case
+                    REQUIRE(txFrame->getResult().feeCharged ==
+                            app->getLedgerManager().getLastTxFee() - 1);
                 });
             }
 
@@ -1408,7 +1524,7 @@ TEST_CASE("txenvelope", "[tx][envelope]")
                     setup();
                     {
                         LedgerTxn ltx(app->getLedgerTxnRoot());
-                        REQUIRE(!txFrame->checkValid(ltx, 0));
+                        REQUIRE(!txFrame->checkValid(ltx, 0, 0, 0));
                     }
                     REQUIRE(txFrame->getResultCode() == txBAD_SEQ);
                 });
@@ -1469,6 +1585,136 @@ TEST_CASE("txenvelope", "[tx][envelope]")
                         applyCheck(txFrame, *app);
                         REQUIRE(txFrame->getResultCode() == txTOO_LATE);
                     }
+
+                    SECTION("lower bound offset")
+                    {
+                        txFrame = root.tx(
+                            {payment(a1.getPublicKey(), paymentAmount)});
+
+                        setMaxTime(txFrame, 0);
+
+                        closeLedgerOn(*app, 3, 1, 1, 2020);
+
+                        auto const lastClose = app->getLedgerManager()
+                                                   .getLastClosedLedgerHeader()
+                                                   .header.scpValue.closeTime;
+                        TimePoint const nextOffset = 2;
+                        auto const nextClose = lastClose + nextOffset;
+
+                        auto testOneMinTimeLowerBoundCombination =
+                            [&](TimePoint const minTime,
+                                TimePoint const lowerBound,
+                                bool const expectSuccess) {
+                                setMinTime(txFrame, minTime);
+                                {
+                                    LedgerTxn ltx(app->getLedgerTxnRoot());
+                                    REQUIRE(txFrame->checkValid(
+                                                ltx, 0, lowerBound, 0) ==
+                                            expectSuccess);
+                                }
+                                REQUIRE(
+                                    txFrame->getResultCode() ==
+                                    (expectSuccess ? txSUCCESS : txTOO_EARLY));
+                            };
+
+                        SECTION("too early despite offset")
+                        {
+                            testOneMinTimeLowerBoundCombination(
+                                nextClose + 1, nextOffset, false);
+                        }
+
+                        SECTION("definitely too early without offset")
+                        {
+                            testOneMinTimeLowerBoundCombination(nextClose + 1,
+                                                                0, false);
+                        }
+
+                        SECTION("not too early because of offset")
+                        {
+                            testOneMinTimeLowerBoundCombination(
+                                nextClose, nextOffset, true);
+                        }
+
+                        SECTION("would have been too early without offset")
+                        {
+                            testOneMinTimeLowerBoundCombination(nextClose, 0,
+                                                                false);
+                        }
+
+                        SECTION("not too early even without offset")
+                        {
+                            testOneMinTimeLowerBoundCombination(lastClose, 0,
+                                                                true);
+                        }
+
+                        SECTION("definitely not too early with offset")
+                        {
+                            testOneMinTimeLowerBoundCombination(
+                                lastClose, nextOffset, true);
+                        }
+                    }
+
+                    SECTION("upper bound offset")
+                    {
+                        txFrame = root.tx(
+                            {payment(a1.getPublicKey(), paymentAmount)});
+
+                        setMinTime(txFrame, 1000);
+
+                        closeLedgerOn(*app, 3, 3, 7, 2014);
+
+                        auto closeTime = app->getLedgerManager()
+                                             .getLastClosedLedgerHeader()
+                                             .header.scpValue.closeTime;
+
+                        auto offsetTest = [&](bool pushTime) {
+                            if (pushTime)
+                            {
+                                // move clock past close time
+                                clock.setCurrentVirtualTime(
+                                    VirtualClock::from_time_t(closeTime + 5));
+                            }
+
+                            auto offset =
+                                getUpperBoundCloseTimeOffset(*app, closeTime);
+                            auto upperBoundCloseTime = closeTime + offset;
+
+                            SECTION("success")
+                            {
+                                setMaxTime(txFrame, upperBoundCloseTime);
+
+                                {
+                                    LedgerTxn ltx(app->getLedgerTxnRoot());
+                                    REQUIRE(
+                                        txFrame->checkValid(ltx, 0, 0, offset));
+                                }
+
+                                REQUIRE(txFrame->getResultCode() == txSUCCESS);
+                            }
+
+                            SECTION("too late")
+                            {
+                                setMaxTime(txFrame, upperBoundCloseTime - 1);
+
+                                {
+                                    LedgerTxn ltx(app->getLedgerTxnRoot());
+                                    REQUIRE(!txFrame->checkValid(ltx, 0, 0,
+                                                                 offset));
+                                }
+
+                                REQUIRE(txFrame->getResultCode() == txTOO_LATE);
+                            }
+                        };
+
+                        SECTION("current time behind closeTime")
+                        {
+                            offsetTest(true);
+                        }
+                        SECTION("current time past closeTime")
+                        {
+                            offsetTest(false);
+                        }
+                    }
                 });
             }
 
@@ -1481,7 +1727,7 @@ TEST_CASE("txenvelope", "[tx][envelope]")
                     setSeqNum(txFrame, txFrame->getSeqNum() - 1);
                     {
                         LedgerTxn ltx(app->getLedgerTxnRoot());
-                        REQUIRE(!txFrame->checkValid(ltx, 0));
+                        REQUIRE(!txFrame->checkValid(ltx, 0, 0, 0));
                     }
 
                     REQUIRE(txFrame->getResultCode() == txBAD_SEQ);

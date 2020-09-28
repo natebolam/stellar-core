@@ -108,7 +108,9 @@ void
 HistoryArchiveState::save(std::string const& outFile) const
 {
     ZoneScoped;
-    std::ofstream out(outFile);
+    std::ofstream out;
+    out.exceptions(std::ios::failbit | std::ios::badbit);
+    out.open(outFile);
     cereal::JSONOutputArchive ar(out);
     serialize(ar);
 }
@@ -133,6 +135,11 @@ HistoryArchiveState::load(std::string const& inFile)
 {
     ZoneScoped;
     std::ifstream in(inFile);
+    if (!in)
+    {
+        throw std::runtime_error(fmt::format("Error opening file {}", inFile));
+    }
+    in.exceptions(std::ios::badbit);
     cereal::JSONInputArchive ar(in);
     serialize(ar);
     if (version != HISTORY_ARCHIVE_STATE_VERSION)
@@ -203,15 +210,15 @@ HistoryArchiveState::getBucketListHash() const
     // relatively-different representations. Everything will explode if there is
     // any difference in these algorithms anyways, so..
 
-    auto totalHash = SHA256::create();
+    SHA256 totalHash;
     for (auto const& level : currentBuckets)
     {
-        auto levelHash = SHA256::create();
-        levelHash->add(hexToBin(level.curr));
-        levelHash->add(hexToBin(level.snap));
-        totalHash->add(levelHash->finish());
+        SHA256 levelHash;
+        levelHash.add(hexToBin(level.curr));
+        levelHash.add(hexToBin(level.snap));
+        totalHash.add(levelHash.finish());
     }
-    return totalHash->finish();
+    return totalHash.finish();
 }
 
 std::vector<std::string>
@@ -366,8 +373,11 @@ HistoryArchiveState::HistoryArchiveState() : server(STELLAR_CORE_VERSION)
 }
 
 HistoryArchiveState::HistoryArchiveState(uint32_t ledgerSeq,
-                                         BucketList const& buckets)
-    : server(STELLAR_CORE_VERSION), currentLedger(ledgerSeq)
+                                         BucketList const& buckets,
+                                         std::string const& passphrase)
+    : server(STELLAR_CORE_VERSION)
+    , networkPassphrase(passphrase)
+    , currentLedger(ledgerSeq)
 {
     for (uint32_t i = 0; i < BucketList::kNumLevels; ++i)
     {

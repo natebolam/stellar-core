@@ -7,6 +7,7 @@
 #include "transactions/OperationFrame.h"
 #include "transactions/TransactionBridge.h"
 #include "transactions/TransactionUtils.h"
+#include "transactions/simulation/TxSimCreateClaimableBalanceOpFrame.h"
 #include "transactions/simulation/TxSimCreatePassiveSellOfferOpFrame.h"
 #include "transactions/simulation/TxSimManageBuyOfferOpFrame.h"
 #include "transactions/simulation/TxSimManageSellOfferOpFrame.h"
@@ -53,19 +54,26 @@ TxSimTransactionFrame::makeOperation(Operation const& op, OperationResult& res,
     case CREATE_PASSIVE_SELL_OFFER:
         return std::make_shared<TxSimCreatePassiveSellOfferOpFrame>(
             op, res, *this, resultFromArchive, mCount);
+    case CREATE_CLAIMABLE_BALANCE:
+        return std::make_shared<TxSimCreateClaimableBalanceOpFrame>(
+            op, res, *this, static_cast<uint32_t>(index), resultFromArchive,
+            mCount);
     default:
-        return OperationFrame::makeHelper(op, res, *this);
+        return OperationFrame::makeHelper(op, res, *this,
+                                          static_cast<uint32_t>(index));
     }
 }
 
 bool
-TxSimTransactionFrame::isTooEarly(LedgerTxnHeader const& header) const
+TxSimTransactionFrame::isTooEarly(LedgerTxnHeader const& header,
+                                  uint64_t lowerBoundCloseTimeOffset) const
 {
     return mSimulationResult.result.code() == txTOO_EARLY;
 }
 
 bool
-TxSimTransactionFrame::isTooLate(LedgerTxnHeader const& header) const
+TxSimTransactionFrame::isTooLate(LedgerTxnHeader const& header,
+                                 uint64_t upperBoundCloseTimeOffset) const
 {
     return mSimulationResult.result.code() == txTOO_LATE;
 }
@@ -77,7 +85,8 @@ TxSimTransactionFrame::isBadSeq(int64_t seqNum) const
 }
 
 int64_t
-TxSimTransactionFrame::getFee(LedgerHeader const& header, int64_t baseFee) const
+TxSimTransactionFrame::getFee(LedgerHeader const& header, int64_t baseFee,
+                              bool applying) const
 {
     return mSimulationResult.feeCharged;
 }
@@ -88,7 +97,7 @@ TxSimTransactionFrame::processFeeSeqNum(AbstractLedgerTxn& ltx, int64_t baseFee)
     mCachedAccount.reset();
 
     auto header = ltx.loadHeader();
-    resetResults(header.current(), baseFee);
+    resetResults(header.current(), baseFee, true);
 
     auto sourceAccount = loadSourceAccount(ltx, header);
     if (!sourceAccount)

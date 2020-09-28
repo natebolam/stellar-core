@@ -182,7 +182,9 @@ struct BucketListGenerator
                 auto b = out.getBucket(bmApply);
             }
         }
-        return HistoryArchiveState(mLedgerSeq, blGenerate);
+        return HistoryArchiveState(
+            mLedgerSeq, blGenerate,
+            mAppGenerate->getConfig().NETWORK_PASSPHRASE);
     }
 };
 
@@ -416,6 +418,17 @@ class ApplyBucketsWorkModifyEntry : public ApplyBucketsWork
         entry.data.data().dataName = data.dataName;
     }
 
+    void
+    modifyClaimableBalanceEntry(LedgerEntry& entry)
+    {
+        ClaimableBalanceEntry const& cb = mEntry.data.claimableBalance();
+        entry.lastModifiedLedgerSeq = mEntry.lastModifiedLedgerSeq;
+        entry.data.claimableBalance() =
+            LedgerTestUtils::generateValidClaimableBalanceEntry(5);
+
+        entry.data.claimableBalance().balanceID = cb.balanceID;
+    }
+
   public:
     ApplyBucketsWorkModifyEntry(
         Application& app,
@@ -451,6 +464,9 @@ class ApplyBucketsWorkModifyEntry : public ApplyBucketsWork
                     break;
                 case DATA:
                     modifyDataEntry(entry.current());
+                    break;
+                case CLAIMABLE_BALANCE:
+                    modifyClaimableBalanceEntry(entry.current());
                     break;
                 default:
                     REQUIRE(false);

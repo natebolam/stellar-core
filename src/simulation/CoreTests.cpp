@@ -152,7 +152,7 @@ resilienceTest(Simulation::pointer sim)
         targetLedger += step;
         sim->crankUntil(
             [&]() { return sim->haveAllExternalized(targetLedger, maxGap); },
-            2 * nbLedgerStep * Herder::EXP_LEDGER_TIMESPAN_SECONDS, false);
+            5 * nbLedgerStep * Herder::EXP_LEDGER_TIMESPAN_SECONDS, false);
 
         REQUIRE(sim->haveAllExternalized(targetLedger, maxGap));
     };
@@ -212,7 +212,7 @@ resilienceTest(Simulation::pointer sim)
         }
     }
 }
-TEST_CASE("resilience tests", "[resilience][simulation][acceptance]")
+TEST_CASE("resilience tests", "[resilience][simulation][!hide]")
 {
     Simulation::Mode mode = Simulation::OVER_LOOPBACK;
 
@@ -440,8 +440,9 @@ class ScaleReporter
         : mColumns(columns)
         , mFilename(fmt::format("{:s}-{:d}.csv", join(columns, "-vs-"),
                                 std::time(nullptr)))
-        , mOut(mFilename)
     {
+        mOut.exceptions(std::ios::failbit | std::ios::badbit);
+        mOut.open(mFilename);
         LOG(INFO) << "Opened " << mFilename << " for writing";
         mOut << join(columns, ",") << std::endl;
     }

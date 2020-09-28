@@ -17,6 +17,7 @@
 #include "main/Maintainer.h"
 #include "main/PersistentState.h"
 #include "main/StellarCoreVersion.h"
+#include "overlay/OverlayManager.h"
 #include "util/Logging.h"
 #include "work/WorkScheduler.h"
 
@@ -27,8 +28,10 @@ namespace stellar
 {
 
 int
-runWithConfig(Config cfg)
+runWithConfig(Config cfg, optional<CatchupConfiguration> cc)
 {
+    VirtualClock::Mode clockMode = VirtualClock::REAL_TIME;
+
     if (cfg.MANUAL_CLOSE)
     {
         if (!cfg.NODE_IS_VALIDATOR)
@@ -37,20 +40,27 @@ runWithConfig(Config cfg)
                           "NODE_IS_VALIDATOR to be set";
             return 1;
         }
-
-        // in manual close mode, we set FORCE_SCP
-        // so that the node starts fully in sync
-        // (this is to avoid to force scp all the time when testing)
-        cfg.FORCE_SCP = true;
-    }
-
-    if (cfg.NODE_IS_VALIDATOR && cfg.DATABASE.value == "sqlite3://:memory:")
-    {
-        cfg.FORCE_SCP = true;
+        if (cfg.RUN_STANDALONE)
+        {
+            clockMode = VirtualClock::VIRTUAL_TIME;
+            if (cfg.AUTOMATIC_MAINTENANCE_COUNT != 0 ||
+                cfg.AUTOMATIC_MAINTENANCE_PERIOD.count() != 0)
+            {
+                LOG(WARNING)
+                    << "Using MANUAL_CLOSE and RUN_STANDALONE together "
+                       "induces virtual time, which requires automatic "
+                       "maintenance to be disabled.  "
+                       "AUTOMATIC_MAINTENANCE_COUNT and "
+                       "AUTOMATIC_MAINTENANCE_PERIOD are being overridden to "
+                       "0.";
+                cfg.AUTOMATIC_MAINTENANCE_COUNT = 0;
+                cfg.AUTOMATIC_MAINTENANCE_PERIOD = std::chrono::seconds{0};
+            }
+        }
     }
 
     LOG(INFO) << "Starting stellar-core " << STELLAR_CORE_VERSION;
-    VirtualClock clock(VirtualClock::REAL_TIME);
+    VirtualClock clock(clockMode);
     Application::pointer app;
     try
     {
@@ -66,7 +76,27 @@ runWithConfig(Config cfg)
                          << "(for testing only)";
         }
 
-        app->start();
+        if (cc)
+        {
+            Json::Value catchupInfo;
+            std::shared_ptr<HistoryArchive> archive;
+            auto const& ham = app->getHistoryArchiveManager();
+            archive = ham.selectRandomReadableHistoryArchive();
+            int res = catchup(app, *cc, catchupInfo, archive);
+            if (res != 0)
+            {
+                return res;
+            }
+        }
+        else
+        {
+            app->start();
+        }
+
+        if (!cfg.MODE_AUTO_STARTS_OVERLAY)
+        {
+            app->getOverlayManager().start();
+        }
 
         app->applyCfgCommands();
     }
@@ -142,33 +172,12 @@ httpCommand(std::string const& command, unsigned short port)
 }
 
 void
-setForceSCPFlag(Config cfg, bool set)
+setForceSCPFlag()
 {
-    VirtualClock clock;
-    cfg.setNoListen();
-    Application::pointer app = Application::create(clock, cfg, false);
-
-    app->getPersistentState().setState(PersistentState::kForceSCPOnNextLaunch,
-                                       (set ? "true" : "false"));
-    if (set)
-    {
-        LOG(INFO) << "* ";
-        LOG(INFO) << "* The `force scp` flag has been set in the db.";
-        LOG(INFO) << "* ";
-        LOG(INFO)
-            << "* The next launch will start scp from the account balances";
-        LOG(INFO) << "* as they stand in the db now, without waiting to "
-                     "hear from";
-        LOG(INFO) << "* the network.";
-        LOG(INFO) << "* ";
-    }
-    else
-    {
-        LOG(INFO) << "* ";
-        LOG(INFO) << "* The `force scp` flag has been cleared.";
-        LOG(INFO) << "* The next launch will start normally.";
-        LOG(INFO) << "* ";
-    }
+    LOG(WARNING) << "* ";
+    LOG(WARNING) << "* Nothing to do: `force scp` command has been deprecated";
+    LOG(WARNING) << "* Refer to `--wait-for-consensus` run option instead";
+    LOG(WARNING) << "* ";
 }
 
 void
@@ -350,6 +359,7 @@ writeCatchupInfo(Json::Value const& catchupInfo, std::string const& outputFile)
     else
     {
         std::ofstream out{};
+        out.exceptions(std::ios::failbit | std::ios::badbit);
         out.open(filename);
         out.write(content.c_str(), content.size());
         out.close();

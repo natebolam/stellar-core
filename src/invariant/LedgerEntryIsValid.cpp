@@ -53,38 +53,36 @@ LedgerEntryIsValid::checkOnOperationApply(Operation const& operation,
         if (!entryDelta.second.current)
             continue;
 
-        auto s = checkIsValid(*entryDelta.second.current, currLedgerSeq, ver);
+        auto s = checkIsValid(*entryDelta.second.current,
+                              entryDelta.second.previous, currLedgerSeq, ver);
         if (!s.empty())
         {
-            s += ": ";
-            s += xdr::xdr_to_string(*entryDelta.second.current);
+            s += ": " + entryDelta.second.current->toString();
             return s;
         }
     }
     return {};
 }
 
-template <typename IterType>
 std::string
-LedgerEntryIsValid::check(IterType iter, IterType const& end,
-                          uint32_t ledgerSeq, uint32 version) const
+LedgerEntryIsValid::checkIsValid(
+    GeneralizedLedgerEntry const& le,
+    std::shared_ptr<GeneralizedLedgerEntry const> const& genPrevious,
+    uint32_t ledgerSeq, uint32 version) const
 {
-    for (; iter != end; ++iter)
+    if (le.type() == GeneralizedLedgerEntryType::LEDGER_ENTRY)
     {
-        auto s = checkIsValid(iter->current->mEntry, ledgerSeq, version);
-        if (!s.empty())
-        {
-            s += ": ";
-            s += xdr::xdr_to_string(iter->current->mEntry);
-            return s;
-        }
+        auto const* previous =
+            genPrevious ? &genPrevious->ledgerEntry() : nullptr;
+        return checkIsValid(le.ledgerEntry(), previous, ledgerSeq, version);
     }
-    return {};
+    return "";
 }
 
 std::string
-LedgerEntryIsValid::checkIsValid(LedgerEntry const& le, uint32_t ledgerSeq,
-                                 uint32 version) const
+LedgerEntryIsValid::checkIsValid(LedgerEntry const& le,
+                                 LedgerEntry const* previous,
+                                 uint32_t ledgerSeq, uint32 version) const
 {
     if (le.lastModifiedLedgerSeq != ledgerSeq)
     {
@@ -92,6 +90,7 @@ LedgerEntryIsValid::checkIsValid(LedgerEntry const& le, uint32_t ledgerSeq,
                            " equal LedgerHeader ledgerSeq ({})",
                            le.lastModifiedLedgerSeq, ledgerSeq);
     }
+
     switch (le.data.type())
     {
     case ACCOUNT:
@@ -102,6 +101,8 @@ LedgerEntryIsValid::checkIsValid(LedgerEntry const& le, uint32_t ledgerSeq,
         return checkIsValid(le.data.offer(), version);
     case DATA:
         return checkIsValid(le.data.data(), version);
+    case CLAIMABLE_BALANCE:
+        return checkIsValid(le, previous, version);
     default:
         return "LedgerEntry has invalid type";
     }
@@ -168,7 +169,7 @@ LedgerEntryIsValid::checkIsValid(TrustLineEntry const& tl, uint32 version) const
     }
     if (tl.limit <= 0)
     {
-        return fmt::format("TrustLine balance ({}) is not positive", tl.limit);
+        return fmt::format("TrustLine limit ({}) is not positive", tl.limit);
     }
     if (tl.balance > tl.limit)
     {
@@ -224,6 +225,105 @@ LedgerEntryIsValid::checkIsValid(DataEntry const& de, uint32 version) const
     {
         return "Data dataName is invalid";
     }
+    return {};
+}
+
+bool
+LedgerEntryIsValid::validatePredicate(ClaimPredicate const& pred,
+                                      uint32_t depth) const
+{
+    if (depth > 4)
+    {
+        return false;
+    }
+
+    switch (pred.type())
+    {
+    case CLAIM_PREDICATE_UNCONDITIONAL:
+        break;
+    case CLAIM_PREDICATE_AND:
+    {
+        auto const& andPredicates = pred.andPredicates();
+        if (andPredicates.size() != 2)
+        {
+            return false;
+        }
+        return validatePredicate(andPredicates[0], depth + 1) &&
+               validatePredicate(andPredicates[1], depth + 1);
+    }
+
+    case CLAIM_PREDICATE_OR:
+    {
+        auto const& orPredicates = pred.orPredicates();
+        if (orPredicates.size() != 2)
+        {
+            return false;
+        }
+        return validatePredicate(orPredicates[0], depth + 1) &&
+               validatePredicate(orPredicates[1], depth + 1);
+    }
+    case CLAIM_PREDICATE_NOT:
+    {
+        if (!pred.notPredicate())
+        {
+            return false;
+        }
+        return validatePredicate(*pred.notPredicate(), depth + 1);
+    }
+
+    case CLAIM_PREDICATE_BEFORE_ABSOLUTE_TIME:
+        return pred.absBefore() >= 0;
+    default:
+        return false;
+    }
+
+    return true;
+}
+
+std::string
+LedgerEntryIsValid::checkIsValid(LedgerEntry const& le,
+                                 LedgerEntry const* previous,
+                                 uint32 version) const
+{
+    if (le.ext.v() != 1 || !le.ext.v1().sponsoringID)
+    {
+        return "ClaimableBalance is not sponsored";
+    }
+
+    auto const& cbe = le.data.claimableBalance();
+
+    if (previous)
+    {
+        assert(previous->data.type() == CLAIMABLE_BALANCE);
+        auto const& previousCbe = previous->data.claimableBalance();
+
+        if (!(cbe == previousCbe))
+        {
+            return "ClaimableBalance cannot be modified";
+        }
+    }
+
+    if (cbe.claimants.empty())
+    {
+        return "ClaimableBalance claimants is empty";
+    }
+    if (!isAssetValid(cbe.asset))
+    {
+        return "ClaimableBalance asset is invalid";
+    }
+    if (cbe.amount <= 0)
+    {
+        return "ClaimableBalance amount is not positive";
+    }
+
+    for (auto const& claimant : cbe.claimants)
+    {
+        if (!validatePredicate(claimant.v0().predicate, 1))
+        {
+            return "ClaimableBalance claimant is invalid";
+        }
+    }
+
     return {};
 }
 }

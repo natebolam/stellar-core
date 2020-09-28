@@ -36,10 +36,8 @@ getCoinsAboveReserve(std::vector<LedgerEntry> const& entries, Application& app)
     return std::accumulate(
         entries.begin(), entries.end(), static_cast<int64_t>(0),
         [&app](int64_t lhs, LedgerEntry const& rhs) {
-            auto& lm = app.getLedgerManager();
             auto& account = rhs.data.account();
-            return lhs + account.balance -
-                   lm.getLastMinBalance(account.numSubEntries);
+            return lhs + account.balance - getMinBalance(app, account);
         });
 }
 
@@ -53,8 +51,7 @@ updateBalances(std::vector<LedgerEntry> entries, Application& app,
     for (auto iter = entries.begin(); iter != entries.end(); ++iter)
     {
         auto& account = iter->data.account();
-        auto minBalance =
-            app.getLedgerManager().getLastMinBalance(account.numSubEntries);
+        auto minBalance = getMinBalance(app, account);
         pool -= account.balance - minBalance;
 
         int64_t delta = 0;
