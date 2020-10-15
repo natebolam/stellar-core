@@ -1192,8 +1192,10 @@ void
 Config::validateConfig(ValidationThresholdLevels thresholdLevel)
 {
     std::set<NodeID> nodes;
-    LocalNode::forAllNodes(QUORUM_SET,
-                           [&](NodeID const& n) { nodes.insert(n); });
+    LocalNode::forAllNodes(QUORUM_SET, [&](NodeID const& n) {
+        nodes.insert(n);
+        return true;
+    });
 
     if (nodes.empty())
     {
@@ -1258,12 +1260,10 @@ Config::validateConfig(ValidationThresholdLevels thresholdLevel)
         throw;
     }
 
-    if (!isQuorumSetSane(QUORUM_SET, !UNSAFE_QUORUM))
+    const char* errString = nullptr;
+    if (!isQuorumSetSane(QUORUM_SET, !UNSAFE_QUORUM, errString))
     {
-        LOG(FATAL) << fmt::format("Invalid QUORUM_SET: check nesting, "
-                                  "duplicate entries and thresholds (must be "
-                                  "between {} and 100)",
-                                  UNSAFE_QUORUM ? 1 : 51);
+        LOG(FATAL) << fmt::format("Invalid QUORUM_SET: {}", errString);
         throw std::invalid_argument("Invalid QUORUM_SET");
     }
 }

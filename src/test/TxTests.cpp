@@ -122,10 +122,15 @@ applyCheck(TransactionFramePtr tx, Application& app, bool checkSeqNum)
     TransactionResult checkResult;
     TransactionResultCode code;
     AccountEntry srcAccountBefore;
+
+    auto checkedTx = TransactionFrameBase::makeTransactionFromWire(
+        app.getNetworkID(), tx->getEnvelope());
+    bool checkedTxApplyRes = false;
     {
         LedgerTxn ltxFeeProc(ltx);
-        check = tx->checkValid(ltxFeeProc, 0, 0, 0);
-        checkResult = tx->getResult();
+        // use checkedTx here for validity check as to keep tx untouched
+        check = checkedTx->checkValid(ltxFeeProc, 0, 0, 0);
+        checkResult = checkedTx->getResult();
         REQUIRE((!check || checkResult.result.code() == txSUCCESS));
 
         // now, check what happens when simulating what happens during a ledger
@@ -135,6 +140,28 @@ applyCheck(TransactionFramePtr tx, Application& app, bool checkSeqNum)
         // the same way)
         // * a valid tx can fail later
         code = checkResult.result.code();
+
+        // compute the same changes in parallel on checkedTx
+        {
+            LedgerTxn ltxCleanTx(ltxFeeProc);
+            auto baseFee = ltxCleanTx.loadHeader().current().baseFee;
+            if (code != txNO_ACCOUNT)
+            {
+                checkedTx->processFeeSeqNum(ltxCleanTx, baseFee);
+            }
+            // else, leave feeCharged as per checkValid
+            try
+            {
+                TransactionMeta cleanTm(2);
+                checkedTxApplyRes = checkedTx->apply(app, ltxCleanTx, cleanTm);
+            }
+            catch (...)
+            {
+                checkedTx->getResult().result.code(txINTERNAL_ERROR);
+            }
+            // do not commit this one
+        }
+
         if (code != txNO_ACCOUNT)
         {
             srcAccountBefore = loadAccount(ltxFeeProc, tx->getSourceID(), true)
@@ -150,6 +177,8 @@ applyCheck(TransactionFramePtr tx, Application& app, bool checkSeqNum)
             {
                 REQUIRE(checkResult.feeCharged >= tx->getResult().feeCharged);
             }
+            // this is to ignore potential changes in feeCharged
+            // as `checkValid` returns an estimate
             checkResult.feeCharged = tx->getResult().feeCharged;
 
             // verify that the fee got processed
@@ -178,6 +207,12 @@ applyCheck(TransactionFramePtr tx, Application& app, bool checkSeqNum)
             }
             REQUIRE(currAcc == prevAcc);
         }
+        else
+        {
+            // this basically makes it that we ignore that field when we
+            // don't have an account
+            tx->getResult().feeCharged = checkResult.feeCharged;
+        }
         ltxFeeProc.commit();
     }
 
@@ -193,6 +228,12 @@ applyCheck(TransactionFramePtr tx, Application& app, bool checkSeqNum)
         {
             tx->getResult().result.code(txINTERNAL_ERROR);
         }
+
+        // check that both tx and cleanTx behave the same
+        REQUIRE(res == checkedTxApplyRes);
+        REQUIRE(tx->getEnvelope() == checkedTx->getEnvelope());
+        REQUIRE(tx->getResult() == checkedTx->getResult());
+
         REQUIRE((!res || tx->getResultCode() == txSUCCESS));
 
         if (!res || tx->getResultCode() != txSUCCESS)
@@ -321,12 +362,15 @@ validateTxResults(TransactionFramePtr const& tx, Application& app,
                   TransactionResult const& applyResult)
 {
     auto shouldValidateOk = validationResult.code == txSUCCESS;
+
+    auto checkedTx = TransactionFrameBase::makeTransactionFromWire(
+        app.getNetworkID(), tx->getEnvelope());
     {
         LedgerTxn ltx(app.getLedgerTxnRoot());
-        REQUIRE(tx->checkValid(ltx, 0, 0, 0) == shouldValidateOk);
+        REQUIRE(checkedTx->checkValid(ltx, 0, 0, 0) == shouldValidateOk);
     }
-    REQUIRE(tx->getResult().result.code() == validationResult.code);
-    REQUIRE(tx->getResult().feeCharged == validationResult.fee);
+    REQUIRE(checkedTx->getResult().result.code() == validationResult.code);
+    REQUIRE(checkedTx->getResult().feeCharged == validationResult.fee);
 
     // do not try to apply if checkValid returned false
     if (!shouldValidateOk)
@@ -352,7 +396,15 @@ validateTxResults(TransactionFramePtr const& tx, Application& app,
 
 TxSetResultMeta
 closeLedgerOn(Application& app, uint32 ledgerSeq, int day, int month, int year,
-              std::vector<TransactionFrameBasePtr> const& txs)
+              std::vector<TransactionFrameBasePtr> const& txs, bool skipValid)
+{
+    return closeLedgerOn(app, ledgerSeq, getTestDate(day, month, year), txs,
+                         skipValid);
+}
+
+TxSetResultMeta
+closeLedgerOn(Application& app, uint32 ledgerSeq, time_t closeTime,
+              std::vector<TransactionFrameBasePtr> const& txs, bool skipValid)
 {
     auto txSet = std::make_shared<TxSetFrame>(
         app.getLedgerManager().getLastClosedLedgerHeader().hash);
@@ -363,10 +415,13 @@ closeLedgerOn(Application& app, uint32 ledgerSeq, int day, int month, int year,
     }
 
     txSet->sortForHash();
-    REQUIRE(txSet->checkValid(app, 0, 0));
+    if (!skipValid)
+    {
+        REQUIRE(txSet->checkValid(app, 0, 0));
+    }
 
-    StellarValue sv(txSet->getContentsHash(), getTestDate(day, month, year),
-                    emptyUpgradeSteps, STELLAR_VALUE_BASIC);
+    StellarValue sv(txSet->getContentsHash(), closeTime, emptyUpgradeSteps,
+                    STELLAR_VALUE_BASIC);
     LedgerCloseData ledgerData(ledgerSeq, txSet, sv);
     app.getLedgerManager().closeLedger(ledgerData);
 
@@ -1100,7 +1155,7 @@ claimClaimableBalance(ClaimableBalanceID const& balanceID)
 }
 
 Operation
-sponsorFutureReserves(PublicKey const& sponsoredID)
+beginSponsoringFutureReserves(PublicKey const& sponsoredID)
 {
     Operation op;
     op.body.type(BEGIN_SPONSORING_FUTURE_RESERVES);
@@ -1109,7 +1164,7 @@ sponsorFutureReserves(PublicKey const& sponsoredID)
 }
 
 Operation
-confirmAndClearSponsor()
+endSponsoringFutureReserves()
 {
     Operation op;
     op.body.type(END_SPONSORING_FUTURE_RESERVES);
@@ -1117,7 +1172,7 @@ confirmAndClearSponsor()
 }
 
 Operation
-updateSponsorship(LedgerKey const& key)
+revokeSponsorship(LedgerKey const& key)
 {
     Operation op;
     op.body.type(REVOKE_SPONSORSHIP);
@@ -1127,7 +1182,7 @@ updateSponsorship(LedgerKey const& key)
 }
 
 Operation
-updateSponsorship(AccountID const& accID, SignerKey const& key)
+revokeSponsorship(AccountID const& accID, SignerKey const& key)
 {
     Operation op;
     op.body.type(REVOKE_SPONSORSHIP);

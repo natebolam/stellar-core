@@ -112,6 +112,9 @@ class HerderSCPDriver : public SCPDriver
                     std::chrono::milliseconds timeout,
                     std::function<void()> cb) override;
 
+    // hashing support
+    Hash getHashOf(std::vector<xdr::opaque_vec<>> const& vals) const override;
+
     // core SCP
     ValueWrapperPtr
     combineCandidates(uint64_t slotIndex,
@@ -168,6 +171,11 @@ class HerderSCPDriver : public SCPDriver
 
     Json::Value getQsetLagInfo(bool summary, bool fullKeys);
 
+    void reportCostOutliersForSlot(int64_t slotIndex, bool updateMetrics);
+
+    Json::Value getJsonValidatorCost(bool summary, bool fullKeys,
+                                     uint64 index) const;
+
   private:
     Application& mApp;
     HerderImpl& mHerder;
@@ -195,6 +203,9 @@ class HerderSCPDriver : public SCPDriver
         // Timers tracking externalize messages
         medida::Timer& mExternalizeLag;
         medida::Timer& mExternalizeDelay;
+
+        // Tracked cost per slot
+        medida::Histogram& mCostPerSlot;
 
         SCPMetrics(Application& app);
     };

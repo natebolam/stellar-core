@@ -242,10 +242,13 @@ bool
 BallotProtocol::isStatementSane(SCPStatement const& st, bool self)
 {
     auto qSet = mSlot.getQuorumSetFromStatement(st);
-    bool res = qSet != nullptr && isQuorumSetSane(*qSet, false);
+    const char* errString = nullptr;
+    bool res = qSet != nullptr && isQuorumSetSane(*qSet, false, errString);
     if (!res)
     {
-        CLOG(DEBUG, "SCP") << "Invalid quorum set received";
+        CLOG(DEBUG, "SCP") << "Invalid quorum set received : "
+                           << (errString ? errString : "<empty>");
+
         return false;
     }
 
@@ -2120,6 +2123,7 @@ BallotProtocol::getJsonQuorumInfo(NodeID const& id, bool summary, bool fullKeys)
                 n_disagree++;
             }
         }
+        return true;
     });
     if (summary)
     {

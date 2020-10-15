@@ -37,6 +37,7 @@
 #include "xdrpp/marshal.h"
 #include <Tracy.hpp>
 
+#include <algorithm>
 #include <ctime>
 #include <fmt/format.h>
 
@@ -249,6 +250,12 @@ HerderImpl::valueExternalized(uint64 slotIndex, StellarValue const& value)
         auto minSlotToRemember = getMinLedgerSeqToRemember();
         if (minSlotToRemember > LedgerManager::GENESIS_LEDGER_SEQ)
         {
+            // report any outliers for the most recent slot to purge
+            if (mLedgerManager.isSynced())
+            {
+                getHerderSCPDriver().reportCostOutliersForSlot(
+                    minSlotToRemember - 1, true);
+            }
             getHerderSCPDriver().purgeSlots(minSlotToRemember);
             mPendingEnvelopes.eraseBelow(minSlotToRemember);
         }
@@ -470,7 +477,7 @@ HerderImpl::checkCloseTime(SCPEnvelope const& envelope, bool enforceRecent)
 }
 
 uint32_t
-HerderImpl::getMinLedgerSeqToRemember()
+HerderImpl::getMinLedgerSeqToRemember() const
 {
     auto maxSlotsToRemember = mApp.getConfig().MAX_SLOTS_TO_REMEMBER;
     auto currSlot = getCurrentLedgerSeq();
@@ -892,6 +899,34 @@ HerderImpl::getCurrentLedgerSeq() const
     return res;
 }
 
+uint32
+HerderImpl::getMinLedgerSeqToAskPeers() const
+{
+    // computes the smallest ledger for which we *think* we need more SCP
+    // messages
+    // we ask for messages older than lcl in case they have SCP
+    // messages needed by other peers
+    auto low = mApp.getLedgerManager().getLastClosedLedgerNum() + 1;
+
+    auto maxSlots = std::min<uint32>(mApp.getConfig().MAX_SLOTS_TO_REMEMBER,
+                                     SCP_EXTRA_LOOKBACK_LEDGERS);
+
+    if (low > maxSlots)
+    {
+        low -= maxSlots;
+    }
+    else
+    {
+        low = LedgerManager::GENESIS_LEDGER_SEQ;
+    }
+
+    // do not ask for slots we'd be dropping anyways
+    auto herderLow = getMinLedgerSeqToRemember();
+    low = std::max<uint32>(low, herderLow);
+
+    return low;
+}
+
 SequenceNumber
 HerderImpl::getMaxSeqInPendingTxs(AccountID const& acc)
 {
@@ -1198,16 +1233,20 @@ HerderImpl::getJsonQuorumInfo(NodeID const& id, bool summary, bool fullKeys,
     Json::Value ret;
     ret["node"] = mApp.getConfig().toStrKey(id, fullKeys);
     ret["qset"] = getSCP().getJsonQuorumInfo(id, summary, fullKeys, index);
+
     bool isSelf = id == mApp.getConfig().NODE_SEED.getPublicKey();
     if (isSelf)
     {
-        ret["qset"]["lag_ms"] =
-            getHerderSCPDriver().getQsetLagInfo(summary, fullKeys);
         if (mLastQuorumMapIntersectionState.hasAnyResults())
         {
             ret["transitive"] =
                 getJsonTransitiveQuorumIntersectionInfo(fullKeys);
         }
+
+        ret["qset"]["lag_ms"] =
+            getHerderSCPDriver().getQsetLagInfo(summary, fullKeys);
+        ret["qset"]["cost"] =
+            mHerderSCPDriver.getJsonValidatorCost(summary, fullKeys, index);
     }
     return ret;
 }
@@ -1255,7 +1294,7 @@ HerderImpl::getJsonTransitiveQuorumInfo(NodeID const& rootID, bool summary,
             std::string status;
             if (it != q.end())
             {
-                auto qSet = it->second;
+                auto qSet = it->second.mQuorumSet;
                 if (qSet)
                 {
                     if (!summary)
@@ -1269,6 +1308,7 @@ HerderImpl::getJsonTransitiveQuorumInfo(NodeID const& rootID, bool summary,
                         {
                             next.emplace_back(n);
                         }
+                        return true;
                     });
                 }
                 auto latest = getSCP().getLatestMessage(id);
@@ -1347,13 +1387,14 @@ getQmapHash(QuorumTracker::QuorumMap const& qmap)
 {
     ZoneScoped;
     SHA256 hasher;
-    std::map<NodeID, SCPQuorumSetPtr> ordered_map(qmap.begin(), qmap.end());
+    std::map<NodeID, QuorumTracker::NodeInfo> ordered_map(qmap.begin(),
+                                                          qmap.end());
     for (auto const& pair : ordered_map)
     {
         hasher.add(xdr::xdr_to_opaque(pair.first));
-        if (pair.second)
+        if (pair.second.mQuorumSet)
         {
-            hasher.add(xdr::xdr_to_opaque(*pair.second));
+            hasher.add(xdr::xdr_to_opaque(*(pair.second.mQuorumSet)));
         }
         else
         {
@@ -1705,6 +1746,13 @@ HerderImpl::herderOutOfSync()
     mSCPMetrics.mLostSync.Mark();
     mHerderSCPDriver.lostSync();
 
+    auto trackingData = mHerderSCPDriver.lastTrackingSCP();
+    if (trackingData)
+    {
+        mHerderSCPDriver.reportCostOutliersForSlot(
+            trackingData->mConsensusIndex, false);
+    }
+
     getMoreSCPState();
 
     processSCPQueue();
@@ -1715,16 +1763,8 @@ HerderImpl::getMoreSCPState()
 {
     ZoneScoped;
     int const NB_PEERS_TO_ASK = 2;
-    auto low = mApp.getLedgerManager().getLastClosedLedgerNum() + 1;
-    auto maxSlotsToRemember = mApp.getConfig().MAX_SLOTS_TO_REMEMBER;
-    if (low > maxSlotsToRemember)
-    {
-        low -= maxSlotsToRemember;
-    }
-    else
-    {
-        low = 1;
-    }
+
+    auto low = getMinLedgerSeqToAskPeers();
 
     // ask a few random peers their SCP messages
     auto r = mApp.getOverlayManager().getRandomAuthenticatedPeers();

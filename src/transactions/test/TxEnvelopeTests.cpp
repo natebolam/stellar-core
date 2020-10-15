@@ -408,7 +408,7 @@ TEST_CASE("txenvelope", "[tx][envelope]")
         {
             std::string name;
             bool autoRemove;
-            std::function<SignerKey(TransactionFrame const&)> createSigner;
+            std::function<SignerKey(TransactionFrame&)> createSigner;
             std::function<void(TransactionFrame&)> sign;
         };
 
@@ -419,17 +419,17 @@ TEST_CASE("txenvelope", "[tx][envelope]")
                                       0,   0,   'G', 'H', 'I', 'J', 'K', 'L'};
         auto alternatives = std::vector<AltSignature>{
             AltSignature{"hash tx", true,
-                         [](TransactionFrame const& tx) {
+                         [](TransactionFrame& tx) {
+                             tx.clearCached();
                              return SignerKeyUtils::preAuthTxKey(tx);
                          },
                          [](TransactionFrame&) {}},
-            AltSignature{"hash x", false,
-                         [x](TransactionFrame const&) {
-                             return SignerKeyUtils::hashXKey(x);
-                         },
-                         [x](TransactionFrame& tx) {
-                             tx.addSignature(SignatureUtils::signHashX(x));
-                         }}};
+            AltSignature{
+                "hash x", false,
+                [x](TransactionFrame&) { return SignerKeyUtils::hashXKey(x); },
+                [x](TransactionFrame& tx) {
+                    tx.addSignature(SignatureUtils::signHashX(x));
+                }}};
 
         for (auto const& alternative : alternatives)
         {
@@ -990,10 +990,10 @@ TEST_CASE("txenvelope", "[tx][envelope]")
                             tx = a1.tx({root.op(payment(a1, 100))});
                             getSignatures(tx).clear();
 
+                            setSeqNum(tx, tx->getSeqNum() + 1);
                             // add signer twice.
                             tx->addSignature(s1);
                             tx->addSignature(s1);
-                            setSeqNum(tx, tx->getSeqNum() + 1);
                             a1.setSequenceNumber(a1.getLastSequenceNumber() -
                                                  1);
 
@@ -1051,9 +1051,9 @@ TEST_CASE("txenvelope", "[tx][envelope]")
                             // are sponsored by root
                             auto insideSignerTx = transactionFrameFromOps(
                                 app->getNetworkID(), a2,
-                                {a2.op(sponsorFutureReserves(a1)),
+                                {a2.op(beginSponsoringFutureReserves(a1)),
                                  a1.op(setOptions(setSigner(sk1))),
-                                 a1.op(confirmAndClearSponsor())},
+                                 a1.op(endSponsoringFutureReserves())},
                                 {a1});
                             {
                                 LedgerTxn ltx(app->getLedgerTxnRoot());
@@ -1068,10 +1068,10 @@ TEST_CASE("txenvelope", "[tx][envelope]")
 
                             auto outsideSignerTx = transactionFrameFromOps(
                                 app->getNetworkID(), root,
-                                {root.op(sponsorFutureReserves(a1)),
+                                {root.op(beginSponsoringFutureReserves(a1)),
                                  a1.op(setOptions(setSigner(signer1))),
                                  a1.op(setOptions(setSigner(signer2))),
-                                 a1.op(confirmAndClearSponsor())},
+                                 a1.op(endSponsoringFutureReserves())},
                                 {a1});
                             {
                                 LedgerTxn ltx(app->getLedgerTxnRoot());
@@ -1143,8 +1143,8 @@ TEST_CASE("txenvelope", "[tx][envelope]")
                         auto setup = [&]() {
                             tx = a1.tx({payment(root, 1000)});
                             getSignatures(tx).clear();
-                            tx->addSignature(s1);
                             setSeqNum(tx, tx->getSeqNum() + 1);
+                            tx->addSignature(s1);
                             a1.setSequenceNumber(a1.getLastSequenceNumber() -
                                                  1);
 
@@ -1268,8 +1268,9 @@ TEST_CASE("txenvelope", "[tx][envelope]")
             for_versions_from(3, *app, [&] {
                 auto tx = a1.tx({payment(root, 1000)});
                 getSignatures(tx).clear();
-                tx->addSignature(s1);
+
                 setSeqNum(tx, tx->getSeqNum() + 1);
+                tx->addSignature(s1);
                 a1.setSequenceNumber(a1.getLastSequenceNumber() - 1);
 
                 SignerKey sk = SignerKeyUtils::hashXKey(x);
@@ -1556,7 +1557,7 @@ TEST_CASE("txenvelope", "[tx][envelope]")
                         setMinTime(txFrame, start + 1000);
                         setMaxTime(txFrame, start + 10000);
 
-                        closeLedgerOn(*app, 3, 1, 7, 2014);
+                        closeLedgerOn(*app, 3, start + 1);
                         applyCheck(txFrame, *app);
 
                         REQUIRE(txFrame->getResultCode() == txTOO_EARLY);
@@ -1568,8 +1569,10 @@ TEST_CASE("txenvelope", "[tx][envelope]")
                             {payment(a1.getPublicKey(), paymentAmount)});
                         setMinTime(txFrame, 1000);
                         setMaxTime(txFrame, start + 300000);
+                        getSignatures(txFrame).clear();
+                        txFrame->addSignature(root);
 
-                        closeLedgerOn(*app, 3, 2, 7, 2014);
+                        closeLedgerOn(*app, 3, start + 1);
                         applyCheck(txFrame, *app);
                         REQUIRE(txFrame->getResultCode() == txSUCCESS);
                     }
@@ -1581,7 +1584,7 @@ TEST_CASE("txenvelope", "[tx][envelope]")
                         setMinTime(txFrame, 1000);
                         setMaxTime(txFrame, start);
 
-                        closeLedgerOn(*app, 3, 3, 7, 2014);
+                        closeLedgerOn(*app, 3, start + 1);
                         applyCheck(txFrame, *app);
                         REQUIRE(txFrame->getResultCode() == txTOO_LATE);
                     }
@@ -1593,11 +1596,9 @@ TEST_CASE("txenvelope", "[tx][envelope]")
 
                         setMaxTime(txFrame, 0);
 
-                        closeLedgerOn(*app, 3, 1, 1, 2020);
+                        TimePoint lastClose = getTestDate(1, 1, 2020);
+                        closeLedgerOn(*app, 3, lastClose);
 
-                        auto const lastClose = app->getLedgerManager()
-                                                   .getLastClosedLedgerHeader()
-                                                   .header.scpValue.closeTime;
                         TimePoint const nextOffset = 2;
                         auto const nextClose = lastClose + nextOffset;
 
@@ -1606,6 +1607,8 @@ TEST_CASE("txenvelope", "[tx][envelope]")
                                 TimePoint const lowerBound,
                                 bool const expectSuccess) {
                                 setMinTime(txFrame, minTime);
+                                getSignatures(txFrame).clear();
+                                txFrame->addSignature(root);
                                 {
                                     LedgerTxn ltx(app->getLedgerTxnRoot());
                                     REQUIRE(txFrame->checkValid(
@@ -1660,6 +1663,8 @@ TEST_CASE("txenvelope", "[tx][envelope]")
                             {payment(a1.getPublicKey(), paymentAmount)});
 
                         setMinTime(txFrame, 1000);
+                        getSignatures(txFrame).clear();
+                        txFrame->addSignature(root);
 
                         closeLedgerOn(*app, 3, 3, 7, 2014);
 
@@ -1682,6 +1687,8 @@ TEST_CASE("txenvelope", "[tx][envelope]")
                             SECTION("success")
                             {
                                 setMaxTime(txFrame, upperBoundCloseTime);
+                                getSignatures(txFrame).clear();
+                                txFrame->addSignature(root);
 
                                 {
                                     LedgerTxn ltx(app->getLedgerTxnRoot());
@@ -1933,32 +1940,76 @@ TEST_CASE("txenvelope", "[tx][envelope]")
             });
         }
 
-        SECTION("remove signer, do something")
+        SECTION("reduce auth, do something")
         {
-            a.setOptions(setSigner(makeSigner(b, 1)) | setMasterWeight(1) |
-                         setLowThreshold(2) | setMedThreshold(2) |
-                         setHighThreshold(2));
+            a.setOptions(setSigner(makeSigner(b, 2)) | setMasterWeight(3) |
+                         setLowThreshold(1) | setMedThreshold(3) |
+                         setHighThreshold(5));
 
-            for_versions({1, 2, 3, 4, 5, 6, 8, 9}, *app, [&] {
-                auto tx = a.tx({setOptions(setSigner(makeSigner(b, 0))),
-                                setOptions(setHomeDomain("stellar.org"))});
-                tx->addSignature(b);
+            SECTION("single tx")
+            {
+                SECTION("valid")
+                {
+                    for_versions({1, 2, 3, 4, 5, 6, 8, 9}, *app, [&] {
+                        auto tx =
+                            a.tx({setOptions(setSigner(makeSigner(b, 1))),
+                                  setOptions(setSigner(makeSigner(b, 2)))});
+                        tx->addSignature(b);
 
-                validateTxResults(
-                    tx, *app, {baseFee * 2, txSUCCESS},
-                    expectedResult(baseFee * 2, 2, txFAILED,
-                                   {SET_OPTIONS_SUCCESS, opBAD_AUTH}));
-            });
-            for_versions_from({7, 10}, *app, [&] {
-                auto tx = a.tx({setOptions(setSigner(makeSigner(b, 0))),
-                                setOptions(setHomeDomain("stellar.org"))});
-                tx->addSignature(b);
+                        validateTxResults(
+                            tx, *app, {baseFee * 2, txSUCCESS},
+                            expectedResult(baseFee * 2, 2, txFAILED,
+                                           {SET_OPTIONS_SUCCESS, opBAD_AUTH}));
+                    });
+                    for_versions_from({7, 10}, *app, [&] {
+                        auto tx =
+                            a.tx({setOptions(setSigner(makeSigner(b, 1))),
+                                  setOptions(setSigner(makeSigner(b, 2)))});
+                        tx->addSignature(b);
 
-                validateTxResults(
-                    tx, *app, {baseFee * 2, txSUCCESS},
-                    expectedResult(baseFee * 2, 2, txSUCCESS,
-                                   {SET_OPTIONS_SUCCESS, SET_OPTIONS_SUCCESS}));
-            });
+                        validateTxResults(
+                            tx, *app, {baseFee * 2, txSUCCESS},
+                            expectedResult(
+                                baseFee * 2, 2, txSUCCESS,
+                                {SET_OPTIONS_SUCCESS, SET_OPTIONS_SUCCESS}));
+                    });
+                }
+                SECTION("missing signature")
+                {
+                    for_versions_from(10, *app, [&] {
+                        auto tx =
+                            a.tx({payment(root, 1000),
+                                  setOptions(setSigner(makeSigner(b, 2)))});
+                        // missing b signature
+                        applyCheck(tx, *app);
+                        REQUIRE(tx->getResultCode() == txFAILED);
+                        REQUIRE(PaymentOpFrame::getInnerCode(
+                                    getFirstResult(*tx)) == PAYMENT_SUCCESS);
+                        REQUIRE(tx->getOperations()[1]->getResultCode() ==
+                                opBAD_AUTH);
+                    });
+                }
+            }
+            SECTION("multiple tx")
+            {
+                for_versions_from(10, *app, [&] {
+                    auto tx1 = a.tx({setOptions(setSigner(makeSigner(b, 1)))});
+                    tx1->addSignature(b);
+                    auto tx2 = a.tx({payment(root, 1000),
+                                     setOptions(setSigner(makeSigner(b, 2)))});
+                    tx2->addSignature(b);
+
+                    auto r =
+                        closeLedgerOn(*app, 2, 1, 2, 2016, {tx1, tx2}, true);
+
+                    REQUIRE(tx1->getResultCode() == txSUCCESS);
+                    REQUIRE(tx2->getResultCode() == txFAILED);
+                    REQUIRE(PaymentOpFrame::getInnerCode(
+                                getFirstResult(*tx2)) == PAYMENT_SUCCESS);
+                    REQUIRE(tx2->getOperations()[1]->getResultCode() ==
+                            opBAD_AUTH);
+                });
+            }
         }
 
         SECTION("add signer, increase thresholds, do something")
