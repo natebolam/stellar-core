@@ -122,6 +122,10 @@ ChangeTrustOpFrame::doApply(AbstractLedgerTxn& ltx)
             {
                 tl.flags = AUTHORIZED_FLAG;
             }
+            if (isClawbackEnabledOnAccount(issuer))
+            {
+                tl.flags |= TRUSTLINE_CLAWBACK_ENABLED_FLAG;
+            }
         }
 
         auto sourceAccount = loadSourceAccount(ltx, header);
@@ -173,6 +177,12 @@ ChangeTrustOpFrame::doCheckValid(uint32_t ledgerVersion)
             innerResult().code(CHANGE_TRUST_MALFORMED);
             return false;
         }
+    }
+
+    if (ledgerVersion > 15 && getSourceID() == getIssuer(mChangeTrust.line))
+    {
+        innerResult().code(CHANGE_TRUST_MALFORMED);
+        return false;
     }
     return true;
 }

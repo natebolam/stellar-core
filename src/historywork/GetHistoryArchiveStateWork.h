@@ -16,16 +16,17 @@ namespace stellar
 {
 
 class HistoryArchive;
+class GetRemoteFileWork;
 
 class GetHistoryArchiveStateWork : public Work
 {
-    std::shared_ptr<BasicWork> mGetRemoteFile;
+    std::shared_ptr<GetRemoteFileWork> mGetRemoteFile;
 
     HistoryArchiveState mState;
     uint32_t mSeq;
     std::shared_ptr<HistoryArchive> mArchive;
     size_t mRetries;
-    std::string mLocalFilename;
+    std::string const mLocalFilename;
 
     medida::Meter& mGetHistoryArchiveStateSuccess;
 

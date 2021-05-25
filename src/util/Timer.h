@@ -57,6 +57,8 @@ class VirtualClockEventCompare
                     std::shared_ptr<VirtualClockEvent> b);
 };
 
+extern const std::chrono::seconds SCHEDULER_LATENCY_WINDOW;
+
 class VirtualClock
 {
   public:
@@ -124,9 +126,6 @@ class VirtualClock
     asio::io_context mIOContext;
     Mode mMode;
 
-    uint32_t mRecentCrankCount;
-    uint32_t mRecentIdleCrankCount;
-
     size_t nRealTimerCancelEvents{0};
     time_point mVirtualNow;
 
@@ -159,9 +158,6 @@ class VirtualClock
     VirtualClock(Mode mode = VIRTUAL_TIME);
     ~VirtualClock();
     size_t crank(bool block = true);
-    void noteCrankOccurred(bool hadIdle);
-    uint32_t recentIdleCrankPercent() const;
-    void resetIdleCrankPercent();
     asio::io_context& getIOContext();
 
     // Note: this is not a static method, which means that VirtualClock is
@@ -197,6 +193,7 @@ class VirtualClock
 
     size_t getActionQueueSize() const;
     bool actionQueueIsOverloaded() const;
+    Scheduler::ActionType currentSchedulerActionType() const;
 };
 
 class VirtualClockEvent : public NonMovableOrCopyable

@@ -569,7 +569,7 @@ exchangeV10(Price price, int64_t maxWheatSend, int64_t maxWheatReceive,
 // Similarly, we investigate when (!wheatStays && price.n <= price.d). Then it
 // follows from sheepSend = 0 that
 //     wheatReceive = ceil(sheepSend * price.d / price.n)
-// so wheatReceive = 0. Similary, if wheatReceive = 0 then
+// so wheatReceive = 0. Similarly, if wheatReceive = 0 then
 //     wheatReceive = ceil(sheepSend * price.d / price.n)
 //                  >= ceil(sheepSend)
 //                  = sheepSend
@@ -822,7 +822,7 @@ adjustOffer(LedgerTxnHeader const& header, LedgerTxnEntry& offer,
 //         = floor(maxSheepReceive * price.d / price.n) * price.n
 //         <= (maxSheepReceive * price.d / price.n) * price.n
 //         = maxSheepReceive * price.d
-// which combined with the defition of wheatValue yields
+// which combined with the definition of wheatValue yields
 //     wheatValue' = maxWheatSend' * price.n
 // From this we find that
 //     wheatReceive' = floor(wheatValue' / price.n)
@@ -1245,6 +1245,21 @@ convertWithOffers(
         {
             break;
         }
+
+        // Special behavior for offer 289733046 can only happen in protocol 15
+        if (gIsProductionNetwork &&
+            ltx.loadHeader().current().ledgerSeq == 34793621 &&
+            wheatOffer.current().data.offer().offerID == 289733046)
+        {
+            auto const sponsorStrKey = "GAS3CQSW3HE27IF5KDWKCM7K6FG6AHR"
+                                       "HWOUVBUWIRV4ZGTJMPBXNGATF";
+            auto const sponsorID =
+                KeyUtils::fromStrKey<PublicKey>(sponsorStrKey);
+
+            wheatOffer.current().ext.v(1);
+            wheatOffer.current().ext.v1().sponsoringID.activate() = sponsorID;
+        }
+
         if (filter && filter(wheatOffer) == OfferFilterResult::eStop)
         {
             return ConvertResult::eFilterStop;

@@ -3,6 +3,8 @@
 // of this distribution or at http://www.apache.org/licenses/LICENSE-2.0
 
 #include "historywork/PutHistoryArchiveStateWork.h"
+#include "crypto/Hex.h"
+#include "crypto/Random.h"
 #include "history/HistoryArchive.h"
 #include "historywork/MakeRemoteDirWork.h"
 #include "historywork/PutRemoteFileWork.h"
@@ -21,7 +23,8 @@ PutHistoryArchiveStateWork::PutHistoryArchiveStateWork(
     : Work(app, "put-history-archive-state", BasicWork::RETRY_ONCE)
     , mState(state)
     , mArchive(archive)
-    , mLocalFilename(HistoryArchiveState::localName(app, archive->getName()))
+    , mLocalFilename(
+          HistoryArchiveState::localName(app, binToHex(randomBytes(8))))
 {
     if (!mState.containsValidBuckets(mApp))
     {
@@ -50,9 +53,8 @@ PutHistoryArchiveStateWork::doWork()
         }
         catch (std::runtime_error& e)
         {
-            CLOG(ERROR, "History")
-                << "Error saving history state: " << e.what();
-            CLOG(ERROR, "History") << POSSIBLY_CORRUPTED_LOCAL_FS;
+            CLOG_ERROR(History, "Error saving history state: {}", e.what());
+            CLOG_ERROR(History, "{}", POSSIBLY_CORRUPTED_LOCAL_FS);
             return State::WORK_FAILURE;
         }
     }

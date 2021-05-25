@@ -40,6 +40,7 @@
 #include "medida/timer.h"
 #include "overlay/BanManager.h"
 #include "overlay/OverlayManager.h"
+#include "overlay/OverlayManagerImpl.h"
 #include "process/ProcessManager.h"
 #include "scp/LocalNode.h"
 #include "scp/QuorumSetUtils.h"
@@ -57,6 +58,7 @@
 
 #include <Tracy.hpp>
 #include <fmt/format.h>
+#include <optional>
 #include <set>
 #include <string>
 
@@ -107,7 +109,7 @@ ApplicationImpl::ApplicationImpl(VirtualClock& clock, Config const& cfg)
     mStopSignals.async_wait([this](asio::error_code const& ec, int sig) {
         if (!ec)
         {
-            LOG(INFO) << "got signal " << sig << ", shutting down";
+            LOG_INFO(DEFAULT_LOG, "got signal {}, shutting down", sig);
 
 #ifdef BUILD_TESTS
             if (mConfig.TEST_CASES_ENABLED)
@@ -120,8 +122,7 @@ ApplicationImpl::ApplicationImpl(VirtualClock& clock, Config const& cfg)
     });
 
     auto t = mConfig.WORKER_THREADS;
-    LOG(DEBUG) << "Application constructing "
-               << "(worker threads: " << t << ")";
+    LOG_DEBUG(DEFAULT_LOG, "Application constructing (worker threads: {})", t);
     while (t--)
     {
         auto thread = std::thread{[this]() {
@@ -135,13 +136,24 @@ ApplicationImpl::ApplicationImpl(VirtualClock& clock, Config const& cfg)
 void
 ApplicationImpl::initialize(bool createNewDB)
 {
+    // Subtle: initialize the bucket manager first before initializing the
+    // database. This is needed as some modes in core (such as in-memory) use a
+    // small database inside the bucket directory.
+    mBucketManager = BucketManager::create(*this);
+
+    bool initNewDB =
+        createNewDB || mConfig.DATABASE.value == "sqlite3://:memory:";
+    if (initNewDB)
+    {
+        mBucketManager->dropAll();
+    }
+
     mDatabase = createDatabase();
     mPersistentState = std::make_unique<PersistentState>(*this);
     mOverlayManager = createOverlayManager();
     mLedgerManager = createLedgerManager();
     mHerder = createHerder();
     mHerderPersistence = HerderPersistence::create(*this);
-    mBucketManager = BucketManager::create(*this);
     mCatchupManager = CatchupManager::create(*this);
     mHistoryArchiveManager = std::make_unique<HistoryArchiveManager>(*this);
     mHistoryManager = HistoryManager::create(*this);
@@ -154,15 +166,24 @@ ApplicationImpl::initialize(bool createNewDB)
 
     if (getConfig().MODE_USES_IN_MEMORY_LEDGER)
     {
-        mLedgerTxnRoot = std::make_unique<InMemoryLedgerTxnRoot>();
-        mNeverCommittingLedgerTxn =
-            std::make_unique<LedgerTxn>(*mLedgerTxnRoot);
+        resetLedgerState();
     }
     else
     {
+        if (mConfig.ENTRY_CACHE_SIZE < 20000)
+        {
+            LOG_WARNING(DEFAULT_LOG,
+                        "ENTRY_CACHE_SIZE({}) is below the recommended minimum "
+                        "of 20000",
+                        mConfig.ENTRY_CACHE_SIZE);
+        }
         mLedgerTxnRoot = std::make_unique<LedgerTxnRoot>(
-            *mDatabase, mConfig.ENTRY_CACHE_SIZE,
-            mConfig.BEST_OFFERS_CACHE_SIZE, mConfig.PREFETCH_BATCH_SIZE);
+            *mDatabase, mConfig.ENTRY_CACHE_SIZE, mConfig.PREFETCH_BATCH_SIZE
+#ifdef BEST_OFFER_DEBUGGING
+            ,
+            mConfig.BEST_OFFER_DEBUGGING_ENABLED
+#endif
+        );
     }
 
     BucketListIsConsistentWithDatabase::registerInvariant(*this);
@@ -173,20 +194,41 @@ ApplicationImpl::initialize(bool createNewDB)
     SponsorshipCountIsValid::registerInvariant(*this);
     enableInvariantsFromConfig();
 
-    if (createNewDB || mConfig.DATABASE.value == "sqlite3://:memory:")
+    if (initNewDB)
     {
         newDB();
     }
     else
     {
-        upgradeDB();
+        mDatabase->upgradeToCurrentSchema();
     }
 
     // Subtle: process manager should come to existence _after_ BucketManager
     // initialization and newDB run, as it relies on tmp dir created in the
     // constructor
     mProcessManager = ProcessManager::create(*this);
-    LOG(DEBUG) << "Application constructed";
+    LOG_DEBUG(DEFAULT_LOG, "Application constructed");
+}
+
+void
+ApplicationImpl::resetLedgerState()
+{
+    if (getConfig().MODE_USES_IN_MEMORY_LEDGER)
+    {
+        mNeverCommittingLedgerTxn.reset();
+        mLedgerTxnRoot = std::make_unique<InMemoryLedgerTxnRoot>(
+#ifdef BEST_OFFER_DEBUGGING
+            mConfig.BEST_OFFER_DEBUGGING_ENABLED
+#endif
+        );
+        mNeverCommittingLedgerTxn =
+            std::make_unique<LedgerTxn>(*mLedgerTxnRoot);
+    }
+    else
+    {
+        auto& lsRoot = getLedgerTxnRoot();
+        lsRoot.deleteObjectsModifiedOnOrAfterLedger(0);
+    }
 }
 
 void
@@ -194,14 +236,7 @@ ApplicationImpl::newDB()
 {
     mDatabase->initialize();
     mDatabase->upgradeToCurrentSchema();
-    mBucketManager->dropAll();
     mLedgerManager->startNewLedger();
-}
-
-void
-ApplicationImpl::upgradeDB()
-{
-    mDatabase->upgradeToCurrentSchema();
 }
 
 void
@@ -224,8 +259,8 @@ ApplicationImpl::reportCfgMetrics()
     {
         if (allMetrics.find(name) == allMetrics.end())
         {
-            LOG(INFO) << "";
-            LOG(WARNING) << "Metric not found: " << name;
+            LOG_INFO(DEFAULT_LOG, "");
+            LOG_WARNING(DEFAULT_LOG, "Metric not found: {}", name);
             reportAvailableMetrics = true;
         }
         metricsToReport.insert(name);
@@ -233,13 +268,14 @@ ApplicationImpl::reportCfgMetrics()
 
     if (reportAvailableMetrics)
     {
-        LOG(INFO) << "Update REPORT_METRICS value in configuration file to "
-                     "only include available metrics:";
+        LOG_INFO(DEFAULT_LOG,
+                 "Update REPORT_METRICS value in configuration file to "
+                 "only include available metrics:");
         for (auto const& n : allMetrics)
         {
-            LOG(INFO) << "    " << n;
+            LOG_INFO(DEFAULT_LOG, "    {}", n);
         }
-        LOG(INFO) << "";
+        LOG_INFO(DEFAULT_LOG, "");
     }
 
     std::ostringstream oss;
@@ -251,17 +287,17 @@ ApplicationImpl::reportCfgMetrics()
         auto nstr = name.ToString();
         if (metricsToReport.find(nstr) != metricsToReport.end())
         {
-            LOG(INFO) << "";
-            LOG(INFO) << "metric '" << nstr << "':";
+            LOG_INFO(DEFAULT_LOG, "");
+            LOG_INFO(DEFAULT_LOG, "metric '{}':", nstr);
             metric->Process(reporter);
             std::istringstream iss(oss.str());
             char buf[128];
             while (iss.getline(buf, 128))
             {
-                LOG(INFO) << std::string(buf);
+                LOG_INFO(DEFAULT_LOG, "{}", std::string(buf));
             }
             oss.str("");
-            LOG(INFO) << "";
+            LOG_INFO(DEFAULT_LOG, "");
         }
     }
 }
@@ -339,7 +375,7 @@ void
 ApplicationImpl::reportInfo()
 {
     mLedgerManager->loadLastKnownLedger(nullptr);
-    LOG(INFO) << "info -> " << getJsonInfo().toStyledString();
+    LOG_INFO(DEFAULT_LOG, "info -> {}", getJsonInfo().toStyledString());
 }
 
 Hash const&
@@ -350,7 +386,7 @@ ApplicationImpl::getNetworkID() const
 
 ApplicationImpl::~ApplicationImpl()
 {
-    LOG(INFO) << "Application destructing";
+    LOG_INFO(DEFAULT_LOG, "Application destructing");
     try
     {
         shutdownWorkScheduler();
@@ -358,19 +394,34 @@ ApplicationImpl::~ApplicationImpl()
         {
             mProcessManager->shutdown();
         }
-        if (mBucketManager)
+        // As garbage collection performed on shutdown depends on LedgerManager
+        // and HistoryManager, ensure those are alive before calling `shutdown`
+        if (mBucketManager && mLedgerManager && mHistoryManager)
         {
             mBucketManager->shutdown();
         }
     }
     catch (std::exception const& e)
     {
-        LOG(ERROR) << "While shutting down " << e.what();
+        LOG_ERROR(DEFAULT_LOG, "Exception occurred while shutting down: {}",
+                  e.what());
     }
     reportCfgMetrics();
     shutdownMainIOContext();
     joinAllThreads();
-    LOG(INFO) << "Application destroyed";
+    LOG_INFO(DEFAULT_LOG, "Application destroyed");
+}
+
+void
+ApplicationImpl::resetDBForInMemoryMode()
+{
+    // Load the peer information and reinitialize the DB
+    auto& pm = getOverlayManager().getPeerManager();
+    auto peerData = pm.loadAllPeers();
+    newDB();
+    pm.storePeers(peerData);
+
+    LOG_INFO(DEFAULT_LOG, "In-memory state is reset back to genesis");
 }
 
 uint64_t
@@ -380,21 +431,8 @@ ApplicationImpl::timeNow()
 }
 
 void
-ApplicationImpl::start()
+ApplicationImpl::validateAndLogConfig()
 {
-    if (mStarted)
-    {
-        CLOG(INFO, "Ledger") << "Skipping application start up";
-        return;
-    }
-    CLOG(INFO, "Ledger") << "Starting up application";
-    mStarted = true;
-
-    if (mConfig.TESTING_UPGRADE_DATETIME.time_since_epoch().count() != 0)
-    {
-        mHerder->setUpgrades(mConfig);
-    }
-
     if (mConfig.FORCE_SCP && !mConfig.NODE_IS_VALIDATOR)
     {
         throw std::invalid_argument(
@@ -411,22 +449,33 @@ ApplicationImpl::start()
             "RUN_STANDALONE is not set");
     }
 
-    if (isNetworkedValidator)
+    // EXPERIMENTAL_PRECAUTION_DELAY_META is only meaningful when there's a
+    // METADATA_OUTPUT_STREAM.  We only allow EXPERIMENTAL_PRECAUTION_DELAY_META
+    // on a captive core, without a persistent database; old-style ingestion
+    // which reads from the core database could do the delaying itself.
+    if (mConfig.METADATA_OUTPUT_STREAM != "" &&
+        mConfig.EXPERIMENTAL_PRECAUTION_DELAY_META && !mConfig.isInMemoryMode())
     {
-        if (mConfig.MODE_USES_IN_MEMORY_LEDGER)
-        {
-            throw std::invalid_argument(
-                "MODE_USES_IN_MEMORY_LEDGER is set, NODE_IS_VALIDATOR is set, "
-                "and RUN_STANDALONE is not set");
-        }
+        throw std::invalid_argument(
+            "Using a METADATA_OUTPUT_STREAM with "
+            "EXPERIMENTAL_PRECAUTION_DELAY_META set to true "
+            "requires --in-memory");
+    }
+
+    if (isNetworkedValidator && mConfig.isInMemoryMode())
+    {
+        throw std::invalid_argument(
+            "In-memory mode is set, NODE_IS_VALIDATOR is set, "
+            "and RUN_STANDALONE is not set");
     }
 
     if (getHistoryArchiveManager().hasAnyWritableHistoryArchive())
     {
-        if (!mConfig.MODE_STORES_HISTORY)
+        if (!mConfig.modeStoresAllHistory())
         {
-            throw std::invalid_argument("MODE_STORES_HISTORY is not set, but "
-                                        "some history archives are writable");
+            throw std::invalid_argument(
+                "Core is not configured to store history, but "
+                "some history archives are writable");
         }
     }
 
@@ -436,42 +485,59 @@ ApplicationImpl::start()
     }
 
     mConfig.logBasicInfo();
+}
+
+void
+ApplicationImpl::start()
+{
+    if (mStarted)
+    {
+        CLOG_INFO(Ledger, "Skipping application start up");
+        return;
+    }
+    CLOG_INFO(Ledger, "Starting up application");
+    mStarted = true;
+
+    if (mConfig.TESTING_UPGRADE_DATETIME.time_since_epoch().count() != 0)
+    {
+        mHerder->setUpgrades(mConfig);
+    }
 
     bool done = false;
-    mLedgerManager->loadLastKnownLedger(
-        [this, &done](asio::error_code const& ec) {
-            if (ec)
-            {
-                throw std::runtime_error(
-                    "Unable to restore last-known ledger state");
-            }
+    mLedgerManager->loadLastKnownLedger([this,
+                                         &done](asio::error_code const& ec) {
+        if (ec)
+        {
+            throw std::runtime_error(
+                "Unable to restore last-known ledger state");
+        }
 
-            // restores Herder's state before starting overlay
-            mHerder->restoreState();
-            // set known cursors before starting maintenance job
-            ExternalQueue ps(*this);
-            ps.setInitialCursors(mConfig.KNOWN_CURSORS);
-            mMaintainer->start();
-            if (mConfig.MODE_AUTO_STARTS_OVERLAY)
-            {
-                mOverlayManager->start();
-            }
-            auto npub = mHistoryManager->publishQueuedHistory();
-            if (npub != 0)
-            {
-                CLOG(INFO, "Ledger")
-                    << "Restarted publishing " << npub << " queued snapshots";
-            }
-            if (mConfig.FORCE_SCP)
-            {
-                LOG(INFO) << "* ";
-                LOG(INFO) << "* Force-starting scp from the current db state.";
-                LOG(INFO) << "* ";
+        // restores Herder's state before starting overlay
+        mHerder->restoreState();
+        // set known cursors before starting maintenance job
+        ExternalQueue ps(*this);
+        ps.setInitialCursors(mConfig.KNOWN_CURSORS);
+        mMaintainer->start();
+        if (mConfig.MODE_AUTO_STARTS_OVERLAY)
+        {
+            mOverlayManager->start();
+        }
+        auto npub = mHistoryManager->publishQueuedHistory();
+        if (npub != 0)
+        {
+            CLOG_INFO(Ledger, "Restarted publishing {} queued snapshots", npub);
+        }
+        if (mConfig.FORCE_SCP)
+        {
+            LOG_INFO(DEFAULT_LOG, "* ");
+            LOG_INFO(DEFAULT_LOG,
+                     "* Force-starting scp from the current db state.");
+            LOG_INFO(DEFAULT_LOG, "* ");
 
-                mHerder->bootstrap();
-            }
-            done = true;
-        });
+            mHerder->bootstrap();
+        }
+        done = true;
+    });
 
     while (!done && mVirtualClock.crank(true))
         ;
@@ -547,17 +613,17 @@ ApplicationImpl::joinAllThreads()
     {
         mWork.reset();
     }
-    LOG(DEBUG) << "Joining " << mWorkerThreads.size() << " worker threads";
+    LOG_DEBUG(DEFAULT_LOG, "Joining {} worker threads", mWorkerThreads.size());
     for (auto& w : mWorkerThreads)
     {
         w.join();
     }
-    LOG(DEBUG) << "Joined all " << mWorkerThreads.size() << " threads";
+    LOG_DEBUG(DEFAULT_LOG, "Joined all {} threads", mWorkerThreads.size());
 }
 
 std::string
-ApplicationImpl::manualClose(optional<uint32_t> const& manualLedgerSeq,
-                             optional<TimePoint> const& manualCloseTime)
+ApplicationImpl::manualClose(std::optional<uint32_t> const& manualLedgerSeq,
+                             std::optional<TimePoint> const& manualCloseTime)
 {
     assertThreadIsMain();
 
@@ -630,7 +696,7 @@ ApplicationImpl::manualClose(optional<uint32_t> const& manualLedgerSeq,
 
 uint32_t
 ApplicationImpl::targetManualCloseLedgerSeqNum(
-    optional<uint32_t> const& explicitlyProvidedSeqNum)
+    std::optional<uint32_t> const& explicitlyProvidedSeqNum)
 {
     auto const startLedgerSeq = getLedgerManager().getLastClosedLedgerNum();
 
@@ -672,7 +738,7 @@ ApplicationImpl::targetManualCloseLedgerSeqNum(
 
 void
 ApplicationImpl::setManualCloseVirtualTime(
-    optional<TimePoint> const& explicitlyProvidedCloseTime)
+    std::optional<TimePoint> const& explicitlyProvidedCloseTime)
 {
     TimePoint constexpr firstSecondOfYear2200GMT = 7'258'118'400ULL;
 
@@ -733,10 +799,12 @@ ApplicationImpl::advanceToLedgerBeforeManualCloseTarget(
 {
     if (targetLedgerSeq != getLedgerManager().getLastClosedLedgerNum() + 1)
     {
-        LOG(INFO) << "manually advancing to ledger with sequence number "
-                  << targetLedgerSeq - 1 << " to prepare to close number "
-                  << targetLedgerSeq << " (last ledger to close was number "
-                  << getLedgerManager().getLastClosedLedgerNum() << ")";
+        LOG_INFO(DEFAULT_LOG,
+                 "manually advancing to ledger with sequence number {} to "
+                 "prepare to close number {} (last ledger to close was number "
+                 "{})",
+                 targetLedgerSeq - 1, targetLedgerSeq,
+                 getLedgerManager().getLastClosedLedgerNum());
 
         LedgerTxn ltx(getLedgerTxnRoot());
         ltx.loadHeader().current().ledgerSeq = targetLedgerSeq - 1;
@@ -1026,11 +1094,12 @@ ApplicationImpl::postOnMainThread(std::function<void()>&& f, std::string&& name,
 {
     LogSlowExecution isSlow{name, LogSlowExecution::Mode::MANUAL,
                             "executed after"};
-    mVirtualClock.postAction([ this, f = std::move(f), isSlow ]() {
-        mPostOnMainThreadDelay.Update(isSlow.checkElapsedTime());
-        f();
-    },
-                             std::move(name), type);
+    mVirtualClock.postAction(
+        [this, f = std::move(f), isSlow]() {
+            mPostOnMainThreadDelay.Update(isSlow.checkElapsedTime());
+            f();
+        },
+        std::move(name), type);
 }
 
 void
@@ -1039,7 +1108,7 @@ ApplicationImpl::postOnBackgroundThread(std::function<void()>&& f,
 {
     LogSlowExecution isSlow{std::move(jobName), LogSlowExecution::Mode::MANUAL,
                             "executed after"};
-    asio::post(getWorkerIOContext(), [ this, f = std::move(f), isSlow ]() {
+    asio::post(getWorkerIOContext(), [this, f = std::move(f), isSlow]() {
         mPostOnBackgroundThreadDelay.Update(isSlow.checkElapsedTime());
         f();
     });

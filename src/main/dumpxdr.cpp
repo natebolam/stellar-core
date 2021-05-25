@@ -23,7 +23,8 @@
 #define HAVE_TERMIOS 1
 #endif
 #if HAVE_TERMIOS
-extern "C" {
+extern "C"
+{
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -138,21 +139,115 @@ printOneXdr(xdr::opaque_vec<> const& o, std::string const& desc, bool compact)
     std::cout << xdr_to_string(tmp, desc, compact) << std::endl;
 }
 
+struct CmpLedgerEntryChanges
+{
+    int
+    remap(LedgerEntryChangeType let)
+    {
+        // order that we want is:
+        // LEDGER_ENTRY_STATE, LEDGER_ENTRY_CREATED,
+        // LEDGER_ENTRY_UPDATED, LEDGER_ENTRY_REMOVED
+        static constexpr std::array<int, 4> reindex = {1, 2, 3, 0};
+        return reindex[let];
+    }
+
+    LedgerKey
+    getKeyFromChange(LedgerEntryChange const& change)
+    {
+        LedgerKey res;
+        switch (change.type())
+        {
+        case LEDGER_ENTRY_STATE:
+            res = LedgerEntryKey(change.state());
+            break;
+        case LEDGER_ENTRY_CREATED:
+            res = LedgerEntryKey(change.created());
+            break;
+        case LEDGER_ENTRY_UPDATED:
+            res = LedgerEntryKey(change.updated());
+            break;
+        case LEDGER_ENTRY_REMOVED:
+            res = change.removed();
+            break;
+        }
+        return res;
+    }
+
+    bool
+    operator()(LedgerEntryChange const& l, LedgerEntryChange const& r)
+    {
+        auto lT =
+            std::make_tuple(getKeyFromChange(l), remap(l.type()), xdrSha256(l));
+        auto rT =
+            std::make_tuple(getKeyFromChange(r), remap(r.type()), xdrSha256(r));
+        return lT < rT;
+    }
+};
+
+void
+sortChanges(LedgerEntryChanges& c)
+{
+    std::sort(c.begin(), c.end(), CmpLedgerEntryChanges());
+}
+
+void
+normalizeOps(xdr::xvector<OperationMeta>& oms)
+{
+    for (auto& om : oms)
+    {
+        sortChanges(om.changes);
+    }
+}
+
+void
+normalizeMeta(TransactionMeta& m)
+{
+    switch (m.v())
+    {
+    case 0:
+        normalizeOps(m.operations());
+        break;
+    case 1:
+        sortChanges(m.v1().txChanges);
+        normalizeOps(m.v1().operations);
+        break;
+    case 2:
+        sortChanges(m.v2().txChangesBefore);
+        sortChanges(m.v2().txChangesAfter);
+        normalizeOps(m.v2().operations);
+        break;
+    }
+}
+
+void
+printTransactionMeta(xdr::opaque_vec<> const& o, bool compact)
+{
+    TransactionMeta tmp;
+    xdr::xdr_from_opaque(o, tmp);
+    normalizeMeta(tmp);
+    std::cout << xdr_to_string(tmp, "TransactionMeta", compact) << std::endl;
+}
+
 void
 printXdr(std::string const& filename, std::string const& filetype, bool base64,
-         bool compact)
+         bool compact, bool rawMode)
 {
 // need to use this pattern as there is no good way to get a human readable
 // type name from a type
 #define PRINTONEXDR(T) std::bind(printOneXdr<T>, _1, #T, compact)
-    auto dumpMap =
-        std::map<std::string, std::function<void(xdr::opaque_vec<> const&)>>{
-            {"ledgerheader", PRINTONEXDR(LedgerHeader)},
-            {"meta", PRINTONEXDR(TransactionMeta)},
-            {"result", PRINTONEXDR(TransactionResult)},
-            {"resultpair", PRINTONEXDR(TransactionResultPair)},
-            {"tx", PRINTONEXDR(TransactionEnvelope)},
-            {"txfee", PRINTONEXDR(LedgerEntryChanges)}};
+
+    using printerFunc = std::function<void(xdr::opaque_vec<> const&)>;
+    auto metaPrinter =
+        rawMode ? printerFunc(PRINTONEXDR(TransactionMeta))
+                : printerFunc(std::bind(printTransactionMeta, _1, compact));
+
+    auto dumpMap = std::map<std::string, printerFunc>{
+        {"ledgerheader", PRINTONEXDR(LedgerHeader)},
+        {"meta", metaPrinter},
+        {"result", PRINTONEXDR(TransactionResult)},
+        {"resultpair", PRINTONEXDR(TransactionResultPair)},
+        {"tx", PRINTONEXDR(TransactionEnvelope)},
+        {"txfee", PRINTONEXDR(LedgerEntryChanges)}};
 #undef PRINTONEXDR
 
     try
@@ -350,7 +445,7 @@ signtxn(std::string const& filename, std::string netId, bool base64)
         auto& signatures = txbridge::getSignatures(txenv);
         if (signatures.size() == signatures.max_size())
             throw std::runtime_error(
-                "Evelope already contains maximum number of signatures");
+                "Envelope already contains maximum number of signatures");
 
         SecretKey sk(SecretKey::fromStrKeySeed(readSecret(
             fmt::format("Secret key seed [network id: '{}']: ", netId),

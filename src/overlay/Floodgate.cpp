@@ -3,8 +3,8 @@
 // of this distribution or at http://www.apache.org/licenses/LICENSE-2.0
 
 #include "overlay/Floodgate.h"
+#include "crypto/BLAKE2.h"
 #include "crypto/Hex.h"
-#include "crypto/SHA.h"
 #include "herder/Herder.h"
 #include "main/Application.h"
 #include "medida/counter.h"
@@ -14,6 +14,7 @@
 #include "util/XDROperators.h"
 #include "xdrpp/marshal.h"
 #include <Tracy.hpp>
+#include <fmt/format.h>
 
 namespace stellar
 {
@@ -37,13 +38,12 @@ Floodgate::Floodgate(Application& app)
 
 // remove old flood records
 void
-Floodgate::clearBelow(uint32_t currentLedger)
+Floodgate::clearBelow(uint32_t maxLedger)
 {
     ZoneScoped;
     for (auto it = mFloodMap.cbegin(); it != mFloodMap.cend();)
     {
-        // give one ledger of leeway
-        if (it->second->mLedgerSeq + 10 < currentLedger)
+        if (it->second->mLedgerSeq < maxLedger)
         {
             it = mFloodMap.erase(it);
         }
@@ -59,7 +59,7 @@ bool
 Floodgate::addRecord(StellarMessage const& msg, Peer::pointer peer, Hash& index)
 {
     ZoneScoped;
-    index = sha256(xdr::xdr_to_opaque(msg));
+    index = xdrBlake2(msg);
     if (mShuttingDown)
     {
         return false;
@@ -82,15 +82,15 @@ Floodgate::addRecord(StellarMessage const& msg, Peer::pointer peer, Hash& index)
 }
 
 // send message to anyone you haven't gotten it from
-void
+bool
 Floodgate::broadcast(StellarMessage const& msg, bool force)
 {
     ZoneScoped;
     if (mShuttingDown)
     {
-        return;
+        return false;
     }
-    Hash index = sha256(xdr::xdr_to_opaque(msg));
+    Hash index = xdrBlake2(msg);
 
     FloodRecord::pointer fr;
     auto result = mFloodMap.find(index);
@@ -111,20 +111,32 @@ Floodgate::broadcast(StellarMessage const& msg, bool force)
     // make a copy, in case peers gets modified
     auto peers = mApp.getOverlayManager().getAuthenticatedPeers();
 
-    bool log = true;
+    bool broadcasted = false;
+    std::shared_ptr<StellarMessage> smsg =
+        std::make_shared<StellarMessage>(msg);
     for (auto peer : peers)
     {
         assert(peer.second->isAuthenticated());
-        if (peersTold.find(peer.second->toString()) == peersTold.end())
+        if (peersTold.insert(peer.second->toString()).second)
         {
             mSendFromBroadcast.Mark();
-            peer.second->sendMessage(msg, log);
-            peersTold.insert(peer.second->toString());
-            log = false;
+            std::weak_ptr<Peer> weak(
+                std::static_pointer_cast<Peer>(peer.second));
+            mApp.postOnMainThread(
+                [smsg, weak, log = !broadcasted]() {
+                    auto strong = weak.lock();
+                    if (strong)
+                    {
+                        strong->sendMessage(*smsg, log);
+                    }
+                },
+                fmt::format("broadcast to {}", peer.second->toString()));
+            broadcasted = true;
         }
     }
-    CLOG(TRACE, "Overlay") << "broadcast " << hexAbbrev(index) << " told "
-                           << peersTold.size();
+    CLOG_TRACE(Overlay, "broadcast {} told {}", hexAbbrev(index),
+               peersTold.size());
+    return broadcasted;
 }
 
 std::set<Peer::pointer>
@@ -165,8 +177,8 @@ Floodgate::updateRecord(StellarMessage const& oldMsg,
                         StellarMessage const& newMsg)
 {
     ZoneScoped;
-    Hash oldHash = sha256(xdr::xdr_to_opaque(oldMsg));
-    Hash newHash = sha256(xdr::xdr_to_opaque(newMsg));
+    Hash oldHash = xdrBlake2(oldMsg);
+    Hash newHash = xdrBlake2(newMsg);
 
     auto oldIter = mFloodMap.find(oldHash);
     if (oldIter != mFloodMap.end())

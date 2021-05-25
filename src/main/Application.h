@@ -5,11 +5,11 @@
 // of this distribution or at http://www.apache.org/licenses/LICENSE-2.0
 
 #include "main/Config.h"
-#include "util/optional.h"
 #include "xdr/Stellar-ledger-entries.h"
 #include "xdr/Stellar-types.h"
 #include <lib/json/json.h>
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace asio
@@ -164,6 +164,10 @@ class Application
 
     virtual void initialize(bool createNewDB) = 0;
 
+    // reset the ledger state entirely
+    // (to be used before applying buckets)
+    virtual void resetLedgerState() = 0;
+
     // Return the time in seconds since the POSIX epoch, according to the
     // VirtualClock this Application is bound to. Convenience method.
     virtual uint64_t timeNow() = 0;
@@ -248,8 +252,8 @@ class Application
     // Non-default parameters may be specified only if additionally
     // config.RUN_STANDALONE=true.
     virtual std::string
-    manualClose(optional<uint32_t> const& manualLedgerSeq,
-                optional<TimePoint> const& manualCloseTime) = 0;
+    manualClose(std::optional<uint32_t> const& manualLedgerSeq,
+                std::optional<TimePoint> const& manualCloseTime) = 0;
 
 #ifdef BUILD_TESTS
     // If config.ARTIFICIALLY_GENERATE_LOAD_FOR_TESTING=true, generate some load
@@ -285,6 +289,8 @@ class Application
 
     virtual AbstractLedgerTxnParent& getLedgerTxnRoot() = 0;
 
+    virtual void validateAndLogConfig() = 0;
+
     // Factory: create a new Application object bound to `clock`, with a local
     // copy made of `cfg`
     static pointer create(VirtualClock& clock, Config const& cfg,
@@ -297,9 +303,15 @@ class Application
         auto ret = std::make_shared<T>(clock, cfg, std::forward<Args>(args)...);
         ret->initialize(newDB);
         validateNetworkPassphrase(ret);
+        ret->validateAndLogConfig();
 
         return ret;
     }
+
+    // This method is used in in-memory mode: when rebuilding state from buckets
+    // is not possible, this method resets the database state back to genesis
+    // (while preserving the overlay data).
+    virtual void resetDBForInMemoryMode() = 0;
 
   protected:
     Application()

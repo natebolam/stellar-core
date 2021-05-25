@@ -4,7 +4,7 @@
 
 // This file contains tests for individual Buckets, low-level invariants
 // concerning the composition of buckets, the semantics of the merge
-// operation(s), and the perfomance of merging and applying buckets to the
+// operation(s), and the performance of merging and applying buckets to the
 // database.
 
 // ASIO is somewhat particular about when it gets included -- it wants to be the
@@ -122,22 +122,23 @@ TEST_CASE("file backed buckets", "[bucket][bucketbench]")
         Application::pointer app = createTestApplication(clock, cfg);
 
         autocheck::generator<LedgerKey> deadGen;
-        CLOG(DEBUG, "Bucket") << "Generating 10000 random ledger entries";
+        CLOG_DEBUG(Bucket, "Generating 10000 random ledger entries");
         std::vector<LedgerEntry> live(9000);
         std::vector<LedgerKey> dead(1000);
         for (auto& e : live)
             e = LedgerTestUtils::generateValidLedgerEntry(3);
         for (auto& e : dead)
             e = deadGen(3);
-        CLOG(DEBUG, "Bucket") << "Hashing entries";
+        CLOG_DEBUG(Bucket, "Hashing entries");
         std::shared_ptr<Bucket> b1 = Bucket::fresh(
             app->getBucketManager(), getAppLedgerVersion(app), {}, live, dead,
             /*countMergeEvents=*/true, clock.getIOContext(),
             /*doFsync=*/true);
         for (uint32_t i = 0; i < 5; ++i)
         {
-            CLOG(DEBUG, "Bucket") << "Merging 10000 new ledger entries into "
-                                  << (i * 10000) << " entry bucket";
+            CLOG_DEBUG(Bucket,
+                       "Merging 10000 new ledger entries into {} entry bucket",
+                       (i * 10000));
             for (auto& e : live)
                 e = LedgerTestUtils::generateValidLedgerEntry(3);
             for (auto& e : dead)
@@ -157,8 +158,8 @@ TEST_CASE("file backed buckets", "[bucket][bucketbench]")
                     /*doFsync=*/true);
             }
         }
-        CLOG(DEBUG, "Bucket")
-            << "Spill file size: " << fileSize(b1->getFilename());
+        auto sz = static_cast<size_t>(fileSize(b1->getFilename()));
+        CLOG_DEBUG(Bucket, "Spill file size: {}", sz);
     });
 }
 
@@ -254,8 +255,8 @@ TEST_CASE("merging bucket entries", "[bucket]")
                               /*doFsync=*/true);
             EntryCounts e(b1);
             CHECK(e.sum() == live.size());
-            CLOG(DEBUG, "Bucket") << "post-merge live count: " << e.nLive
-                                  << " of " << live.size();
+            CLOG_DEBUG(Bucket, "post-merge live count: {} of {}", e.nLive,
+                       live.size());
             CHECK(e.nLive == live.size() - dead.size());
         }
 
@@ -271,7 +272,24 @@ TEST_CASE("merging bucket entries", "[bucket]")
                 app->getBucketManager(), getAppLedgerVersion(app), {}, live,
                 dead, /*countMergeEvents=*/true, clock.getIOContext(),
                 /*doFsync=*/true);
-            std::random_shuffle(live.begin(), live.end());
+            // We could just shuffle the live values, but libstdc++7 has a bug
+            // that causes self-moves when shuffling such types, in a way that
+            // traps in debug mode. Instead we shuffle indexes. See
+            // https://gcc.gnu.org/bugzilla/show_bug.cgi?id=85828
+            std::vector<size_t> liveIdxs;
+            for (size_t i = 0; i < live.size(); ++i)
+            {
+                liveIdxs.emplace_back(i);
+            }
+            std::shuffle(liveIdxs.begin(), liveIdxs.end(), gRandomEngine);
+            for (size_t src = 0; src < live.size(); ++src)
+            {
+                size_t dst = liveIdxs.at(src);
+                if (dst != src)
+                {
+                    std::swap(live.at(src), live.at(dst));
+                }
+            }
             size_t liveCount = live.size();
             for (auto& e : live)
             {
@@ -480,7 +498,7 @@ TEST_CASE("merging bucket entries with initentry", "[bucket][initentry]")
     VirtualClock clock;
     Config const& cfg = getTestConfig();
     for_versions_with_differing_bucket_logic(cfg, [&](Config const& cfg) {
-        CLOG(INFO, "Bucket") << "=== starting test app == ";
+        CLOG_INFO(Bucket, "=== starting test app == ");
         Application::pointer app = createTestApplication(clock, cfg);
         auto& bm = app->getBucketManager();
         auto vers = getAppLedgerVersion(app);
@@ -489,7 +507,7 @@ TEST_CASE("merging bucket entries with initentry", "[bucket][initentry]")
         bool initEra =
             (vers >= Bucket::FIRST_PROTOCOL_SUPPORTING_INITENTRY_AND_METAENTRY);
 
-        CLOG(INFO, "Bucket") << "=== finished buckets for initial account == ";
+        CLOG_INFO(Bucket, "=== finished buckets for initial account == ");
 
         LedgerEntry liveEntry = generateAccount();
         LedgerEntry liveEntry2 = generateSameAccountDifferentState({liveEntry});
@@ -669,7 +687,7 @@ TEST_CASE("merging bucket entries with initentry with shadows",
     VirtualClock clock;
     Config const& cfg = getTestConfig();
     for_versions_with_differing_initentry_logic(cfg, [&](Config const& cfg) {
-        CLOG(INFO, "Bucket") << "=== starting test app == ";
+        CLOG_INFO(Bucket, "=== starting test app == ");
         Application::pointer app = createTestApplication(clock, cfg);
         auto& bm = app->getBucketManager();
         auto vers = getAppLedgerVersion(app);
@@ -678,7 +696,7 @@ TEST_CASE("merging bucket entries with initentry with shadows",
         bool initEra =
             (vers >= Bucket::FIRST_PROTOCOL_SUPPORTING_INITENTRY_AND_METAENTRY);
 
-        CLOG(INFO, "Bucket") << "=== finished buckets for initial account == ";
+        CLOG_INFO(Bucket, "=== finished buckets for initial account == ");
 
         LedgerEntry liveEntry = generateAccount();
         LedgerEntry liveEntry2 = generateSameAccountDifferentState({liveEntry});
@@ -962,16 +980,14 @@ TEST_CASE("bucket apply", "[bucket]")
             /*countMergeEvents=*/true, clock.getIOContext(),
             /*doFsync=*/true);
 
-        CLOG(INFO, "Bucket")
-            << "Applying bucket with " << live.size() << " live entries";
+        CLOG_INFO(Bucket, "Applying bucket with {} live entries", live.size());
         birth->apply(*app);
         {
             auto count = app->getLedgerTxnRoot().countObjects(ACCOUNT);
             REQUIRE(count == live.size() + 1 /* root account */);
         }
 
-        CLOG(INFO, "Bucket")
-            << "Applying bucket with " << dead.size() << " dead entries";
+        CLOG_INFO(Bucket, "Applying bucket with {} dead entries", dead.size());
         death->apply(*app);
         {
             auto count = app->getLedgerTxnRoot().countObjects(ACCOUNT);
@@ -1003,8 +1019,7 @@ TEST_CASE("bucket apply bench", "[bucketbench][!hide]")
             /*countMergeEvents=*/true, clock.getIOContext(),
             /*doFsync=*/true);
 
-        CLOG(INFO, "Bucket")
-            << "Applying bucket with " << live.size() << " live entries";
+        CLOG_INFO(Bucket, "Applying bucket with {} live entries", live.size());
         // note: we do not wrap the `apply` call inside a transaction
         // as bucket applicator commits to the database incrementally
         birth->apply(*app);

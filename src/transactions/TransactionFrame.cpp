@@ -24,7 +24,7 @@
 #include "transactions/SponsorshipUtils.h"
 #include "transactions/TransactionBridge.h"
 #include "transactions/TransactionUtils.h"
-#include "util/Algoritm.h"
+#include "util/Algorithm.h"
 #include "util/Decoder.h"
 #include "util/GlobalChecks.h"
 #include "util/Logging.h"
@@ -58,7 +58,7 @@ TransactionFrame::getFullHash() const
 {
     if (isZero(mFullHash))
     {
-        mFullHash = sha256(xdr::xdr_to_opaque(mEnvelope));
+        mFullHash = xdrSha256(mEnvelope);
     }
     return (mFullHash);
 }
@@ -66,6 +66,12 @@ TransactionFrame::getFullHash() const
 Hash const&
 TransactionFrame::getContentsHash() const
 {
+#ifdef _DEBUG
+    // force recompute
+    Hash oldHash;
+    std::swap(mContentsHash, oldHash);
+#endif
+
     if (isZero(mContentsHash))
     {
         if (mEnvelope.type() == ENVELOPE_TYPE_TX_V0)
@@ -79,6 +85,9 @@ TransactionFrame::getContentsHash() const
                 mNetworkID, ENVELOPE_TYPE_TX, mEnvelope.v1().tx));
         }
     }
+#ifdef _DEBUG
+    assert(isZero(oldHash) || (oldHash == mContentsHash));
+#endif
     return (mContentsHash);
 }
 
@@ -175,7 +184,6 @@ TransactionFrame::getFee(LedgerHeader const& header, int64_t baseFee,
 void
 TransactionFrame::addSignature(SecretKey const& secretKey)
 {
-    clearCached();
     auto sig = SignatureUtils::sign(secretKey, getContentsHash());
     addSignature(sig);
 }
@@ -183,6 +191,7 @@ TransactionFrame::addSignature(SecretKey const& secretKey)
 void
 TransactionFrame::addSignature(DecoratedSignature const& signature)
 {
+    clearCached();
     getSignatures(mEnvelope).push_back(signature);
 }
 
@@ -201,8 +210,7 @@ TransactionFrame::checkSignature(SignatureChecker& signatureChecker,
     }
     signers.insert(signers.end(), acc.signers.begin(), acc.signers.end());
 
-    return signatureChecker.checkSignature(acc.accountID, signers,
-                                           neededWeight);
+    return signatureChecker.checkSignature(signers, neededWeight);
 }
 
 bool
@@ -213,7 +221,7 @@ TransactionFrame::checkSignatureNoAccount(SignatureChecker& signatureChecker,
     std::vector<Signer> signers;
     auto signerKey = KeyUtils::convertKey<SignerKey>(accountID);
     signers.push_back(Signer(signerKey, 1));
-    return signatureChecker.checkSignature(accountID, signers, 0);
+    return signatureChecker.checkSignature(signers, 0);
 }
 
 LedgerTxnEntry
@@ -590,7 +598,7 @@ TransactionFrame::removeOneTimeSignerFromAllSourceAccounts(
         return;
     }
 
-    std::unordered_set<AccountID> accounts{getSourceID()};
+    UnorderedSet<AccountID> accounts{getSourceID()};
     for (auto& op : mOperations)
     {
         accounts.emplace(op->getSourceID());
@@ -683,14 +691,13 @@ TransactionFrame::checkValid(AbstractLedgerTxn& ltxOuter,
 
 void
 TransactionFrame::insertKeysForFeeProcessing(
-    std::unordered_set<LedgerKey>& keys) const
+    UnorderedSet<LedgerKey>& keys) const
 {
     keys.emplace(accountKey(getSourceID()));
 }
 
 void
-TransactionFrame::insertKeysForTxApply(
-    std::unordered_set<LedgerKey>& keys) const
+TransactionFrame::insertKeysForTxApply(UnorderedSet<LedgerKey>& keys) const
 {
     for (auto const& op : mOperations)
     {
@@ -751,11 +758,14 @@ TransactionFrame::applyOperations(SignatureChecker& signatureChecker,
             {
                 app.getInvariantManager().checkOnOperationApply(
                     op->getOperation(), op->getResult(), ltxOp.getDelta());
+
+                // The operation meta will be empty if the transaction doesn't
+                // succeed so we may as well not do any work in that case
+                newMeta.v2().operations.emplace_back(ltxOp.getChanges());
             }
 
             if (txRes || ledgerVersion < 14)
             {
-                newMeta.v2().operations.emplace_back(ltxOp.getChanges());
                 ltxOp.commit();
             }
         }
@@ -779,22 +789,10 @@ TransactionFrame::applyOperations(SignatureChecker& signatureChecker,
                 newMeta.v2().txChangesAfter = ltxAfter.getChanges();
                 ltxAfter.commit();
             }
-            else if (ledgerVersion >= 14)
+            else if (ledgerVersion >= 14 && ltxTx.hasSponsorshipEntry())
             {
-                auto delta = ltxTx.getDelta();
-                for (auto const& kv : delta.entry)
-                {
-                    auto glk = kv.first;
-                    switch (glk.type())
-                    {
-                    case GeneralizedLedgerEntryType::SPONSORSHIP:
-                    case GeneralizedLedgerEntryType::SPONSORSHIP_COUNTER:
-                        getResult().result.code(txBAD_SPONSORSHIP);
-                        return false;
-                    default:
-                        break;
-                    }
-                }
+                getResult().result.code(txBAD_SPONSORSHIP);
+                return false;
             }
 
             ltxTx.commit();
@@ -819,16 +817,16 @@ TransactionFrame::applyOperations(SignatureChecker& signatureChecker,
     }
     catch (std::exception& e)
     {
-        CLOG(ERROR, "Tx") << "Exception while applying operations (txHash= "
-                          << xdr_to_string(getFullHash()) << "): " << e.what();
+        CLOG_ERROR(Tx, "Exception while applying operations ({}, {}): {}",
+                   xdr_to_string(getFullHash(), "fullHash"),
+                   xdr_to_string(getContentsHash(), "contentsHash"), e.what());
     }
     catch (...)
     {
-        CLOG(ERROR, "Tx")
-            << "Unknown exception while applying operations (txHash= "
-            << xdr_to_string(getFullHash()) << ")";
+        CLOG_ERROR(Tx, "Unknown exception while applying operations ({}, {})",
+                   xdr_to_string(getFullHash(), "fullHash"),
+                   xdr_to_string(getContentsHash(), "contentsHash"));
     }
-
     // This is only reachable if an exception is thrown
     getResult().result.code(txINTERNAL_ERROR);
 
@@ -913,8 +911,7 @@ TransactionFrame::apply(Application& app, AbstractLedgerTxn& ltx,
 StellarMessage
 TransactionFrame::toStellarMessage() const
 {
-    StellarMessage msg;
-    msg.type(TRANSACTION);
+    StellarMessage msg(TRANSACTION);
     msg.transaction() = mEnvelope;
     return msg;
 }

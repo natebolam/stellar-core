@@ -82,7 +82,7 @@ class Application;
  *                                            (false)
  *
  *
- *  BasicWork is a bulding block of task execution; Other notable works
+ *  BasicWork is a building block of task execution; Other notable works
  * available for implementers:
  *  - Work: BasicWork that allows adding and managing children.
  *  - WorkScheduler: Work that controls scheduling the hierarchy on the IO
@@ -188,11 +188,16 @@ class BasicWork : public std::enable_shared_from_this<BasicWork>,
     // propagate the notification up to the scheduler. An example use of
     // this would be RunCommandWork: a timer is used to async_wait for a
     // process to exit, with a call to `wakeUp` upon completion.
-    void wakeUp(std::function<void()> innerCallback = nullptr);
+    virtual void wakeUp(std::function<void()> innerCallback = nullptr);
 
     // Default wakeUp callback that implementers can use
     std::function<void()>
     wakeSelfUpCallback(std::function<void()> innerCallback = nullptr);
+
+    // To yield, setup a timer. Upon expiration, work will wake itself up and
+    // continue execution. Use this function before transitioning into
+    // WORK_WAITING state. Note: this function is idempotent
+    void setupWaitingCallback(std::chrono::milliseconds wakeUpIn);
 
     Application& mApp;
 
@@ -206,7 +211,7 @@ class BasicWork : public std::enable_shared_from_this<BasicWork>,
         RUNNING,
         WAITING,
         // Work is shutting down. During this stage, Work is prevented from
-        // making any furhter progress. This means that any attempts to call
+        // making any further progress. This means that any attempts to call
         // wake, add child work or invoke a callback will result in a no-op.
         ABORTING,
         ABORTED,
@@ -229,10 +234,12 @@ class BasicWork : public std::enable_shared_from_this<BasicWork>,
     void assertValidTransition(Transition const& t) const;
     static std::string stateName(InternalState st);
     uint64_t getRetryETA() const;
+    void resetWaitingTimer();
 
     std::function<void()> mNotifyCallback;
     std::string const mName;
     std::unique_ptr<VirtualTimer> mRetryTimer;
+    std::unique_ptr<VirtualTimer> mWaitingTimer;
 
     InternalState mState{InternalState::PENDING};
     size_t mRetries{0};

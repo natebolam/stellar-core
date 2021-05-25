@@ -46,11 +46,9 @@ using namespace std;
 namespace stellar
 {
 
-constexpr auto const TRANSACTION_QUEUE_SIZE = 4;
-constexpr auto const TRANSACTION_QUEUE_BAN_SIZE = 10;
-constexpr auto const TRANSACTION_QUEUE_MULTIPLIER = 4;
-constexpr size_t const OPERATION_BROADCAST_MULTIPLIER = 2;
-constexpr auto const OUT_OF_SYNC_RECOVERY_TIMER = std::chrono::seconds(10);
+constexpr uint32 const TRANSACTION_QUEUE_TIMEOUT_LEDGERS = 4;
+constexpr uint32 const TRANSACTION_QUEUE_BAN_LEDGERS = 10;
+constexpr uint32 const TRANSACTION_QUEUE_SIZE_MULTIPLIER = 2;
 
 std::unique_ptr<Herder>
 Herder::create(Application& app)
@@ -74,8 +72,9 @@ HerderImpl::SCPMetrics::SCPMetrics(Application& app)
 }
 
 HerderImpl::HerderImpl(Application& app)
-    : mTransactionQueue(app, TRANSACTION_QUEUE_SIZE, TRANSACTION_QUEUE_BAN_SIZE,
-                        TRANSACTION_QUEUE_MULTIPLIER)
+    : mTransactionQueue(app, TRANSACTION_QUEUE_TIMEOUT_LEDGERS,
+                        TRANSACTION_QUEUE_BAN_LEDGERS,
+                        TRANSACTION_QUEUE_SIZE_MULTIPLIER)
     , mPendingEnvelopes(app, *this)
     , mHerderSCPDriver(app, *this, mUpgrades, mPendingEnvelopes)
     , mLastSlotSaved(0)
@@ -127,7 +126,7 @@ HerderImpl::getStateHuman() const
 void
 HerderImpl::bootstrap()
 {
-    CLOG(INFO, "Herder") << "Force joining SCP with local state";
+    CLOG_INFO(Herder, "Force joining SCP with local state");
     assert(getSCP().isValidator());
     assert(mApp.getConfig().FORCE_SCP);
 
@@ -147,10 +146,11 @@ HerderImpl::shutdown()
     {
         // We want to interrupt any calculation-in-progress at shutdown to
         // avoid a long pause joining worker threads.
-        CLOG(DEBUG, "Herder")
-            << "Shutdown interrupting quorum transitive closure analysis.";
+        CLOG_DEBUG(Herder,
+                   "Shutdown interrupting quorum transitive closure analysis.");
         mLastQuorumMapIntersectionState.mInterruptFlag = true;
     }
+    mTransactionQueue.shutdown();
 }
 
 void
@@ -159,25 +159,21 @@ HerderImpl::processExternalized(uint64 slotIndex, StellarValue const& value)
     ZoneScoped;
     bool validated = getSCP().isSlotFullyValidated(slotIndex);
 
-    if (Logging::logDebug("Herder"))
-    {
-        CLOG(DEBUG, "Herder") << fmt::format(
-            "HerderSCPDriver::valueExternalized index: {} txSet: {}", slotIndex,
-            hexAbbrev(value.txSetHash));
-    }
+    CLOG_DEBUG(Herder, "HerderSCPDriver::valueExternalized index: {} txSet: {}",
+               slotIndex, hexAbbrev(value.txSetHash));
 
     if (getSCP().isValidator() && !validated)
     {
-        CLOG(WARNING, "Herder")
-            << fmt::format("Ledger {} ({}) closed and could NOT be fully "
-                           "validated by validator",
-                           slotIndex, hexAbbrev(value.txSetHash));
+        CLOG_WARNING(Herder,
+                     "Ledger {} ({}) closed and could NOT be fully "
+                     "validated by validator",
+                     slotIndex, hexAbbrev(value.txSetHash));
     }
 
     TxSetFramePtr externalizedSet = mPendingEnvelopes.getTxSet(value.txSetHash);
 
     // save the SCP messages in the database
-    if (mApp.getConfig().MODE_STORES_HISTORY)
+    if (mApp.getConfig().MODE_STORES_HISTORY_MISC)
     {
         mApp.getHerderPersistence().saveSCPHistory(
             static_cast<uint32>(slotIndex),
@@ -227,9 +223,8 @@ HerderImpl::valueExternalized(uint64 slotIndex, StellarValue const& value)
             auto slotInfo = getJsonQuorumInfo(getSCP().getLocalNodeID(), false,
                                               false, slotIndex);
             Json::FastWriter fw;
-            CLOG(WARNING, "Herder")
-                << fmt::format("Ledger took {} seconds, SCP information:{}",
-                               gap, fw.write(slotInfo));
+            CLOG_WARNING(Herder, "Ledger took {} seconds, SCP information:{}",
+                         gap, fw.write(slotInfo));
         }
 
         // trigger will be recreated when the ledger is closed
@@ -246,20 +241,6 @@ HerderImpl::valueExternalized(uint64 slotIndex, StellarValue const& value)
         TxSetFramePtr externalizedSet =
             mPendingEnvelopes.getTxSet(value.txSetHash);
         updateTransactionQueue(externalizedSet->mTransactions);
-
-        // Evict slots that are outside of our ledger validity bracket
-        auto minSlotToRemember = getMinLedgerSeqToRemember();
-        if (minSlotToRemember > LedgerManager::GENESIS_LEDGER_SEQ)
-        {
-            // report any outliers for the most recent slot to purge
-            if (mLedgerManager.isSynced())
-            {
-                getHerderSCPDriver().reportCostOutliersForSlot(
-                    minSlotToRemember - 1, true);
-            }
-            getHerderSCPDriver().purgeSlots(minSlotToRemember);
-            mPendingEnvelopes.eraseBelow(minSlotToRemember);
-        }
 
         ledgerClosed(false);
 
@@ -295,6 +276,26 @@ HerderImpl::outOfSyncRecovery()
     {
         return;
     }
+
+    // see if we can shed some data as to speed up recovery
+    uint32_t maxSlotsAhead = Herder::LEDGER_VALIDITY_BRACKET;
+    uint32 purgeSlot = 0;
+    getSCP().processSlotsDescendingFrom(
+        std::numeric_limits<uint64>::max(), [&](uint64 seq) {
+            if (getSCP().gotVBlocking(seq))
+            {
+                if (--maxSlotsAhead == 0)
+                {
+                    purgeSlot = static_cast<uint32>(seq);
+                }
+            }
+            return maxSlotsAhead != 0;
+        });
+    if (purgeSlot)
+    {
+        CLOG_INFO(Herder, "Purging slots older than {}", purgeSlot);
+        eraseBelow(purgeSlot);
+    }
     auto const& lcl = mLedgerManager.getLastClosedLedgerHeader().header;
     for (auto const& e : getSCP().getLatestMessagesSend(lcl.ledgerSeq + 1))
     {
@@ -314,9 +315,8 @@ HerderImpl::broadcast(SCPEnvelope const& e)
         m.type(SCP_MESSAGE);
         m.envelope() = e;
 
-        CLOG(DEBUG, "Herder") << "broadcast "
-                              << " s:" << e.statement.pledges.type()
-                              << " i:" << e.statement.slotIndex;
+        CLOG_DEBUG(Herder, "broadcast  s:{} i:{}", e.statement.pledges.type(),
+                   e.statement.slotIndex);
 
         mSCPMetrics.mEnvelopeEmit.Mark();
         mApp.getOverlayManager().broadcastMessage(m, true);
@@ -331,7 +331,7 @@ HerderImpl::startOutOfSyncTimer()
         return;
     }
 
-    mOutOfSyncTimer.expires_from_now(OUT_OF_SYNC_RECOVERY_TIMER);
+    mOutOfSyncTimer.expires_from_now(Herder::OUT_OF_SYNC_RECOVERY_TIMER);
 
     mOutOfSyncTimer.async_wait(
         [&]() {
@@ -347,11 +347,9 @@ HerderImpl::emitEnvelope(SCPEnvelope const& envelope)
     ZoneScoped;
     uint64 slotIndex = envelope.statement.slotIndex;
 
-    if (Logging::logDebug("Herder"))
-        CLOG(DEBUG, "Herder")
-            << "emitEnvelope"
-            << " s:" << envelope.statement.pledges.type() << " i:" << slotIndex
-            << " a:" << mApp.getStateHuman();
+    CLOG_DEBUG(Herder, "emitEnvelope s:{} i:{} a:{}",
+               envelope.statement.pledges.type(), slotIndex,
+               mApp.getStateHuman());
 
     persistSCPState(slotIndex);
 
@@ -365,10 +363,9 @@ HerderImpl::recvTransaction(TransactionFrameBasePtr tx)
     auto result = mTransactionQueue.tryAdd(tx);
     if (result == TransactionQueue::AddResult::ADD_STATUS_PENDING)
     {
-        if (Logging::logTrace("Herder"))
-            CLOG(TRACE, "Herder")
-                << "recv transaction " << hexAbbrev(tx->getFullHash())
-                << " for " << KeyUtils::toShortString(tx->getSourceID());
+        CLOG_TRACE(Herder, "recv transaction {} for {}",
+                   hexAbbrev(tx->getFullHash()),
+                   KeyUtils::toShortString(tx->getSourceID()));
     }
     return result;
 }
@@ -384,10 +381,10 @@ HerderImpl::checkCloseTime(SCPEnvelope const& envelope, bool enforceRecent)
 
     if (enforceRecent)
     {
-        ctCutoff = VirtualClock::to_time_t(mApp.getClock().system_now());
-        if (ctCutoff >= mApp.getConfig().MAXIMUM_LEDGER_CLOSETIME_DRIFT)
+        auto now = VirtualClock::to_time_t(mApp.getClock().system_now());
+        if (now >= mApp.getConfig().MAXIMUM_LEDGER_CLOSETIME_DRIFT)
         {
-            ctCutoff -= mApp.getConfig().MAXIMUM_LEDGER_CLOSETIME_DRIFT;
+            ctCutoff = now - mApp.getConfig().MAXIMUM_LEDGER_CLOSETIME_DRIFT;
         }
     }
 
@@ -470,10 +467,10 @@ HerderImpl::checkCloseTime(SCPEnvelope const& envelope, bool enforceRecent)
         abort();
     }
 
-    if (!b && Logging::logTrace("Herder"))
+    if (!b)
     {
-        CLOG(TRACE, "Herder")
-            << "Invalid close time processing " << getSCP().envToStr(st);
+        CLOG_TRACE(Herder, "Invalid close time processing {}",
+                   getSCP().envToStr(st));
     }
     return b;
 }
@@ -502,15 +499,10 @@ HerderImpl::recvSCPEnvelope(SCPEnvelope const& envelope)
         return Herder::ENVELOPE_STATUS_DISCARDED;
     }
 
-    if (!verifyEnvelope(envelope))
-    {
-        std::string txt("DISCARDED - bad envelope");
-        ZoneText(txt.c_str(), txt.size());
-        CLOG(TRACE, "Herder") << "Received bad envelope, discarding";
-        return Herder::ENVELOPE_STATUS_DISCARDED;
-    }
-
     mSCPMetrics.mEnvelopeReceive.Mark();
+
+    // **** first perform checks that do NOT require signature verification
+    // this allows to fast fail messages that we'd throw away anyways
 
     uint32_t minLedgerSeq = getMinLedgerSeqToRemember();
     uint32_t maxLedgerSeq = std::numeric_limits<uint32>::max();
@@ -520,8 +512,9 @@ HerderImpl::recvSCPEnvelope(SCPEnvelope const& envelope)
         // if the envelope contains an invalid close time, don't bother
         // processing it as we're not going to forward it anyways and it's
         // going to just sit in our SCP state not contributing anything useful.
-        CLOG(TRACE, "Herder")
-            << "skipping invalid close time (incompatible with current state)";
+        CLOG_TRACE(
+            Herder,
+            "skipping invalid close time (incompatible with current state)");
         std::string txt("DISCARDED - incompatible close time");
         ZoneText(txt.c_str(), txt.size());
         return Herder::ENVELOPE_STATUS_DISCARDED;
@@ -547,8 +540,8 @@ HerderImpl::recvSCPEnvelope(SCPEnvelope const& envelope)
         // if we've never been in sync, we can be more aggressive in how we
         // filter messages: we can ignore messages that are unlikely to be
         // the latest messages from the network
-        CLOG(TRACE, "Herder") << "recvSCPEnvelope: skipping invalid close time "
-                                 "(check MAXIMUM_LEDGER_CLOSETIME_DRIFT)";
+        CLOG_TRACE(Herder, "recvSCPEnvelope: skipping invalid close time "
+                           "(check MAXIMUM_LEDGER_CLOSETIME_DRIFT)");
         std::string txt("DISCARDED - invalid close time");
         ZoneText(txt.c_str(), txt.size());
         return Herder::ENVELOPE_STATUS_DISCARDED;
@@ -558,17 +551,25 @@ HerderImpl::recvSCPEnvelope(SCPEnvelope const& envelope)
     if (envelope.statement.slotIndex > maxLedgerSeq ||
         envelope.statement.slotIndex < minLedgerSeq)
     {
-        CLOG(TRACE, "Herder") << "Ignoring SCPEnvelope outside of range: "
-                              << envelope.statement.slotIndex << "( "
-                              << minLedgerSeq << "," << maxLedgerSeq << ")";
+        CLOG_TRACE(Herder, "Ignoring SCPEnvelope outside of range: {}( {},{})",
+                   envelope.statement.slotIndex, minLedgerSeq, maxLedgerSeq);
         std::string txt("DISCARDED - out of range");
         ZoneText(txt.c_str(), txt.size());
         return Herder::ENVELOPE_STATUS_DISCARDED;
     }
 
+    // **** from this point, we have to check signatures
+    if (!verifyEnvelope(envelope))
+    {
+        std::string txt("DISCARDED - bad envelope");
+        ZoneText(txt.c_str(), txt.size());
+        CLOG_TRACE(Herder, "Received bad envelope, discarding");
+        return Herder::ENVELOPE_STATUS_DISCARDED;
+    }
+
     if (envelope.statement.nodeID == getSCP().getLocalNode()->getNodeID())
     {
-        CLOG(TRACE, "Herder") << "recvSCPEnvelope: skipping own message";
+        CLOG_TRACE(Herder, "recvSCPEnvelope: skipping own message");
         std::string txt("SKIPPED_SELF");
         ZoneText(txt.c_str(), txt.size());
         return Herder::ENVELOPE_STATUS_SKIPPED_SELF;
@@ -579,15 +580,10 @@ HerderImpl::recvSCPEnvelope(SCPEnvelope const& envelope)
     {
         std::string txt("READY");
         ZoneText(txt.c_str(), txt.size());
-        if (Logging::logDebug("Herder"))
-        {
-            CLOG(DEBUG, "Herder")
-                << "recvSCPEnvelope (ready) from: "
-                << mApp.getConfig().toShortString(envelope.statement.nodeID)
-                << " s:" << envelope.statement.pledges.type()
-                << " i:" << envelope.statement.slotIndex
-                << " a:" << mApp.getStateHuman();
-        }
+        CLOG_DEBUG(Herder, "recvSCPEnvelope (ready) from: {} s:{} i:{} a:{}",
+                   mApp.getConfig().toShortString(envelope.statement.nodeID),
+                   envelope.statement.pledges.type(),
+                   envelope.statement.slotIndex, mApp.getStateHuman());
 
         processSCPQueue();
     }
@@ -603,15 +599,11 @@ HerderImpl::recvSCPEnvelope(SCPEnvelope const& envelope)
             std::string txt("PROCESSED");
             ZoneText(txt.c_str(), txt.size());
         }
-        if (Logging::logTrace("Herder"))
-        {
-            CLOG(TRACE, "Herder")
-                << "recvSCPEnvelope (" << status << ") from: "
-                << mApp.getConfig().toShortString(envelope.statement.nodeID)
-                << " s:" << envelope.statement.pledges.type()
-                << " i:" << envelope.statement.slotIndex
-                << " a:" << mApp.getStateHuman();
-        }
+        CLOG_TRACE(Herder, "recvSCPEnvelope ({}) from: {} s:{} i:{} a:{}",
+                   status,
+                   mApp.getConfig().toShortString(envelope.statement.nodeID),
+                   envelope.statement.pledges.type(),
+                   envelope.statement.slotIndex, mApp.getStateHuman());
     }
     return status;
 }
@@ -624,7 +616,7 @@ HerderImpl::recvSCPEnvelope(SCPEnvelope const& envelope,
     mPendingEnvelopes.addTxSet(txset.getContentsHash(),
                                envelope.statement.slotIndex,
                                std::make_shared<TxSetFrame>(txset));
-    mPendingEnvelopes.addSCPQuorumSet(sha256(xdr::xdr_to_opaque(qset)), qset);
+    mPendingEnvelopes.addSCPQuorumSet(xdrSha256(qset), qset);
     return recvSCPEnvelope(envelope);
 }
 
@@ -633,18 +625,26 @@ HerderImpl::sendSCPStateToPeer(uint32 ledgerSeq, Peer::pointer peer)
 {
     ZoneScoped;
     bool log = true;
+    auto maxSlots = Herder::LEDGER_VALIDITY_BRACKET;
     getSCP().processSlotsAscendingFrom(ledgerSeq, [&](uint64 seq) {
-        getSCP().processCurrentState(seq,
-                                     [&](SCPEnvelope const& e) {
-                                         StellarMessage m;
-                                         m.type(SCP_MESSAGE);
-                                         m.envelope() = e;
-                                         peer->sendMessage(m, log);
-                                         log = false;
-                                         return true;
-                                     },
-                                     false);
-        return true;
+        bool slotHadData = false;
+        getSCP().processCurrentState(
+            seq,
+            [&](SCPEnvelope const& e) {
+                StellarMessage m;
+                m.type(SCP_MESSAGE);
+                m.envelope() = e;
+                peer->sendMessage(m, log);
+                log = false;
+                slotHadData = true;
+                return true;
+            },
+            false);
+        if (slotHadData)
+        {
+            --maxSlots;
+        }
+        return maxSlots != 0;
     });
 }
 
@@ -741,6 +741,11 @@ HerderImpl::ctValidityOffset(uint64_t ct, std::chrono::milliseconds maxCtOffset)
 void
 HerderImpl::maybeTriggerNextLedger(bool synchronous)
 {
+    if (!mHerderSCPDriver.trackingSCP())
+    {
+        return;
+    }
+
     mTriggerTimer.cancel();
 
     uint64_t nextIndex = mHerderSCPDriver.nextConsensusLedgerIndex();
@@ -782,8 +787,7 @@ HerderImpl::maybeTriggerNextLedger(bool synchronous)
 
         if (ctOffset > std::chrono::milliseconds::zero())
         {
-            CLOG(INFO, "Herder") << fmt::format("Adjust trigger time by {} ms",
-                                                ctOffset.count());
+            CLOG_INFO(Herder, "Adjust trigger time by {} ms", ctOffset.count());
             triggerTime += ctOffset;
         }
 
@@ -800,8 +804,8 @@ HerderImpl::maybeTriggerNextLedger(bool synchronous)
     }
     else
     {
-        CLOG(DEBUG, "Herder")
-            << "Not presently synced, not triggering ledger-close.";
+        CLOG_DEBUG(Herder,
+                   "Not presently synced, not triggering ledger-close.");
     }
 
     // process any statements up to the next slot
@@ -826,6 +830,15 @@ HerderImpl::maybeTriggerNextLedger(bool synchronous)
 }
 
 void
+HerderImpl::eraseBelow(uint32 ledgerSeq)
+{
+    getHerderSCPDriver().purgeSlots(ledgerSeq);
+    mPendingEnvelopes.eraseBelow(ledgerSeq);
+    auto lastIndex = getCurrentLedgerSeq();
+    mApp.getOverlayManager().clearLedgersBelow(ledgerSeq, lastIndex);
+}
+
+void
 HerderImpl::ledgerClosed(bool synchronous)
 {
     // this method is triggered every time the most recent ledger is
@@ -835,14 +848,15 @@ HerderImpl::ledgerClosed(bool synchronous)
     ZoneScoped;
     mTriggerTimer.cancel();
 
-    CLOG(TRACE, "Herder") << "HerderImpl::ledgerClosed";
+    CLOG_TRACE(Herder, "HerderImpl::ledgerClosed");
 
-    auto lastIndex = mHerderSCPDriver.lastConsensusLedgerIndex();
-
-    mPendingEnvelopes.slotClosed(lastIndex);
-
-    mApp.getOverlayManager().ledgerClosed(lastIndex);
-
+    // Evict slots that are outside of our ledger validity bracket
+    auto minSlotToRemember = getMinLedgerSeqToRemember();
+    if (minSlotToRemember > LedgerManager::GENESIS_LEDGER_SEQ)
+    {
+        eraseBelow(minSlotToRemember);
+    }
+    mPendingEnvelopes.forceRebuildQuorum();
     maybeTriggerNextLedger(synchronous);
 }
 
@@ -943,8 +957,8 @@ HerderImpl::setInSyncAndTriggerNextLedger()
     // to trigger ledger, as the node is already making progress
     if (mTriggerTimer.seq() > 0)
     {
-        CLOG(DEBUG, "Herder") << "Skipping setInSyncAndTriggerNextLedger: "
-                                 "trigger timer already set";
+        CLOG_DEBUG(Herder, "Skipping setInSyncAndTriggerNextLedger: "
+                           "trigger timer already set");
         return;
     }
 
@@ -972,8 +986,8 @@ HerderImpl::triggerNextLedger(uint32_t ledgerSeqToTrigger,
 
     if (!isTrackingValid || !mLedgerManager.isSynced())
     {
-        CLOG(DEBUG, "Herder") << "triggerNextLedger: skipping (out of sync) : "
-                              << mApp.getStateHuman();
+        CLOG_DEBUG(Herder, "triggerNextLedger: skipping (out of sync) : {}",
+                   mApp.getStateHuman());
         return;
     }
 
@@ -998,9 +1012,9 @@ HerderImpl::triggerNextLedger(uint32_t ledgerSeqToTrigger,
 
     if (!isCtValid)
     {
-        CLOG(WARNING, "Herder") << fmt::format(
-            "Invalid close time selected ({}), skipping nomination",
-            nextCloseTime);
+        CLOG_WARNING(Herder,
+                     "Invalid close time selected ({}), skipping nomination",
+                     nextCloseTime);
         return;
     }
 
@@ -1010,18 +1024,8 @@ HerderImpl::triggerNextLedger(uint32_t ledgerSeqToTrigger,
     // validate here -- 'nextCloseTime'.  (The _offset_, therefore, is
     // the difference between 'nextCloseTime' and the last ledger close time.)
     TimePoint upperBoundCloseTimeOffset, lowerBoundCloseTimeOffset;
-    if (getHerderSCPDriver().curProtocolPreservesTxSetCloseTimeAffinity())
-    {
-        upperBoundCloseTimeOffset =
-            nextCloseTime - lcl.header.scpValue.closeTime;
-        lowerBoundCloseTimeOffset = upperBoundCloseTimeOffset;
-    }
-    else
-    {
-        upperBoundCloseTimeOffset =
-            getUpperBoundCloseTimeOffset(mApp, lcl.header.scpValue.closeTime);
-        lowerBoundCloseTimeOffset = 0;
-    }
+    upperBoundCloseTimeOffset = nextCloseTime - lcl.header.scpValue.closeTime;
+    lowerBoundCloseTimeOffset = upperBoundCloseTimeOffset;
 
     auto removed = proposedSet->trimInvalid(mApp, lowerBoundCloseTimeOffset,
                                             upperBoundCloseTimeOffset);
@@ -1055,8 +1059,7 @@ HerderImpl::triggerNextLedger(uint32_t ledgerSeqToTrigger,
         return;
     }
 
-    StellarValue newProposedValue(txSetHash, nextCloseTime, emptyUpgradeSteps,
-                                  STELLAR_VALUE_BASIC);
+    auto newUpgrades = emptyUpgradeSteps;
 
     // see if we need to include some upgrades
     auto upgrades = mUpgrades.createUpgradesFor(lcl.header);
@@ -1065,15 +1068,16 @@ HerderImpl::triggerNextLedger(uint32_t ledgerSeqToTrigger,
         Value v(xdr::xdr_to_opaque(upgrade));
         if (v.size() >= UpgradeType::max_size())
         {
-            CLOG(ERROR, "Herder")
-                << "HerderImpl::triggerNextLedger"
-                << " exceeded size for upgrade step (got " << v.size()
-                << " ) for upgrade type " << std::to_string(upgrade.type());
-            CLOG(ERROR, "Herder") << REPORT_INTERNAL_BUG;
+            CLOG_ERROR(
+                Herder,
+                "HerderImpl::triggerNextLedger exceeded size for upgrade "
+                "step (got {} ) for upgrade type {}",
+                v.size(), std::to_string(upgrade.type()));
+            CLOG_ERROR(Herder, "{}", REPORT_INTERNAL_BUG);
         }
         else
         {
-            newProposedValue.upgrades.emplace_back(v.begin(), v.end());
+            newUpgrades.emplace_back(v.begin(), v.end());
         }
     }
 
@@ -1082,12 +1086,12 @@ HerderImpl::triggerNextLedger(uint32_t ledgerSeqToTrigger,
     // If we are not a validating node we stop here and don't start nomination
     if (!getSCP().isValidator())
     {
-        CLOG(DEBUG, "Herder")
-            << "Non-validating node, skipping nomination (SCP).";
+        CLOG_DEBUG(Herder, "Non-validating node, skipping nomination (SCP).");
         return;
     }
 
-    signStellarValue(mApp.getConfig().NODE_SEED, newProposedValue);
+    StellarValue newProposedValue = makeStellarValue(
+        txSetHash, nextCloseTime, newUpgrades, mApp.getConfig().NODE_SEED);
     mHerderSCPDriver.nominate(slotIndex, newProposedValue, proposedSet,
                               lcl.header.scpValue);
 }
@@ -1107,14 +1111,14 @@ HerderImpl::setUpgrades(Upgrades::UpgradeParameters const& upgrades)
             StatusCategory::REQUIRES_UPGRADES);
         if (prev != message)
         {
-            CLOG(INFO, "Herder") << message;
+            CLOG_INFO(Herder, "{}", message);
             mApp.getStatusManager().setStatusMessage(
                 StatusCategory::REQUIRES_UPGRADES, message);
         }
     }
     else
     {
-        CLOG(INFO, "Herder") << "Network upgrades cleared";
+        CLOG_INFO(Herder, "Network upgrades cleared");
         mApp.getStatusManager().removeStatusMessage(
             StatusCategory::REQUIRES_UPGRADES);
     }
@@ -1248,7 +1252,7 @@ HerderImpl::getJsonQuorumInfo(NodeID const& id, bool summary, bool fullKeys,
         ret["qset"]["lag_ms"] =
             getHerderSCPDriver().getQsetLagInfo(summary, fullKeys);
         ret["qset"]["cost"] =
-            mHerderSCPDriver.getJsonValidatorCost(summary, fullKeys, index);
+            mPendingEnvelopes.getJsonValidatorCost(summary, fullKeys, index);
     }
     return ret;
 }
@@ -1272,7 +1276,7 @@ HerderImpl::getJsonTransitiveQuorumInfo(NodeID const& rootID, bool summary,
     std::map<Value, int> knownValues;
 
     // walk the quorum graph, starting at id
-    std::unordered_set<NodeID> visited;
+    UnorderedSet<NodeID> visited;
     std::vector<NodeID> next;
     next.push_back(rootID);
     visited.emplace(rootID);
@@ -1432,22 +1436,22 @@ HerderImpl::checkAndMaybeReanalyzeQuorumMap()
         // new hash we want.
         if (mLastQuorumMapIntersectionState.mCheckingQuorumMapHash == curr)
         {
-            CLOG(DEBUG, "Herder")
-                << "Transitive closure of quorum has changed, "
-                << "already analyzing new configuration.";
+            CLOG_DEBUG(Herder, "Transitive closure of quorum has "
+                               "changed, already analyzing new "
+                               "configuration.");
         }
         else
         {
-            CLOG(DEBUG, "Herder")
-                << "Transitive closure of quorum has changed, "
-                << "interrupting existing analysis.";
+            CLOG_DEBUG(Herder, "Transitive closure of quorum has "
+                               "changed, interrupting existing "
+                               "analysis.");
             mLastQuorumMapIntersectionState.mInterruptFlag = true;
         }
     }
     else
     {
-        CLOG(INFO, "Herder")
-            << "Transitive closure of quorum has changed, re-analyzing.";
+        CLOG_INFO(Herder,
+                  "Transitive closure of quorum has changed, re-analyzing.");
         // Not currently recalculating: start doing so.
         mLastQuorumMapIntersectionState.mRecalculating = true;
         mLastQuorumMapIntersectionState.mInterruptFlag = false;
@@ -1494,8 +1498,8 @@ HerderImpl::checkAndMaybeReanalyzeQuorumMap()
             }
             catch (QuorumIntersectionChecker::InterruptedException&)
             {
-                CLOG(DEBUG, "Herder")
-                    << "Quorum transitive closure analysis interrupted.";
+                CLOG_DEBUG(Herder,
+                           "Quorum transitive closure analysis interrupted.");
                 app.postOnMainThread(
                     [&hState] {
                         hState.mRecalculating = false;
@@ -1609,7 +1613,7 @@ HerderImpl::restoreSCPState()
             }
             for (auto const& qset : latestQSets)
             {
-                Hash hash = sha256(xdr::xdr_to_opaque(qset));
+                Hash hash = xdrSha256(qset);
                 mPendingEnvelopes.addSCPQuorumSet(hash, qset);
             }
             for (auto const& e : latestEnvs)
@@ -1625,9 +1629,10 @@ HerderImpl::restoreSCPState()
             // we may have exceptions when upgrading the protocol
             // this should be the only time we get exceptions decoding old
             // messages.
-            CLOG(INFO, "Herder") << "Error while restoring old scp messages, "
-                                    "proceeding without them : "
-                                 << e.what();
+            CLOG_INFO(Herder,
+                      "Error while restoring old scp messages, "
+                      "proceeding without them : {}",
+                      e.what());
         }
         mPendingEnvelopes.rebuildQuorumTrackerState();
     }
@@ -1660,8 +1665,9 @@ HerderImpl::restoreUpgrades()
         }
         catch (std::exception e)
         {
-            CLOG(INFO, "Herder") << "Error restoring upgrades '" << e.what()
-                                 << "' with upgrades '" << s << "'";
+            CLOG_INFO(Herder,
+                      "Error restoring upgrades '{}' with upgrades '{}'",
+                      e.what(), s);
         }
     }
 }
@@ -1671,6 +1677,9 @@ HerderImpl::restoreState()
 {
     restoreSCPState();
     restoreUpgrades();
+    // make sure that the transaction queue is setup against
+    // the lcl that we have right now
+    mTransactionQueue.maybeVersionUpgraded();
 }
 
 void
@@ -1699,15 +1708,7 @@ HerderImpl::updateTransactionQueue(
     mTransactionQueue.removeApplied(applied);
     mTransactionQueue.shift();
 
-    // Transactions in the queue need to be updated after the protocol 13
-    // upgrade
-    auto replacedTxs = mTransactionQueue.maybeVersionUpgraded();
-    for (auto const& replacedTx : replacedTxs)
-    {
-        mApp.getOverlayManager().updateFloodRecord(
-            replacedTx.mOld->toStellarMessage(),
-            replacedTx.mNew->toStellarMessage());
-    }
+    mTransactionQueue.maybeVersionUpgraded();
 
     // Generate a transaction set from a random hash and drop invalid
     auto lhhe = mLedgerManager.getLastClosedLedgerHeader();
@@ -1719,33 +1720,17 @@ HerderImpl::updateTransactionQueue(
         getUpperBoundCloseTimeOffset(mApp, lhhe.header.scpValue.closeTime));
     mTransactionQueue.ban(removed);
 
-    // Rebroadcast transactions, sorted in apply-order to maximize chances of
-    // propagation. Do not broadcast more operations than
-    // OPERATION_BROADCAST_MULTIPLIER times the maximum number of operations
-    // that can be included in the next ledger.
-    size_t maxOps = mLedgerManager.getLastMaxTxSetSizeOps();
-    size_t opsToFlood = OPERATION_BROADCAST_MULTIPLIER * maxOps;
-    for (auto tx : txSet->sortForApply())
-    {
-        if (opsToFlood < tx->getNumOperations())
-        {
-            break;
-        }
-        opsToFlood -= tx->getNumOperations();
-
-        auto msg = tx->toStellarMessage();
-        mApp.getOverlayManager().broadcastMessage(msg);
-    }
+    mTransactionQueue.rebroadcast();
 }
 
 void
 HerderImpl::herderOutOfSync()
 {
     ZoneScoped;
-    CLOG(WARNING, "Herder") << "Lost track of consensus";
+    CLOG_WARNING(Herder, "Lost track of consensus");
 
     auto s = getJsonInfo(20).toStyledString();
-    CLOG(WARNING, "Herder") << "Out of sync context: " << s;
+    CLOG_WARNING(Herder, "Out of sync context: {}", s);
 
     mSCPMetrics.mLostSync.Mark();
     mHerderSCPDriver.lostSync();
@@ -1753,7 +1738,7 @@ HerderImpl::herderOutOfSync()
     auto trackingData = mHerderSCPDriver.lastTrackingSCP();
     if (trackingData)
     {
-        mHerderSCPDriver.reportCostOutliersForSlot(
+        mPendingEnvelopes.reportCostOutliersForSlot(
             trackingData->mConsensusIndex, false);
     }
 
@@ -1769,6 +1754,8 @@ HerderImpl::getMoreSCPState()
     int const NB_PEERS_TO_ASK = 2;
 
     auto low = getMinLedgerSeqToAskPeers();
+
+    CLOG_INFO(Herder, "Asking peers for SCP messages more recent than {}", low);
 
     // ask a few random peers their SCP messages
     auto r = mApp.getOverlayManager().getRandomAuthenticatedPeers();
@@ -1815,14 +1802,21 @@ HerderImpl::verifyStellarValueSignature(StellarValue const& sv)
     return b;
 }
 
-void
-HerderImpl::signStellarValue(SecretKey const& s, StellarValue& sv)
+StellarValue
+HerderImpl::makeStellarValue(Hash const& txSetHash, uint64_t closeTime,
+                             xdr::xvector<UpgradeType, 6> const& upgrades,
+                             SecretKey const& s)
 {
     ZoneScoped;
+    StellarValue sv;
     sv.ext.v(STELLAR_VALUE_SIGNED);
+    sv.txSetHash = txSetHash;
+    sv.closeTime = closeTime;
+    sv.upgrades = upgrades;
     sv.ext.lcValueSignature().nodeID = s.getPublicKey();
     sv.ext.lcValueSignature().signature =
         s.sign(xdr::xdr_to_opaque(mApp.getNetworkID(), ENVELOPE_TYPE_SCPVALUE,
                                   sv.txSetHash, sv.closeTime));
+    return sv;
 }
 }

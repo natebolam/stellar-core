@@ -66,11 +66,11 @@ LedgerEntryIsValid::checkOnOperationApply(Operation const& operation,
 
 std::string
 LedgerEntryIsValid::checkIsValid(
-    GeneralizedLedgerEntry const& le,
-    std::shared_ptr<GeneralizedLedgerEntry const> const& genPrevious,
+    InternalLedgerEntry const& le,
+    std::shared_ptr<InternalLedgerEntry const> const& genPrevious,
     uint32_t ledgerSeq, uint32 version) const
 {
-    if (le.type() == GeneralizedLedgerEntryType::LEDGER_ENTRY)
+    if (le.type() == InternalLedgerEntryType::LEDGER_ENTRY)
     {
         auto const* previous =
             genPrevious ? &genPrevious->ledgerEntry() : nullptr;
@@ -101,7 +101,7 @@ LedgerEntryIsValid::checkIsValid(LedgerEntry const& le,
     case ACCOUNT:
         return checkIsValid(le.data.account(), version);
     case TRUSTLINE:
-        return checkIsValid(le.data.trustLine(), version);
+        return checkIsValid(le.data.trustLine(), previous, version);
     case OFFER:
         return checkIsValid(le.data.offer(), version);
     case DATA:
@@ -129,10 +129,12 @@ LedgerEntryIsValid::checkIsValid(AccountEntry const& ae, uint32 version) const
         return fmt::format("Account numSubEntries ({}) exceeds limit ({})",
                            ae.numSubEntries, INT32_MAX);
     }
-    if ((ae.flags & ~MASK_ACCOUNT_FLAGS) != 0)
+
+    if (!accountFlagIsValid(ae.flags, version))
     {
         return "Account flags are invalid";
     }
+
     if (!isString32Valid(ae.homeDomain))
     {
         return "Account homeDomain is invalid";
@@ -171,7 +173,9 @@ LedgerEntryIsValid::checkIsValid(AccountEntry const& ae, uint32 version) const
 }
 
 std::string
-LedgerEntryIsValid::checkIsValid(TrustLineEntry const& tl, uint32 version) const
+LedgerEntryIsValid::checkIsValid(TrustLineEntry const& tl,
+                                 LedgerEntry const* previous,
+                                 uint32 version) const
 {
     if (tl.asset.type() == ASSET_TYPE_NATIVE)
     {
@@ -197,6 +201,11 @@ LedgerEntryIsValid::checkIsValid(TrustLineEntry const& tl, uint32 version) const
     if (!trustLineFlagIsValid(tl.flags, version))
     {
         return "TrustLine flags are invalid";
+    }
+    if (previous && !isClawbackEnabledOnTrustline(previous->data.trustLine()) &&
+        isClawbackEnabledOnTrustline(tl))
+    {
+        return "TrustLine clawback flag was enabled";
     }
     return {};
 }
@@ -309,6 +318,21 @@ LedgerEntryIsValid::checkIsValid(LedgerEntry const& le,
     }
 
     auto const& cbe = le.data.claimableBalance();
+    if (version < 17 && cbe.ext.v() == 1)
+    {
+        return "ClaimableBalance has v1 extension before protocol version 17";
+    }
+
+    if (isClawbackEnabledOnClaimableBalance(le) &&
+        cbe.asset.type() == ASSET_TYPE_NATIVE)
+    {
+        return "ClaimableBalance clawback set on native balance";
+    }
+
+    if (!claimableBalanceFlagIsValid(cbe))
+    {
+        return "ClaimableBalance flags are invalid";
+    }
 
     if (previous)
     {

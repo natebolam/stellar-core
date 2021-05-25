@@ -3,6 +3,7 @@
 // of this distribution or at http://www.apache.org/licenses/LICENSE-2.0
 
 #include "work/BasicWork.h"
+#include "util/GlobalChecks.h"
 #include "util/Logging.h"
 #include "util/Math.h"
 #include <Tracy.hpp>
@@ -47,11 +48,24 @@ BasicWork::~BasicWork()
 }
 
 void
+BasicWork::resetWaitingTimer()
+{
+    if (mWaitingTimer)
+    {
+        mWaitingTimer->cancel();
+        mWaitingTimer.reset();
+    }
+}
+
+void
 BasicWork::shutdown()
 {
-    CLOG(TRACE, "Work") << "Shutting down: " << getName();
+    CLOG_TRACE(Work, "Shutting down: {}", getName());
     if (!isDone())
     {
+        // We're transitioning into "ABORTING" state, so cancel
+        // the waiting timer
+        resetWaitingTimer();
         setState(InternalState::ABORTING);
     }
 }
@@ -130,7 +144,7 @@ BasicWork::stateName(InternalState st)
 void
 BasicWork::reset()
 {
-    CLOG(TRACE, "Work") << "resetting " << getName();
+    CLOG_TRACE(Work, "resetting {}", getName());
 
     if (mRetryTimer)
     {
@@ -144,7 +158,7 @@ BasicWork::reset()
 void
 BasicWork::startWork(std::function<void()> notificationCallback)
 {
-    CLOG(TRACE, "Work") << "Starting " << getName();
+    CLOG_TRACE(Work, "Starting {}", getName());
 
     if (mState != InternalState::PENDING)
     {
@@ -170,10 +184,10 @@ BasicWork::waitForRetry()
     std::weak_ptr<BasicWork> weak = shared_from_this();
     auto t = getRetryDelay();
     mRetryTimer->expires_from_now(t);
-    CLOG(DEBUG, "Work")
-        << "Scheduling retry #" << (mRetries + 1) << "/" << mMaxRetries
-        << " in " << std::chrono::duration_cast<std::chrono::seconds>(t).count()
-        << " sec, for " << getName();
+    CLOG_DEBUG(Work, "Scheduling retry #{}/{} in {} sec, for {}",
+               (mRetries + 1), mMaxRetries,
+               std::chrono::duration_cast<std::chrono::seconds>(t).count(),
+               getName());
     setState(InternalState::WAITING);
     mRetryTimer->async_wait([weak](asio::error_code const& ec) {
         auto self = weak.lock();
@@ -275,8 +289,8 @@ BasicWork::setState(InternalState st)
 
     if (mState != st)
     {
-        CLOG(DEBUG, "Work") << "work " << getName() << " : "
-                            << stateName(mState) << " -> " << stateName(st);
+        CLOG_DEBUG(Work, "work {} : {} -> {}", getName(), stateName(mState),
+                   stateName(st));
         mState = st;
     }
 
@@ -296,13 +310,15 @@ BasicWork::wakeUp(std::function<void()> innerCallback)
         return;
     }
 
-    CLOG(TRACE, "Work") << "Waking up: " << getName();
+    CLOG_TRACE(Work, "Waking up: {}", getName());
     setState(InternalState::RUNNING);
+
+    // If we woke up because of the waiting timer firing, reset it
+    resetWaitingTimer();
 
     if (innerCallback)
     {
-        CLOG(TRACE, "Work")
-            << getName() << " woke up and is executing its callback";
+        CLOG_TRACE(Work, "{} woke up and is executing its callback", getName());
         innerCallback();
     }
 
@@ -329,6 +345,28 @@ BasicWork::wakeSelfUpCallback(std::function<void()> innerCallback)
 }
 
 void
+BasicWork::setupWaitingCallback(std::chrono::milliseconds wakeUpIn)
+{
+    // Work must be running to schedule a timer
+    releaseAssert(mState == BasicWork::InternalState::RUNNING);
+
+    // No-op if timer is already set
+    if (mWaitingTimer)
+    {
+        CLOG_WARNING(Work, "{}: waiting timer is already set (no-op)",
+                     getName());
+        return;
+    }
+
+    // Otherwise, setup the timer that no-ops on failure (if work is shutdown or
+    // destroyed, for example)
+    mWaitingTimer = std::make_unique<VirtualTimer>(mApp.getClock());
+    mWaitingTimer->expires_from_now(wakeUpIn);
+    mWaitingTimer->async_wait(wakeSelfUpCallback(),
+                              &VirtualTimer::onFailureNoop);
+}
+
+void
 BasicWork::crankWork()
 {
     ZoneScoped;
@@ -340,8 +378,8 @@ BasicWork::crankWork()
         auto doneAborting = onAbort();
         nextState =
             doneAborting ? InternalState::ABORTED : InternalState::ABORTING;
-        CLOG(TRACE, "Work") << "Abort progress for " << getName()
-                            << (doneAborting ? ": done" : ": still aborting");
+        CLOG_TRACE(Work, "Abort progress for {}{}", getName(),
+                   (doneAborting ? ": done" : ": still aborting"));
     }
     else
     {

@@ -8,10 +8,11 @@
 #include "overlay/StellarXDR.h"
 #include "util/SecretValue.h"
 #include "util/Timer.h"
-#include "util/optional.h"
+#include "util/UnorderedMap.h"
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 
@@ -19,6 +20,8 @@
 
 namespace stellar
 {
+extern bool gIsProductionNetwork;
+
 struct HistoryArchiveConfiguration
 {
     std::string mName;
@@ -76,12 +79,11 @@ class Config : public std::enable_shared_from_this<Config>
     std::string toString(ValidatorQuality q) const;
     ValidatorQuality parseQuality(std::string const& q) const;
 
-    std::vector<ValidatorEntry>
-    parseValidators(std::shared_ptr<cpptoml::base> validators,
-                    std::unordered_map<std::string, ValidatorQuality> const&
-                        domainQualityMap);
+    std::vector<ValidatorEntry> parseValidators(
+        std::shared_ptr<cpptoml::base> validators,
+        UnorderedMap<std::string, ValidatorQuality> const& domainQualityMap);
 
-    std::unordered_map<std::string, ValidatorQuality>
+    UnorderedMap<std::string, ValidatorQuality>
     parseDomainsQuality(std::shared_ptr<cpptoml::base> domainsQuality);
 
     static SCPQuorumSet
@@ -92,13 +94,14 @@ class Config : public std::enable_shared_from_this<Config>
     static SCPQuorumSet
     generateQuorumSet(std::vector<ValidatorEntry> const& validators);
 
-    void
-    addSelfToValidators(std::vector<ValidatorEntry>& validators,
-                        std::unordered_map<std::string, ValidatorQuality> const&
-                            domainQualityMap);
+    void addSelfToValidators(
+        std::vector<ValidatorEntry>& validators,
+        UnorderedMap<std::string, ValidatorQuality> const& domainQualityMap);
 
     void verifyHistoryValidatorsBlocking(
         std::vector<ValidatorEntry> const& validators);
+
+    std::vector<std::chrono::microseconds> mOpApplySleepTimeForTesting;
 
   public:
     static const uint32 CURRENT_LEDGER_PROTOCOL_VERSION;
@@ -188,10 +191,14 @@ class Config : public std::enable_shared_from_this<Config>
     // system.
     bool ARTIFICIALLY_REPLAY_WITH_NEWEST_BUCKET_LOGIC_FOR_TESTING;
 
-    // A config parameter that forces transaction application during ledger
-    // close to sleep for a given number of microseconds. This option is only
-    // for consensus and overlay simulation testing.
-    uint32_t OP_APPLY_SLEEP_TIME_FOR_TESTING;
+    // Config parameters that force transaction application during ledger
+    // close to sleep for OP_APPLY_SLEEP_TIME_DURATION_FOR_TESTING[i]
+    // microseconds OP_APPLY_SLEEP_TIME_WEIGHT_FOR_TESTING[i]% of the time for
+    // each i. These options are only for consensus and overlay simulation
+    // testing. These two must be used together.
+    std::vector<std::chrono::microseconds>
+        OP_APPLY_SLEEP_TIME_DURATION_FOR_TESTING;
+    std::vector<unsigned short> OP_APPLY_SLEEP_TIME_WEIGHT_FOR_TESTING;
 
     // A config parameter that allows a node to generate buckets. This should
     // be set to `false` only for testing purposes.
@@ -203,9 +210,16 @@ class Config : public std::enable_shared_from_this<Config>
     // production validators.
     bool MODE_USES_IN_MEMORY_LEDGER;
 
+    // A config parameter that can be set to true (in a captive-core
+    // configuration) to delay emitting metadata by one ledger.
+    bool EXPERIMENTAL_PRECAUTION_DELAY_META;
+
     // A config parameter that stores historical data, such as transactions,
     // fees, and scp history in the database
-    bool MODE_STORES_HISTORY;
+    bool MODE_STORES_HISTORY_MISC;
+
+    // A config parameter that stores ledger headers in the database
+    bool MODE_STORES_HISTORY_LEDGERHEADERS;
 
     // A config parameter that controls whether core automatically catches up
     // when it has buffered enough input; if false an out-of-sync node will
@@ -282,7 +296,7 @@ class Config : public std::enable_shared_from_this<Config>
 
     // maximum allowed drift for close time when joining the network for the
     // first time
-    uint64 MAXIMUM_LEDGER_CLOSETIME_DRIFT;
+    time_t MAXIMUM_LEDGER_CLOSETIME_DRIFT;
 
     // note: all versions in the range
     // [OVERLAY_PROTOCOL_MIN_VERSION, OVERLAY_PROTOCOL_VERSION] must be handled
@@ -290,6 +304,7 @@ class Config : public std::enable_shared_from_this<Config>
     uint32_t OVERLAY_PROTOCOL_VERSION;     // max overlay version understood
     std::string VERSION_STR;
     std::string LOG_FILE_PATH;
+    bool LOG_COLOR;
     std::string BUCKET_DIR_PATH;
     uint32_t TESTING_UPGRADE_DESIRED_FEE; // in stroops
     uint32_t TESTING_UPGRADE_RESERVE;     // in stroops
@@ -309,10 +324,10 @@ class Config : public std::enable_shared_from_this<Config>
     unsigned short PEER_AUTHENTICATION_TIMEOUT;
     unsigned short PEER_TIMEOUT;
     unsigned short PEER_STRAGGLER_TIMEOUT;
-    std::chrono::milliseconds MAX_BATCH_READ_PERIOD_MS;
-    int MAX_BATCH_READ_COUNT;
     int MAX_BATCH_WRITE_COUNT;
     int MAX_BATCH_WRITE_BYTES;
+    double FLOOD_OP_RATE_PER_LEDGER;
+    int FLOOD_TX_PERIOD_MS;
     static constexpr auto const POSSIBLY_PREFERRED_EXTRA = 2;
     static constexpr auto const REALLY_DEAD_NUM_FAILURES_CUTOFF = 120;
 
@@ -370,11 +385,7 @@ class Config : public std::enable_shared_from_this<Config>
     // Data layer cache configuration
     // - ENTRY_CACHE_SIZE controls the maximum number of LedgerEntry objects
     //   that will be stored in the cache
-    // - BEST_OFFERS_CACHE_SIZE controls the maximum number of Asset pairs that
-    //   will be stored in the cache, although many LedgerEntry objects may be
-    //   associated with a single Asset pair
     size_t ENTRY_CACHE_SIZE;
-    size_t BEST_OFFERS_CACHE_SIZE;
 
     // Data layer prefetcher configuration
     // - PREFETCH_BATCH_SIZE determines how many records we'll prefetch per
@@ -388,6 +399,14 @@ class Config : public std::enable_shared_from_this<Config>
     // doing a graceful shutdown
     bool TEST_CASES_ENABLED;
 #endif
+
+#ifdef BEST_OFFER_DEBUGGING
+    bool BEST_OFFER_DEBUGGING_ENABLED;
+#endif
+
+    // Any transaction that reaches the TransactionQueue will be rejected if it
+    // contains an operation in this list.
+    std::vector<OperationType> EXCLUDE_TRANSACTIONS_CONTAINING_OPERATION_TYPE;
 
     Config();
 
@@ -407,6 +426,12 @@ class Config : public std::enable_shared_from_this<Config>
 
     std::chrono::seconds getExpectedLedgerCloseTime() const;
 
+    void setInMemoryMode();
+    bool isInMemoryMode() const;
+    bool isInMemoryModeWithoutMinimalDB() const;
+    bool modeStoresAllHistory() const;
+    bool modeStoresAnyHistory() const;
+
     void logBasicInfo();
     void setNoListen();
     void setNoPublish();
@@ -417,5 +442,11 @@ class Config : public std::enable_shared_from_this<Config>
     // A special name to be used for stdin in stead of a file name in command
     // line arguments.
     static std::string const STDIN_SPECIAL_NAME;
+
+    std::vector<std::chrono::microseconds> const&
+    getOpApplySleepTimeForTesting() const;
+
+    std::vector<std::chrono::microseconds>
+    processOpApplySleepTimeForTestingConfigs();
 };
 }

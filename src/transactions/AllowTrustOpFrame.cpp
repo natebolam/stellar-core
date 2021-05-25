@@ -10,16 +10,38 @@
 #include "ledger/LedgerTxnHeader.h"
 #include "ledger/TrustLineWrapper.h"
 #include "main/Application.h"
-#include "transactions/SponsorshipUtils.h"
 #include "transactions/TransactionUtils.h"
 #include <Tracy.hpp>
 
 namespace stellar
 {
+
+void
+setAuthorized(LedgerTxnHeader const& header, LedgerTxnEntry& entry,
+              uint32_t authorized)
+{
+    if (!trustLineFlagIsValid(authorized, header))
+    {
+        throw std::runtime_error("trying to set invalid trust line flag");
+    }
+
+    if ((authorized & ~TRUSTLINE_AUTH_FLAGS) != 0)
+    {
+        throw std::runtime_error(
+            "setAuthorized can only modify authorization flags");
+    }
+
+    auto& tl = entry.current().data.trustLine();
+
+    tl.flags &= ~TRUSTLINE_AUTH_FLAGS;
+    tl.flags |= authorized;
+}
+
 AllowTrustOpFrame::AllowTrustOpFrame(Operation const& op, OperationResult& res,
                                      TransactionFrame& parentTx)
     : OperationFrame(op, res, parentTx)
     , mAllowTrust(mOperation.body.allowTrustOp())
+    , mAsset(getAsset(getSourceID(), mAllowTrust.asset))
 {
 }
 
@@ -33,7 +55,8 @@ bool
 AllowTrustOpFrame::doApply(AbstractLedgerTxn& ltx)
 {
     ZoneNamedN(applyZone, "AllowTrustOp apply", true);
-    if (ltx.loadHeader().current().ledgerVersion > 2)
+    auto ledgerVersion = ltx.loadHeader().current().ledgerVersion;
+    if (ledgerVersion > 2)
     {
         if (mAllowTrust.trustor == getSourceID())
         {
@@ -49,9 +72,9 @@ AllowTrustOpFrame::doApply(AbstractLedgerTxn& ltx)
         auto header = ltxSource.loadHeader();
         auto sourceAccountEntry = loadSourceAccount(ltxSource, header);
         auto const& sourceAccount = sourceAccountEntry.current().data.account();
-        if (!(sourceAccount.flags & AUTH_REQUIRED_FLAG))
-        { // this account doesn't require authorization to
-            // hold credit
+        if (header.current().ledgerVersion < 16 &&
+            !(sourceAccount.flags & AUTH_REQUIRED_FLAG))
+        {
             innerResult().code(ALLOW_TRUST_TRUST_NOT_REQUIRED);
             return false;
         }
@@ -71,22 +94,9 @@ AllowTrustOpFrame::doApply(AbstractLedgerTxn& ltx)
         return true;
     }
 
-    Asset ci;
-    ci.type(mAllowTrust.asset.type());
-    if (mAllowTrust.asset.type() == ASSET_TYPE_CREDIT_ALPHANUM4)
-    {
-        ci.alphaNum4().assetCode = mAllowTrust.asset.assetCode4();
-        ci.alphaNum4().issuer = getSourceID();
-    }
-    else if (mAllowTrust.asset.type() == ASSET_TYPE_CREDIT_ALPHANUM12)
-    {
-        ci.alphaNum12().assetCode = mAllowTrust.asset.assetCode12();
-        ci.alphaNum12().issuer = getSourceID();
-    }
-
     LedgerKey key(TRUSTLINE);
     key.trustLine().accountID = mAllowTrust.trustor;
-    key.trustLine().asset = ci;
+    key.trustLine().asset = mAsset;
 
     bool shouldRemoveOffers = false;
     {
@@ -116,35 +126,15 @@ AllowTrustOpFrame::doApply(AbstractLedgerTxn& ltx)
                              mAllowTrust.authorize == 0;
     }
 
-    auto header = ltx.loadHeader();
-    if (header.current().ledgerVersion >= 10 && shouldRemoveOffers)
+    if (ledgerVersion >= 10 && shouldRemoveOffers)
     {
         // Delete all offers owned by the trustor that are either buying or
         // selling the asset which had authorization revoked.
-        auto offers = ltx.loadOffersByAccountAndAsset(mAllowTrust.trustor, ci);
-        for (auto& offer : offers)
-        {
-            auto const& oe = offer.current().data.offer();
-            if (!(oe.sellerID == mAllowTrust.trustor))
-            {
-                throw std::runtime_error("Offer not owned by expected account");
-            }
-            else if (!(oe.buying == ci || oe.selling == ci))
-            {
-                throw std::runtime_error(
-                    "Offer not buying or selling expected asset");
-            }
-
-            releaseLiabilities(ltx, header, offer);
-            auto trustAcc = stellar::loadAccount(ltx, mAllowTrust.trustor);
-            removeEntryWithPossibleSponsorship(ltx, header, offer.current(),
-                                               trustAcc);
-            offer.erase();
-        }
+        removeOffersByAccountAndAsset(ltx, mAllowTrust.trustor, mAsset);
     }
 
     auto trustLineEntry = ltx.load(key);
-    setAuthorized(header, trustLineEntry, mAllowTrust.authorize);
+    setAuthorized(ltx.loadHeader(), trustLineEntry, mAllowTrust.authorize);
 
     innerResult().code(ALLOW_TRUST_SUCCESS);
     return true;
@@ -159,26 +149,25 @@ AllowTrustOpFrame::doCheckValid(uint32_t ledgerVersion)
         return false;
     }
 
+    if (mAllowTrust.authorize > AUTHORIZED_TO_MAINTAIN_LIABILITIES_FLAG)
+    {
+        innerResult().code(ALLOW_TRUST_MALFORMED);
+        return false;
+    }
+
     if (!trustLineFlagIsValid(mAllowTrust.authorize, ledgerVersion))
     {
         innerResult().code(ALLOW_TRUST_MALFORMED);
         return false;
     }
 
-    Asset ci;
-    ci.type(mAllowTrust.asset.type());
-    if (mAllowTrust.asset.type() == ASSET_TYPE_CREDIT_ALPHANUM4)
+    if (!isAssetValid(mAsset))
     {
-        ci.alphaNum4().assetCode = mAllowTrust.asset.assetCode4();
-        ci.alphaNum4().issuer = getSourceID();
-    }
-    else if (mAllowTrust.asset.type() == ASSET_TYPE_CREDIT_ALPHANUM12)
-    {
-        ci.alphaNum12().assetCode = mAllowTrust.asset.assetCode12();
-        ci.alphaNum12().issuer = getSourceID();
+        innerResult().code(ALLOW_TRUST_MALFORMED);
+        return false;
     }
 
-    if (!isAssetValid(ci))
+    if (ledgerVersion > 15 && mAllowTrust.trustor == getSourceID())
     {
         innerResult().code(ALLOW_TRUST_MALFORMED);
         return false;

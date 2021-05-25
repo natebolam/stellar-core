@@ -35,8 +35,7 @@ class HistoryManagerImpl : public HistoryManager
     medida::Meter& mPublishFailure;
 
     medida::Timer& mEnqueueToPublishTimer;
-    std::unordered_map<uint32_t, std::chrono::steady_clock::time_point>
-        mEnqueueTimes;
+    UnorderedMap<uint32_t, std::chrono::steady_clock::time_point> mEnqueueTimes;
 
     PublishQueueBuckets::BucketCount loadBucketsReferencedByPublishQueue();
 #ifdef BUILD_TESTS
@@ -76,7 +75,7 @@ class HistoryManagerImpl : public HistoryManager
                           std::vector<std::string> const& originalBuckets,
                           bool success) override;
 
-    InferredQuorum inferQuorum(uint32_t ledgerNum) override;
+    void deleteCheckpointsNewerThan(uint32_t ledgerSeq) override;
 
     std::string const& getTmpDir() override;
 

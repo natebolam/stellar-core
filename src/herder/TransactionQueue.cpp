@@ -4,18 +4,22 @@
 
 #include "herder/TransactionQueue.h"
 #include "crypto/SecretKey.h"
+#include "herder/TxQueueLimiter.h"
 #include "ledger/LedgerManager.h"
 #include "ledger/LedgerTxn.h"
 #include "main/Application.h"
+#include "overlay/OverlayManager.h"
 #include "transactions/FeeBumpTransactionFrame.h"
 #include "transactions/TransactionBridge.h"
 #include "transactions/TransactionUtils.h"
+#include "util/GlobalChecks.h"
 #include "util/HashOfHash.h"
 #include "util/XDROperators.h"
-#include <Tracy.hpp>
 
+#include <Tracy.hpp>
 #include <algorithm>
 #include <fmt/format.h>
+#include <functional>
 #include <medida/meter.h>
 #include <medida/metrics_registry.h>
 #include <medida/timer.h>
@@ -23,10 +27,10 @@
 
 namespace stellar
 {
-const int64_t TransactionQueue::FEE_MULTIPLIER = 10;
+const uint64_t TransactionQueue::FEE_MULTIPLIER = 10;
 
-TransactionQueue::TransactionQueue(Application& app, int pendingDepth,
-                                   int banDepth, int poolLedgerMultiplier)
+TransactionQueue::TransactionQueue(Application& app, uint32 pendingDepth,
+                                   uint32 banDepth, uint32 poolLedgerMultiplier)
     : mApp(app)
     , mPendingDepth(pendingDepth)
     , mBannedTransactions(banDepth)
@@ -37,13 +41,26 @@ TransactionQueue::TransactionQueue(Application& app, int pendingDepth,
           app.getMetrics().NewCounter({"herder", "pending-txs", "banned"}))
     , mTransactionsDelay(
           app.getMetrics().NewTimer({"herder", "pending-txs", "delay"}))
-    , mPoolLedgerMultiplier(poolLedgerMultiplier)
+    , mBroadcastTimer(app)
 {
-    for (auto i = 0; i < pendingDepth; i++)
+    mTxQueueLimiter = std::make_unique<TxQueueLimiter>(poolLedgerMultiplier,
+                                                       app.getLedgerManager());
+    for (uint32 i = 0; i < pendingDepth; i++)
     {
         mSizeByAge.emplace_back(&app.getMetrics().NewCounter(
             {"herder", "pending-txs", fmt::format("age{}", i)}));
     }
+
+    auto const& filteredTypes =
+        app.getConfig().EXCLUDE_TRANSACTIONS_CONTAINING_OPERATION_TYPE;
+    mFilteredTypes.insert(filteredTypes.begin(), filteredTypes.end());
+    mBroadcastSeed =
+        rand_uniform<uint64>(0, std::numeric_limits<uint64>::max());
+}
+
+TransactionQueue::~TransactionQueue()
+{
+    // empty destructor needed here due to the dependency on TxQueueLimiter
 }
 
 // returns true, if a transaction can be replaced by another
@@ -132,10 +149,14 @@ TransactionQueue::canAdd(TransactionFrameBasePtr tx,
     {
         return TransactionQueue::AddResult::ADD_STATUS_TRY_AGAIN_LATER;
     }
+    if (isFiltered(tx))
+    {
+        return TransactionQueue::AddResult::ADD_STATUS_FILTERED;
+    }
 
     int64_t netFee = tx->getFeeBid();
-    int64_t netOps = tx->getNumOperations();
     int64_t seqNum = 0;
+    TransactionFrameBasePtr oldTx;
 
     stateIter = mAccountStates.find(tx->getSourceID());
     if (stateIter != mAccountStates.end())
@@ -181,11 +202,9 @@ TransactionQueue::canAdd(TransactionFrameBasePtr tx,
                         return TransactionQueue::AddResult::ADD_STATUS_ERROR;
                     }
 
-                    netOps -= oldTxIter->mTx->getNumOperations();
-
-                    int64_t oldFee = oldTxIter->mTx->getFeeBid();
-                    if (oldTxIter->mTx->getFeeSourceID() ==
-                        tx->getFeeSourceID())
+                    oldTx = oldTxIter->mTx;
+                    int64_t oldFee = oldTx->getFeeBid();
+                    if (oldTx->getFeeSourceID() == tx->getFeeSourceID())
                     {
                         netFee -= oldFee;
                     }
@@ -196,9 +215,16 @@ TransactionQueue::canAdd(TransactionFrameBasePtr tx,
         }
     }
 
-    if (netOps + mQueueSizeOps > maxQueueSizeOps())
+    auto canAddRes = mTxQueueLimiter->canAddTx(tx, oldTx);
+    if (!canAddRes.first)
     {
         ban({tx});
+        if (canAddRes.second != 0)
+        {
+            tx->getResult().result.code(txINSUFFICIENT_FEE);
+            tx->getResult().feeCharged = canAddRes.second;
+            return TransactionQueue::AddResult::ADD_STATUS_ERROR;
+        }
         return TransactionQueue::AddResult::ADD_STATUS_TRY_AGAIN_LATER;
     }
 
@@ -245,6 +271,19 @@ TransactionQueue::releaseFeeMaybeEraseAccountState(TransactionFrameBasePtr tx)
     }
 }
 
+void
+TransactionQueue::prepareDropTransaction(AccountState& as, TimestampedTx& tstx)
+{
+    auto ops = tstx.mTx->getNumOperations();
+    as.mQueueSizeOps -= ops;
+    mTxQueueLimiter->removeTransaction(tstx.mTx);
+    if (!tstx.mBroadcasted)
+    {
+        as.mBroadcastQueueOps -= ops;
+    }
+    releaseFeeMaybeEraseAccountState(tstx.mTx);
+}
+
 TransactionQueue::AddResult
 TransactionQueue::tryAdd(TransactionFrameBasePtr tx)
 {
@@ -266,19 +305,42 @@ TransactionQueue::tryAdd(TransactionFrameBasePtr tx)
 
     if (oldTxIter != stateIter->second.mTransactions.end())
     {
-        releaseFeeMaybeEraseAccountState(oldTxIter->mTx);
-        stateIter->second.mQueueSizeOps -= oldTxIter->mTx->getNumOperations();
-        mQueueSizeOps -= oldTxIter->mTx->getNumOperations();
-        *oldTxIter = {tx, mApp.getClock().now()};
+        prepareDropTransaction(stateIter->second, *oldTxIter);
+        *oldTxIter = {tx, false, mApp.getClock().now()};
     }
     else
     {
-        stateIter->second.mTransactions.push_back({tx, mApp.getClock().now()});
+        stateIter->second.mTransactions.push_back(
+            {tx, false, mApp.getClock().now()});
+        oldTxIter = --stateIter->second.mTransactions.end();
         mSizeByAge[stateIter->second.mAge]->inc();
     }
-    stateIter->second.mQueueSizeOps += tx->getNumOperations();
-    mQueueSizeOps += tx->getNumOperations();
-    mAccountStates[tx->getFeeSourceID()].mTotalFees += tx->getFeeBid();
+    auto ops = tx->getNumOperations();
+    stateIter->second.mQueueSizeOps += ops;
+    stateIter->second.mBroadcastQueueOps += ops;
+    auto& thisAccountState = mAccountStates[tx->getFeeSourceID()];
+    thisAccountState.mTotalFees += tx->getFeeBid();
+
+    // make space so that we can add this transaction
+    // this will succeed as `canAdd` ensures that this is the case
+    if (!mTxQueueLimiter->evictTransactions(
+            ops, [&](TransactionFrameBasePtr const& txToEvict) {
+                ban({txToEvict});
+            }))
+    {
+        throw std::logic_error(
+            "Invalid queue state, could not evict transactions");
+    }
+    mTxQueueLimiter->addTransaction(tx);
+
+    if (mApp.getConfig().FLOOD_TX_PERIOD_MS != 0)
+    {
+        broadcast(false);
+    }
+    else
+    {
+        broadcastTx(thisAccountState, *oldTxIter);
+    }
 
     return res;
 }
@@ -290,15 +352,12 @@ TransactionQueue::dropTransactions(AccountStates::iterator stateIter,
 {
     ZoneScoped;
     // Remove fees and update queue size for each transaction to be dropped.
-    // Note releaseFeeMaybeEraseSourceAccount may erase other iterators from
+    // Note prepareDropTransaction may erase other iterators from
     // mAccountStates, but it will not erase stateIter because it has at least
     // one transaction (otherwise we couldn't reach that line).
     for (auto iter = begin; iter != end; ++iter)
     {
-        auto ops = iter->mTx->getNumOperations();
-        stateIter->second.mQueueSizeOps -= ops;
-        mQueueSizeOps -= ops;
-        releaseFeeMaybeEraseAccountState(iter->mTx);
+        prepareDropTransaction(stateIter->second, *iter);
     }
 
     // Actually erase the transactions to be dropped.
@@ -325,7 +384,7 @@ TransactionQueue::removeApplied(Transactions const& appliedTxs)
     ZoneScoped;
     // Find the highest sequence number that was applied for each source account
     std::map<AccountID, int64_t> seqByAccount;
-    std::unordered_set<Hash> appliedHashes;
+    UnorderedSet<Hash> appliedHashes;
     appliedHashes.reserve(appliedTxs.size());
     for (auto const& tx : appliedTxs)
     {
@@ -494,13 +553,14 @@ TransactionQueue::getAccountTransactionQueueInfo(
     auto i = mAccountStates.find(accountID);
     if (i == std::end(mAccountStates))
     {
-        return {0, 0, 0, 0};
+        return {0, 0, 0, 0, 0};
     }
 
-    auto const& txs = i->second.mTransactions;
+    auto& as = i->second;
+    auto const& txs = as.mTransactions;
     auto seqNum = txs.empty() ? 0 : txs.back().mTx->getSeqNum();
-    return {seqNum, i->second.mTotalFees, i->second.mQueueSizeOps,
-            i->second.mAge};
+    return {seqNum, as.mTotalFees, as.mQueueSizeOps, as.mBroadcastQueueOps,
+            as.mAge};
 }
 
 void
@@ -528,19 +588,16 @@ TransactionQueue::shift()
 
         if (mPendingDepth == it->second.mAge)
         {
-            for (auto const& toBan : it->second.mTransactions)
+            for (auto& toBan : it->second.mTransactions)
             {
                 // This never invalidates it because
                 //     !it->second.mTransactions.empty()
                 // otherwise we couldn't have reached this line.
-                releaseFeeMaybeEraseAccountState(toBan.mTx);
+                prepareDropTransaction(it->second, toBan);
                 bannedFront.insert(toBan.mTx->getFullHash());
             }
             mBannedTransactionsCounter.inc(
                 static_cast<int64_t>(it->second.mTransactions.size()));
-            mQueueSizeOps -= it->second.mQueueSizeOps;
-            it->second.mQueueSizeOps = 0;
-
             it->second.mTransactions.clear();
             if (it->second.mTotalFees == 0)
             {
@@ -563,6 +620,10 @@ TransactionQueue::shift()
     {
         mSizeByAge[i]->set_count(sizes[i]);
     }
+    mTxQueueLimiter->resetMinFeeNeeded();
+    // pick a new randomizing seed for tie breaking
+    mBroadcastSeed =
+        rand_uniform<uint64>(0, std::numeric_limits<uint64>::max());
 }
 
 int
@@ -576,7 +637,7 @@ TransactionQueue::isBanned(Hash const& hash) const
 {
     return std::any_of(
         std::begin(mBannedTransactions), std::end(mBannedTransactions),
-        [&](std::unordered_set<Hash> const& transactions) {
+        [&](UnorderedSet<Hash> const& transactions) {
             return transactions.find(hash) != std::end(transactions);
         });
 }
@@ -593,24 +654,54 @@ TransactionQueue::toTxSet(LedgerHeaderHistoryEntry const& lcl) const
     {
         for (auto const& tx : m.second.mTransactions)
         {
-            result->add(tx.mTx);
-            // This condition implements the following constraint: there may be
-            // any number of transactions for a given source account, but all
-            // transactions must satisfy one of the following mutually exclusive
-            // conditions
-            // - sequence number <= startingSeq - 1
-            // - sequence number >= startingSeq
-            if (tx.mTx->getSeqNum() == startingSeq - 1)
+            // The previous version of this enforced the following constraint:
+            // there may be any number of transactions for a given source
+            // account, but all transactions for that source account must
+            // satisfy one of the following mutually exclusive conditions
+            // (1) sequence number <= startingSeq - 1
+            // (2) sequence number >= startingSeq
+            //
+            // This version enforces the following constraint: it is forbidden
+            // to include a transaction with
+            //     sequence number == startingSeq
+            // The new condition is strictly stronger. First, note that the
+            // sequence numbers (assuming 0 < k < n, and the source account has
+            // initial number startingSeq - n - 1)
+            //     startingSeq - n, ..., startingSeq - n + k
+            // would be accepted by the new condition and by condition (1)
+            // above. Second, note that the sequence numbers (assuming 0 < k,
+            // 0 < n, and the source account has initial sequence number
+            // startingSeq + n - 1)
+            //     startingSeq + n, ..., startingSeq + n + k
+            // would be accepted by the new condition and by condition (2)
+            // above. These are the only sequence numbers that would be accepted
+            // by the new condition. But the old condition would also accept
+            // (assuming 0 < k, and the source account has initial sequence
+            // number startingSeq - 1)
+            //     startingSeq, ..., startingSeq + k .
+            if (tx.mTx->getSeqNum() == startingSeq)
             {
                 break;
             }
+            result->add(tx.mTx);
         }
     }
 
     return result;
 }
 
-std::vector<TransactionQueue::ReplacedTransaction>
+void
+TransactionQueue::clearAll()
+{
+    mAccountStates.clear();
+    for (auto& b : mBannedTransactions)
+    {
+        b.clear();
+    }
+    mTxQueueLimiter->reset();
+}
+
+void
 TransactionQueue::maybeVersionUpgraded()
 {
     std::vector<ReplacedTransaction> res;
@@ -618,28 +709,221 @@ TransactionQueue::maybeVersionUpgraded()
     auto const& lcl = mApp.getLedgerManager().getLastClosedLedgerHeader();
     if (mLedgerVersion < 13 && lcl.header.ledgerVersion >= 13)
     {
-        for (auto& banned : mBannedTransactions)
-        {
-            banned.clear();
-        }
-
-        for (auto& kv : mAccountStates)
-        {
-            for (auto& txFrame : kv.second.mTransactions)
-            {
-                auto oldTxFrame = txFrame;
-                auto envV1 =
-                    txbridge::convertForV13(txFrame.mTx->getEnvelope());
-                txFrame.mTx = TransactionFrame::makeTransactionFromWire(
-                    mApp.getNetworkID(), envV1);
-                res.emplace_back(
-                    ReplacedTransaction{oldTxFrame.mTx, txFrame.mTx});
-            }
-        }
+        clearAll();
     }
     mLedgerVersion = lcl.header.ledgerVersion;
+}
 
-    return res;
+size_t
+TransactionQueue::getMaxOpsToFloodThisPeriod() const
+{
+    auto& cfg = mApp.getConfig();
+    double opRatePerLedger = cfg.FLOOD_OP_RATE_PER_LEDGER;
+
+    size_t maxOps = mApp.getLedgerManager().getLastMaxTxSetSizeOps();
+    double opsToFloodLedgerDbl = opRatePerLedger * maxOps;
+    releaseAssertOrThrow(opsToFloodLedgerDbl >= 0.0);
+    releaseAssertOrThrow(isRepresentableAsInt64(opsToFloodLedgerDbl));
+    int64_t opsToFloodLedger = static_cast<int64_t>(opsToFloodLedgerDbl);
+
+    int64_t opsToFlood;
+    if (mApp.getConfig().FLOOD_TX_PERIOD_MS != 0)
+    {
+        opsToFlood = mBroadcastOpCarryover +
+                     bigDivide(opsToFloodLedger, cfg.FLOOD_TX_PERIOD_MS,
+                               cfg.getExpectedLedgerCloseTime().count() * 1000,
+                               Rounding::ROUND_UP);
+    }
+    else
+    {
+        // else, flood the target at once
+        opsToFlood = opsToFloodLedger;
+    }
+    releaseAssertOrThrow(opsToFlood >= 0);
+    return static_cast<size_t>(opsToFlood);
+}
+
+bool
+TransactionQueue::broadcastTx(AccountState& state, TimestampedTx& tx)
+{
+    if (tx.mBroadcasted)
+    {
+        return false;
+    }
+#ifdef BUILD_TESTS
+    if (mTxBroadcastedEvent)
+    {
+        mTxBroadcastedEvent(tx.mTx);
+    }
+#endif
+    tx.mBroadcasted = true;
+    state.mBroadcastQueueOps -= tx.mTx->getNumOperations();
+    return mApp.getOverlayManager().broadcastMessage(
+        tx.mTx->toStellarMessage());
+}
+
+struct TxQueueTracker
+{
+    TransactionQueue::TimestampedTransactions::iterator mCur;
+    TransactionQueue::AccountState* mAccountState;
+
+    // skips to first transaction not broadcasted yet
+    bool
+    skipToFirstNotBroadcasted()
+    {
+        while (mCur != mAccountState->mTransactions.end() && mCur->mBroadcasted)
+        {
+            ++mCur;
+        }
+        return mCur != mAccountState->mTransactions.end();
+    }
+
+    struct Comparator
+    {
+        size_t mSeed;
+        Comparator(size_t seed) : mSeed(seed)
+        {
+        }
+
+        // return true if l < r
+        // compares tx `cur` for each TxTracker as to implement surge
+        // pricing comparison
+        bool
+        operator()(TxQueueTracker const& l, TxQueueTracker const& r) const
+        {
+            if (l.mCur == l.mAccountState->mTransactions.end())
+            {
+                return r.mCur != r.mAccountState->mTransactions.end();
+            }
+            if (r.mCur == r.mAccountState->mTransactions.end())
+            {
+                return false;
+            }
+            return lessThanXored(l.mCur->mTx, r.mCur->mTx, mSeed);
+        }
+    };
+};
+
+bool
+TransactionQueue::broadcastSome()
+{
+    // broadcast transactions in surge pricing order:
+    // loop over transactions by picking from the account queue with the
+    // highest base fee not broadcasted so far.
+    // This broadcasts from account queues in order as to maximize chances of
+    // propagation.
+    size_t opsToFlood = getMaxOpsToFloodThisPeriod();
+
+    // uses a priority queue of trackers, using a custom comparator as to
+    // prioritize higher fee queues
+    TxQueueTracker::Comparator comp(mBroadcastSeed);
+    std::priority_queue<TxQueueTracker, std::vector<TxQueueTracker>,
+                        TxQueueTracker::Comparator>
+        iters(comp);
+    size_t totalOpsToFlood = 0;
+    for (auto& m : mAccountStates)
+    {
+        auto asOps = m.second.mBroadcastQueueOps;
+        if (asOps != 0)
+        {
+            TxQueueTracker tracker{m.second.mTransactions.begin(), &m.second};
+            auto r = tracker.skipToFirstNotBroadcasted();
+            // there should be at least one tx to broadcast in this queue
+            releaseAssert(r);
+            iters.emplace(tracker);
+            totalOpsToFlood += asOps;
+        }
+    }
+
+    while (opsToFlood != 0 && !iters.empty())
+    {
+        auto curTracker = iters.top();
+        iters.pop();
+        // look at the next candidate transaction for that account
+        auto& cur = curTracker.mCur;
+        auto& tx = cur->mTx;
+        // by construction, cur points to non broadcasted transactions
+        releaseAssert(!cur->mBroadcasted);
+        if (opsToFlood < tx->getNumOperations())
+        {
+            // as we can't flood this transaction we have to wait to
+            // accumulate more flooding credit
+            break;
+        }
+        else
+        {
+            if (broadcastTx(*curTracker.mAccountState, *cur))
+            {
+                auto ops = tx->getNumOperations();
+                opsToFlood -= ops;
+                totalOpsToFlood -= ops;
+            }
+            cur++;
+        }
+        // if we're not done with this account, add the tracker back
+        if (curTracker.skipToFirstNotBroadcasted())
+        {
+            iters.push(curTracker);
+        }
+    }
+    // carry over remainder, up to MAX_OPS_PER_TX ops
+    // reason is that if we add 1 next round, we can flood a "worst case fee
+    // bump" tx
+    mBroadcastOpCarryover = std::min<size_t>(opsToFlood, MAX_OPS_PER_TX + 1);
+    return totalOpsToFlood != 0;
+}
+
+void
+TransactionQueue::broadcast(bool fromCallback)
+{
+    if (mShutdown || (!fromCallback && mWaiting))
+    {
+        return;
+    }
+    mWaiting = false;
+
+    bool needsMore = false;
+    if (mApp.getConfig().FLOOD_TX_PERIOD_MS != 0 && !fromCallback)
+    {
+        // don't do anything right away, wait for the timer
+        needsMore = true;
+    }
+    else
+    {
+        needsMore = broadcastSome();
+    }
+
+    if (mApp.getConfig().FLOOD_TX_PERIOD_MS != 0 && needsMore)
+    {
+        mWaiting = true;
+        mBroadcastTimer.expires_from_now(
+            std::chrono::milliseconds(mApp.getConfig().FLOOD_TX_PERIOD_MS));
+        mBroadcastTimer.async_wait([&]() { broadcast(true); },
+                                   &VirtualTimer::onFailureNoop);
+    }
+}
+
+void
+TransactionQueue::rebroadcast()
+{
+    // force to rebroadcast everything
+    for (auto& m : mAccountStates)
+    {
+        auto& as = m.second;
+        as.mBroadcastQueueOps = as.mQueueSizeOps;
+        for (auto& tx : as.mTransactions)
+        {
+            tx.mBroadcasted = false;
+        }
+    }
+    broadcast(false);
+}
+
+void
+TransactionQueue::shutdown()
+{
+    mShutdown = true;
+    mBroadcastTimer.cancel();
 }
 
 bool
@@ -647,14 +931,52 @@ operator==(TransactionQueue::AccountTxQueueInfo const& x,
            TransactionQueue::AccountTxQueueInfo const& y)
 {
     return x.mMaxSeq == y.mMaxSeq && x.mTotalFees == y.mTotalFees &&
-           x.mQueueSizeOps == y.mQueueSizeOps;
+           x.mQueueSizeOps == y.mQueueSizeOps &&
+           x.mBroadcastQueueOps == y.mBroadcastQueueOps;
 }
 
-size_t
-TransactionQueue::maxQueueSizeOps() const
+static bool
+containsFilteredOperation(std::vector<Operation> const& ops,
+                          UnorderedSet<OperationType> const& filteredTypes)
 {
-    size_t maxOpsLedger = mApp.getLedgerManager().getLastMaxTxSetSizeOps();
-    maxOpsLedger *= mPoolLedgerMultiplier;
-    return maxOpsLedger;
+    return std::any_of(ops.begin(), ops.end(), [&](auto const& op) {
+        return filteredTypes.find(op.body.type()) != filteredTypes.end();
+    });
 }
+
+bool
+TransactionQueue::isFiltered(TransactionFrameBasePtr tx) const
+{
+    // Avoid cost of checking if filtering is not in use
+    if (mFilteredTypes.empty())
+    {
+        return false;
+    }
+
+    switch (tx->getEnvelope().type())
+    {
+    case ENVELOPE_TYPE_TX_V0:
+        return containsFilteredOperation(tx->getEnvelope().v0().tx.operations,
+                                         mFilteredTypes);
+    case ENVELOPE_TYPE_TX:
+        return containsFilteredOperation(tx->getEnvelope().v1().tx.operations,
+                                         mFilteredTypes);
+    case ENVELOPE_TYPE_TX_FEE_BUMP:
+    {
+        auto const& envelope = tx->getEnvelope().feeBump().tx.innerTx.v1();
+        return containsFilteredOperation(envelope.tx.operations,
+                                         mFilteredTypes);
+    }
+    default:
+        abort();
+    }
+}
+
+#ifdef BUILD_TESTS
+size_t
+TransactionQueue::getQueueSizeOps() const
+{
+    return mTxQueueLimiter->size();
+}
+#endif
 }

@@ -12,11 +12,11 @@
 #include "util/XDROperators.h"
 #include "xdr/Stellar-transaction.h"
 
+#include "util/UnorderedMap.h"
+#include "util/UnorderedSet.h"
 #include <chrono>
 #include <deque>
 #include <memory>
-#include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 namespace medida
@@ -29,6 +29,7 @@ namespace stellar
 {
 
 class Application;
+class TxQueueLimiter;
 
 /**
  * TransactionQueue keeps received transactions that are valid and have not yet
@@ -58,7 +59,7 @@ class Application;
 class TransactionQueue
 {
   public:
-    static int64_t const FEE_MULTIPLIER;
+    static uint64_t const FEE_MULTIPLIER;
 
     enum class AddResult
     {
@@ -66,6 +67,7 @@ class TransactionQueue
         ADD_STATUS_DUPLICATE,
         ADD_STATUS_ERROR,
         ADD_STATUS_TRY_AGAIN_LATER,
+        ADD_STATUS_FILTERED,
         ADD_STATUS_COUNT
     };
 
@@ -79,7 +81,8 @@ class TransactionQueue
         SequenceNumber mMaxSeq{0};
         int64_t mTotalFees{0};
         size_t mQueueSizeOps{0};
-        int32_t mAge{0};
+        size_t mBroadcastQueueOps{0};
+        uint32_t mAge{0};
 
         friend bool operator==(AccountTxQueueInfo const& x,
                                AccountTxQueueInfo const& y);
@@ -100,6 +103,7 @@ class TransactionQueue
     struct TimestampedTx
     {
         TransactionFrameBasePtr mTx;
+        bool mBroadcasted;
         VirtualClock::time_point mInsertionTime;
     };
     using TimestampedTransactions = std::vector<TimestampedTx>;
@@ -108,12 +112,14 @@ class TransactionQueue
     {
         int64_t mTotalFees{0};
         size_t mQueueSizeOps{0};
-        int32_t mAge{0};
+        size_t mBroadcastQueueOps{0};
+        uint32_t mAge{0};
         TimestampedTransactions mTransactions;
     };
 
-    explicit TransactionQueue(Application& app, int pendingDepth, int banDepth,
-                              int poolLedgerMultiplier);
+    explicit TransactionQueue(Application& app, uint32 pendingDepth,
+                              uint32 banDepth, uint32 poolLedgerMultiplier);
+    ~TransactionQueue();
 
     AddResult tryAdd(TransactionFrameBasePtr tx);
     void removeApplied(Transactions const& txs);
@@ -140,7 +146,12 @@ class TransactionQueue
         TransactionFrameBasePtr mOld;
         TransactionFrameBasePtr mNew;
     };
-    std::vector<ReplacedTransaction> maybeVersionUpgraded();
+
+    void maybeVersionUpgraded();
+
+    void rebroadcast();
+
+    void shutdown();
 
   private:
     /**
@@ -150,16 +161,16 @@ class TransactionQueue
      * - AccountState.mTotalFees > 0
      * - !AccountState.mTransactions.empty()
      */
-    using AccountStates = std::unordered_map<AccountID, AccountState>;
+    using AccountStates = UnorderedMap<AccountID, AccountState>;
 
     /**
      * Banned transactions are stored in deque of depth banDepth, so it is easy
      * to unban all transactions that were banned for long enough.
      */
-    using BannedTransactions = std::deque<std::unordered_set<Hash>>;
+    using BannedTransactions = std::deque<UnorderedSet<Hash>>;
 
     Application& mApp;
-    int const mPendingDepth;
+    uint32 const mPendingDepth;
 
     AccountStates mAccountStates;
     BannedTransactions mBannedTransactions;
@@ -170,34 +181,48 @@ class TransactionQueue
     medida::Counter& mBannedTransactionsCounter;
     medida::Timer& mTransactionsDelay;
 
+    UnorderedSet<OperationType> mFilteredTypes;
+
+    bool mShutdown{false};
+    bool mWaiting{false};
+    size_t mBroadcastOpCarryover{0};
+    VirtualTimer mBroadcastTimer;
+
+    size_t getMaxOpsToFloodThisPeriod() const;
+    bool broadcastSome();
+    void broadcast(bool fromCallback);
+    // broadcasts a single transaction
+    bool broadcastTx(AccountState& state, TimestampedTx& tx);
+
     AddResult canAdd(TransactionFrameBasePtr tx,
                      AccountStates::iterator& stateIter,
                      TimestampedTransactions::iterator& oldTxIter);
 
     void releaseFeeMaybeEraseAccountState(TransactionFrameBasePtr tx);
 
+    void prepareDropTransaction(AccountState& as, TimestampedTx& tstx);
     void dropTransactions(AccountStates::iterator stateIter,
                           TimestampedTransactions::iterator begin,
                           TimestampedTransactions::iterator end);
 
-    // size of the transaction queue, in operations
-    size_t mQueueSizeOps{0};
-    // number of ledgers we can pool in memory
-    int const mPoolLedgerMultiplier;
+    void clearAll();
 
-    size_t maxQueueSizeOps() const;
+    bool isFiltered(TransactionFrameBasePtr tx) const;
+
+    std::unique_ptr<TxQueueLimiter> mTxQueueLimiter;
+
+    size_t mBroadcastSeed;
+
+    friend struct TxQueueTracker;
 
 #ifdef BUILD_TESTS
   public:
-    size_t
-    getQueueSizeOps() const
-    {
-        return mQueueSizeOps;
-    }
+    size_t getQueueSizeOps() const;
+    std::function<void(TransactionFrameBasePtr&)> mTxBroadcastedEvent;
 #endif
 };
 
 static const char* TX_STATUS_STRING[static_cast<int>(
     TransactionQueue::AddResult::ADD_STATUS_COUNT)] = {
-    "PENDING", "DUPLICATE", "ERROR", "TRY_AGAIN_LATER"};
+    "PENDING", "DUPLICATE", "ERROR", "TRY_AGAIN_LATER", "FILTERED"};
 }

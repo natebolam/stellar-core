@@ -141,8 +141,7 @@ class BulkUpsertTrustLinesOperation : public DatabaseTypeSpecificOperation<void>
         for (auto const& e : entries)
         {
             assert(e.entryExists());
-            assert(e.entry().type() ==
-                   GeneralizedLedgerEntryType::LEDGER_ENTRY);
+            assert(e.entry().type() == InternalLedgerEntryType::LEDGER_ENTRY);
             auto const& le = e.entry().ledgerEntry();
             assert(le.data.type() == TRUSTLINE);
             auto const& tl = le.data.trustLine();
@@ -317,7 +316,7 @@ class BulkDeleteTrustLinesOperation : public DatabaseTypeSpecificOperation<void>
         for (auto const& e : entries)
         {
             assert(!e.entryExists());
-            assert(e.key().type() == GeneralizedLedgerEntryType::LEDGER_ENTRY);
+            assert(e.key().type() == InternalLedgerEntryType::LEDGER_ENTRY);
             assert(e.key().ledgerKey().type() == TRUSTLINE);
             auto const& tl = e.key().ledgerKey().trustLine();
             std::string accountIDStr, issuerStr, assetCodeStr;
@@ -419,7 +418,7 @@ LedgerTxnRoot::Impl::dropTrustLines()
 {
     throwIfChild();
     mEntryCache.clear();
-    mBestOffersCache.clear();
+    mBestOffers.clear();
 
     std::string coll = mDatabase.getSimpleCollationClause();
 
@@ -527,7 +526,7 @@ class BulkLoadTrustLinesOperation
 
   public:
     BulkLoadTrustLinesOperation(Database& db,
-                                std::unordered_set<LedgerKey> const& keys)
+                                UnorderedSet<LedgerKey> const& keys)
         : mDb(db)
     {
         mAccountIDs.reserve(keys.size());
@@ -647,9 +646,9 @@ class BulkLoadTrustLinesOperation
 #endif
 };
 
-std::unordered_map<LedgerKey, std::shared_ptr<LedgerEntry const>>
+UnorderedMap<LedgerKey, std::shared_ptr<LedgerEntry const>>
 LedgerTxnRoot::Impl::bulkLoadTrustLines(
-    std::unordered_set<LedgerKey> const& keys) const
+    UnorderedSet<LedgerKey> const& keys) const
 {
     ZoneScoped;
     ZoneValue(static_cast<int64_t>(keys.size()));

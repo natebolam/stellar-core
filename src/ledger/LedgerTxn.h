@@ -4,17 +4,17 @@
 // under the Apache License, Version 2.0. See the COPYING file at the root
 // of this distribution or at http://www.apache.org/licenses/LICENSE-2.0
 
-#include "ledger/GeneralizedLedgerEntry.h"
+#include "ledger/InternalLedgerEntry.h"
 #include "ledger/LedgerTxnEntry.h"
 #include "ledger/LedgerTxnHeader.h"
+#include "util/UnorderedMap.h"
+#include "util/UnorderedSet.h"
 #include "xdr/Stellar-ledger.h"
 #include <functional>
 #include <ledger/LedgerHashUtils.h>
 #include <map>
 #include <memory>
 #include <set>
-#include <unordered_map>
-#include <unordered_set>
 
 /////////////////////////////////////////////////////////////////////////////
 //  Overview
@@ -48,9 +48,9 @@
 //                |    |                                                     |
 //                |    |          void commit()                              |
 //                |    |          void rollback()                            |
-//                |    |LedgerTxnEntry create(GeneralizedLedgerEntry)        |
-//                |    |LedgerTxnEntry load(GeneralizedLedgerKey)            |
-//                |    |          void erase(GeneralizedLedgerKey)           |
+//                |    |LedgerTxnEntry create(InternalLedgerEntry)           |
+//                |    |LedgerTxnEntry load(InternalLedgerKey)               |
+//                |    |          void erase(InternalLedgerKey)              |
 //                |    |                                                     |
 //                |    |+---------------------------------------------------+|
 //                |    ||LedgerTxn::Impl                                    ||
@@ -61,14 +61,14 @@
 //  +----------------+ ||+------------------------------+                   ||
 //  |LedgerTxnEntry  | |||mActive                       |                   ||
 //  |(for client use)| |||                              |                   ||
-//  |                | |||map<GeneralizedLedgerKey,     |                   ||
+//  |                | |||map<InternalLedgerKey,        |                   ||
 //  |weak_ptr<Impl>  | |||    shared_ptr<EntryImplBase>>|                   ||
 //  +----------------+ ||+------------------------------+                   ||
-//                     ||+----------------------------+                     ||
+//           |         ||+----------------------------+                     ||
 //                     |||mEntry                      |                     ||
-//                     |||                            |                     ||
-//                     |||map<GeneralizedLedgerKey,   |                     ||
-//                     |||    GeneralizedLedgerEntry> |                     ||
+//           |         |||                            |                     ||
+//                     |||map<InternalLedgerKey,      |                     ||
+//           |         |||    InternalLedgerEntry>    |                     ||
 //                     ||+---------------------------+|                     ||
 //           |         |+---------------------------------------------------+|
 //                     +-----------------------------------------------------+
@@ -81,7 +81,7 @@
 //                       |||active in this state")   |  |
 //                       |||                         |  |
 //                       +||AbstractLedgerTxn &  -------+
-//                        +|GeneralizedLedgerEntry & |
+//                        +|InternalLedgerEntry &    |
 //                         +-------------------------+
 //
 //
@@ -89,7 +89,7 @@
 //
 //  - A LedgerTxn is an in-memory transaction-in-progress against the
 //    ledger in the database. Its ultimate purpose is to model a collection
-//    of GeneralizedLedgerEntry, which are wrappers around LedgerEntry (XDR)
+//    of InternalLedgerEntry, which are wrappers around LedgerEntry (XDR)
 //    objects, to commit to the database.
 //
 //  - At any given time, a LedgerTxn may have zero-or-one active
@@ -103,7 +103,7 @@
 //    will throw an exception.
 //
 //  - The entries to be committed in each transaction are stored in the
-//    mEntry map, keyed by GeneralizedLedgerKey. This much is straightforward!
+//    mEntry map, keyed by InternalLedgerKey. This much is straightforward!
 //
 //  - Committing any LedgerTxn merges its entries into its parent. In the
 //    case where the parent is simply another in-memory LedgerTxn, this
@@ -266,8 +266,8 @@ struct LedgerTxnDelta
 {
     struct EntryDelta
     {
-        std::shared_ptr<GeneralizedLedgerEntry const> current;
-        std::shared_ptr<GeneralizedLedgerEntry const> previous;
+        std::shared_ptr<InternalLedgerEntry const> current;
+        std::shared_ptr<InternalLedgerEntry const> previous;
     };
 
     struct HeaderDelta
@@ -276,7 +276,7 @@ struct LedgerTxnDelta
         LedgerHeader previous;
     };
 
-    std::unordered_map<GeneralizedLedgerKey, EntryDelta> entry;
+    UnorderedMap<InternalLedgerKey, EntryDelta> entry;
     HeaderDelta header;
 };
 
@@ -305,11 +305,11 @@ class EntryIterator
 
     explicit operator bool() const;
 
-    GeneralizedLedgerEntry const& entry() const;
+    InternalLedgerEntry const& entry() const;
 
     bool entryExists() const;
 
-    GeneralizedLedgerKey const& key() const;
+    InternalLedgerKey const& key() const;
 };
 
 class WorstBestOfferIterator
@@ -376,13 +376,13 @@ class AbstractLedgerTxnParent
     // - getOffersByAccountAndAsset
     //     Get XDR for every offer owned by the specified account that is either
     //     buying or selling the specified asset.
-    virtual std::unordered_map<LedgerKey, LedgerEntry> getAllOffers() = 0;
+    virtual UnorderedMap<LedgerKey, LedgerEntry> getAllOffers() = 0;
     virtual std::shared_ptr<LedgerEntry const>
     getBestOffer(Asset const& buying, Asset const& selling) = 0;
     virtual std::shared_ptr<LedgerEntry const>
     getBestOffer(Asset const& buying, Asset const& selling,
                  OfferDescriptor const& worseThan) = 0;
-    virtual std::unordered_map<LedgerKey, LedgerEntry>
+    virtual UnorderedMap<LedgerKey, LedgerEntry>
     getOffersByAccountAndAsset(AccountID const& account,
                                Asset const& asset) = 0;
 
@@ -396,13 +396,13 @@ class AbstractLedgerTxnParent
     virtual std::vector<InflationWinner>
     getInflationWinners(size_t maxWinners, int64_t minBalance) = 0;
 
-    // getNewestVersion finds the newest version of the GeneralizedLedgerEntry
-    // associated with the GeneralizedLedgerKey key by checking if there is a
+    // getNewestVersion finds the newest version of the InternalLedgerEntry
+    // associated with the InternalLedgerKey key by checking if there is a
     // version stored in this AbstractLedgerTxnParent, and if not recursively
     // invoking getNewestVersion on its parent. Returns nullptr if the key does
     // not exist or if the corresponding LedgerEntry has been erased.
-    virtual std::shared_ptr<GeneralizedLedgerEntry const>
-    getNewestVersion(GeneralizedLedgerKey const& key) const = 0;
+    virtual std::shared_ptr<InternalLedgerEntry const>
+    getNewestVersion(InternalLedgerKey const& key) const = 0;
 
     // Return the count of the number of ledger objects of type `let`. Will
     // throw when called on anything other than a (real or stub) root LedgerTxn.
@@ -448,7 +448,20 @@ class AbstractLedgerTxnParent
     // This is purely advisory and can be a no-op, or do any level of actual
     // work, while still being correct. Will throw when called on anything other
     // than a (real or stub) root LedgerTxn.
-    virtual uint32_t prefetch(std::unordered_set<LedgerKey> const& keys) = 0;
+    virtual uint32_t prefetch(UnorderedSet<LedgerKey> const& keys) = 0;
+
+#ifdef BUILD_TESTS
+    virtual void resetForFuzzer() = 0;
+#endif // BUILD_TESTS
+
+#ifdef BEST_OFFER_DEBUGGING
+    virtual bool bestOfferDebuggingEnabled() const = 0;
+
+    virtual std::shared_ptr<LedgerEntry const>
+    getBestOfferSlow(Asset const& buying, Asset const& selling,
+                     OfferDescriptor const* worseThan,
+                     std::unordered_set<int64_t>& exclude) = 0;
+#endif
 };
 
 // An abstraction for an object that is an AbstractLedgerTxnParent and has
@@ -460,7 +473,7 @@ class AbstractLedgerTxn : public AbstractLedgerTxnParent
     // given key.
     friend class LedgerTxnEntry::Impl;
     friend class ConstLedgerTxnEntry::Impl;
-    virtual void deactivate(GeneralizedLedgerKey const& key) = 0;
+    virtual void deactivate(InternalLedgerKey const& key) = 0;
 
     // deactivateHeader is used to deactivate the LedgerTxnHeader.
     friend class LedgerTxnHeader::Impl;
@@ -506,11 +519,11 @@ class AbstractLedgerTxn : public AbstractLedgerTxnParent
     // All of these functions throw if the AbstractLedgerTxn is sealed or if
     // the AbstractLedgerTxn has a child.
     virtual LedgerTxnHeader loadHeader() = 0;
-    virtual LedgerTxnEntry create(GeneralizedLedgerEntry const& entry) = 0;
-    virtual void erase(GeneralizedLedgerKey const& key) = 0;
-    virtual LedgerTxnEntry load(GeneralizedLedgerKey const& key) = 0;
+    virtual LedgerTxnEntry create(InternalLedgerEntry const& entry) = 0;
+    virtual void erase(InternalLedgerKey const& key) = 0;
+    virtual LedgerTxnEntry load(InternalLedgerKey const& key) = 0;
     virtual ConstLedgerTxnEntry
-    loadWithoutRecord(GeneralizedLedgerKey const& key) = 0;
+    loadWithoutRecord(InternalLedgerKey const& key) = 0;
 
     // Somewhat unsafe, non-recommended access methods: for use only during
     // bulk-loading as in catchup from buckets. These methods set an entry
@@ -522,8 +535,8 @@ class AbstractLedgerTxn : public AbstractLedgerTxnParent
     // state of the database. These are only here for clobbering it with
     // new data.
     virtual void
-    createOrUpdateWithoutLoading(GeneralizedLedgerEntry const& entry) = 0;
-    virtual void eraseWithoutLoading(GeneralizedLedgerKey const& key) = 0;
+    createOrUpdateWithoutLoading(InternalLedgerEntry const& entry) = 0;
+    virtual void eraseWithoutLoading(InternalLedgerKey const& key) = 0;
 
     // getChanges, getDelta, and getAllEntries are used to
     // extract information about changes contained in the AbstractLedgerTxn
@@ -588,6 +601,11 @@ class AbstractLedgerTxn : public AbstractLedgerTxnParent
     // which can only be done after getDeadEntries and getLiveEntries have been
     // called.
     virtual void unsealHeader(std::function<void(LedgerHeader&)> f) = 0;
+
+    // returns true if mEntry has any record of a SPONSORSHIP or
+    // SPONSORSHIP_COUNTER entry type. Throws if the AbstractLedgerTxn has a
+    // child.
+    virtual bool hasSponsorshipEntry() const = 0;
 };
 
 class LedgerTxn final : public AbstractLedgerTxn
@@ -595,7 +613,7 @@ class LedgerTxn final : public AbstractLedgerTxn
     class Impl;
     std::unique_ptr<Impl> mImpl;
 
-    void deactivate(GeneralizedLedgerKey const& key) override;
+    void deactivate(InternalLedgerKey const& key) override;
 
     void deactivateHeader() override;
 
@@ -614,11 +632,11 @@ class LedgerTxn final : public AbstractLedgerTxn
 
     void commitChild(EntryIterator iter, LedgerTxnConsistency cons) override;
 
-    LedgerTxnEntry create(GeneralizedLedgerEntry const& entry) override;
+    LedgerTxnEntry create(InternalLedgerEntry const& entry) override;
 
-    void erase(GeneralizedLedgerKey const& key) override;
+    void erase(InternalLedgerKey const& key) override;
 
-    std::unordered_map<LedgerKey, LedgerEntry> getAllOffers() override;
+    UnorderedMap<LedgerKey, LedgerEntry> getAllOffers() override;
 
     std::shared_ptr<LedgerEntry const>
     getBestOffer(Asset const& buying, Asset const& selling) override;
@@ -632,7 +650,7 @@ class LedgerTxn final : public AbstractLedgerTxn
 
     LedgerTxnDelta getDelta() override;
 
-    std::unordered_map<LedgerKey, LedgerEntry>
+    UnorderedMap<LedgerKey, LedgerEntry>
     getOffersByAccountAndAsset(AccountID const& account,
                                Asset const& asset) override;
 
@@ -648,14 +666,14 @@ class LedgerTxn final : public AbstractLedgerTxn
                        std::vector<LedgerEntry>& liveEntries,
                        std::vector<LedgerKey>& deadEntries) override;
 
-    std::shared_ptr<GeneralizedLedgerEntry const>
-    getNewestVersion(GeneralizedLedgerKey const& key) const override;
+    std::shared_ptr<InternalLedgerEntry const>
+    getNewestVersion(InternalLedgerKey const& key) const override;
 
-    LedgerTxnEntry load(GeneralizedLedgerKey const& key) override;
+    LedgerTxnEntry load(InternalLedgerKey const& key) override;
 
     void
-    createOrUpdateWithoutLoading(GeneralizedLedgerEntry const& entry) override;
-    void eraseWithoutLoading(GeneralizedLedgerKey const& key) override;
+    createOrUpdateWithoutLoading(InternalLedgerEntry const& entry) override;
+    void eraseWithoutLoading(InternalLedgerKey const& key) override;
 
     std::map<AccountID, std::vector<LedgerTxnEntry>> loadAllOffers() override;
 
@@ -669,7 +687,7 @@ class LedgerTxn final : public AbstractLedgerTxn
                                 Asset const& asset) override;
 
     ConstLedgerTxnEntry
-    loadWithoutRecord(GeneralizedLedgerKey const& key) override;
+    loadWithoutRecord(InternalLedgerKey const& key) override;
 
     void rollback() override;
 
@@ -687,14 +705,27 @@ class LedgerTxn final : public AbstractLedgerTxn
     void dropTrustLines() override;
     void dropClaimableBalances() override;
     double getPrefetchHitRate() const override;
-    uint32_t prefetch(std::unordered_set<LedgerKey> const& keys) override;
+    uint32_t prefetch(UnorderedSet<LedgerKey> const& keys) override;
+
+    bool hasSponsorshipEntry() const override;
 
 #ifdef BUILD_TESTS
-    std::unordered_map<
+    UnorderedMap<
         AssetPair,
         std::multimap<OfferDescriptor, LedgerKey, IsBetterOfferComparator>,
         AssetPairHash> const&
     getOrderBook();
+
+    void resetForFuzzer() override;
+#endif // BUILD_TESTS
+
+#ifdef BEST_OFFER_DEBUGGING
+    bool bestOfferDebuggingEnabled() const override;
+
+    std::shared_ptr<LedgerEntry const>
+    getBestOfferSlow(Asset const& buying, Asset const& selling,
+                     OfferDescriptor const* worseThan,
+                     std::unordered_set<int64_t>& exclude) override;
 #endif
 };
 
@@ -705,7 +736,12 @@ class LedgerTxnRoot : public AbstractLedgerTxnParent
 
   public:
     explicit LedgerTxnRoot(Database& db, size_t entryCacheSize,
-                           size_t bestOfferCacheSize, size_t prefetchBatchSize);
+                           size_t prefetchBatchSize
+#ifdef BEST_OFFER_DEBUGGING
+                           ,
+                           bool bestOfferDebuggingEnabled
+#endif
+    );
 
     virtual ~LedgerTxnRoot();
 
@@ -725,11 +761,11 @@ class LedgerTxnRoot : public AbstractLedgerTxnParent
     void dropTrustLines() override;
     void dropClaimableBalances() override;
 
-#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
-    void resetForFuzzer();
-#endif // FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+#ifdef BUILD_TESTS
+    void resetForFuzzer() override;
+#endif // BUILD_TESTS
 
-    std::unordered_map<LedgerKey, LedgerEntry> getAllOffers() override;
+    UnorderedMap<LedgerKey, LedgerEntry> getAllOffers() override;
 
     std::shared_ptr<LedgerEntry const>
     getBestOffer(Asset const& buying, Asset const& selling) override;
@@ -737,7 +773,7 @@ class LedgerTxnRoot : public AbstractLedgerTxnParent
     getBestOffer(Asset const& buying, Asset const& selling,
                  OfferDescriptor const& worseThan) override;
 
-    std::unordered_map<LedgerKey, LedgerEntry>
+    UnorderedMap<LedgerKey, LedgerEntry>
     getOffersByAccountAndAsset(AccountID const& account,
                                Asset const& asset) override;
 
@@ -746,12 +782,21 @@ class LedgerTxnRoot : public AbstractLedgerTxnParent
     std::vector<InflationWinner>
     getInflationWinners(size_t maxWinners, int64_t minBalance) override;
 
-    std::shared_ptr<GeneralizedLedgerEntry const>
-    getNewestVersion(GeneralizedLedgerKey const& key) const override;
+    std::shared_ptr<InternalLedgerEntry const>
+    getNewestVersion(InternalLedgerKey const& key) const override;
 
     void rollbackChild() override;
 
-    uint32_t prefetch(std::unordered_set<LedgerKey> const& keys) override;
+    uint32_t prefetch(UnorderedSet<LedgerKey> const& keys) override;
     double getPrefetchHitRate() const override;
+
+#ifdef BEST_OFFER_DEBUGGING
+    bool bestOfferDebuggingEnabled() const override;
+
+    std::shared_ptr<LedgerEntry const>
+    getBestOfferSlow(Asset const& buying, Asset const& selling,
+                     OfferDescriptor const* worseThan,
+                     std::unordered_set<int64_t>& exclude) override;
+#endif
 };
 }

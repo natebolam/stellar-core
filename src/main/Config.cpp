@@ -18,14 +18,23 @@
 #include "util/XDROperators.h"
 #include "util/types.h"
 
+#include "util/UnorderedSet.h"
+#include <fmt/chrono.h>
 #include <fmt/format.h>
 #include <functional>
+#include <numeric>
 #include <sstream>
 #include <unordered_set>
 
 namespace stellar
 {
-const uint32 Config::CURRENT_LEDGER_PROTOCOL_VERSION = 15;
+const uint32 Config::CURRENT_LEDGER_PROTOCOL_VERSION = 17
+#ifdef ENABLE_NEXT_PROTOCOL_VERSION_UNSAFE_FOR_PRODUCTION
+                                                       + 1
+#endif
+    ;
+
+bool gIsProductionNetwork = false;
 
 // Options that must only be used for testing
 static const std::unordered_set<std::string> TESTING_ONLY_OPTIONS = {
@@ -35,7 +44,8 @@ static const std::unordered_set<std::string> TESTING_ONLY_OPTIONS = {
     "ARTIFICIALLY_ACCELERATE_TIME_FOR_TESTING",
     "ARTIFICIALLY_SET_CLOSE_TIME_FOR_TESTING",
     "ARTIFICIALLY_REPLAY_WITH_NEWEST_BUCKET_LOGIC_FOR_TESTING",
-    "OP_APPLY_SLEEP_TIME_FOR_TESTING"};
+    "OP_APPLY_SLEEP_TIME_DURATION_FOR_TESTING",
+    "OP_APPLY_SLEEP_TIME_WEIGHT_FOR_TESTING"};
 
 // Options that should only be used for testing
 static const std::unordered_set<std::string> TESTING_SUGGESTED_OPTIONS = {
@@ -90,18 +100,21 @@ Config::Config() : NODE_SEED(SecretKey::random())
     // non configurable
     MODE_ENABLES_BUCKETLIST = true;
     MODE_USES_IN_MEMORY_LEDGER = false;
-    MODE_STORES_HISTORY = true;
+    MODE_STORES_HISTORY_MISC = true;
+    MODE_STORES_HISTORY_LEDGERHEADERS = true;
     MODE_DOES_CATCHUP = true;
     MODE_AUTO_STARTS_OVERLAY = true;
-    OP_APPLY_SLEEP_TIME_FOR_TESTING = 0;
+    OP_APPLY_SLEEP_TIME_DURATION_FOR_TESTING =
+        std::vector<std::chrono::microseconds>();
+    OP_APPLY_SLEEP_TIME_WEIGHT_FOR_TESTING = std::vector<unsigned short>();
 
     FORCE_SCP = false;
     LEDGER_PROTOCOL_VERSION = CURRENT_LEDGER_PROTOCOL_VERSION;
 
     MAXIMUM_LEDGER_CLOSETIME_DRIFT = 50;
 
-    OVERLAY_PROTOCOL_MIN_VERSION = 13;
-    OVERLAY_PROTOCOL_VERSION = 15;
+    OVERLAY_PROTOCOL_MIN_VERSION = 16;
+    OVERLAY_PROTOCOL_VERSION = 17;
 
     VERSION_STR = STELLAR_CORE_VERSION;
 
@@ -110,8 +123,17 @@ Config::Config() : NODE_SEED(SecretKey::random())
     MANUAL_CLOSE = false;
     CATCHUP_COMPLETE = false;
     CATCHUP_RECENT = 0;
-    AUTOMATIC_MAINTENANCE_PERIOD = std::chrono::seconds{14400};
-    AUTOMATIC_MAINTENANCE_COUNT = 50000;
+    EXPERIMENTAL_PRECAUTION_DELAY_META = false;
+    // automatic maintenance settings:
+    // 11 minutes is relatively short and prime with 1 hour
+    // which will cause automatic maintenance to rarely conflict with any other
+    // scheduled tasks on a machine (that tend to run on a fixed schedule)
+    AUTOMATIC_MAINTENANCE_PERIOD = std::chrono::seconds{11 * 60};
+    // count picked as to catchup with 1 month worth of ledgers
+    // in about 1 week.
+    // (30*24*3600/5) / (700 - (11*60)/5 ) // number of periods
+    //   * (11*60) / (24*3600) = 6.97 days
+    AUTOMATIC_MAINTENANCE_COUNT = 700;
     ARTIFICIALLY_GENERATE_LOAD_FOR_TESTING = false;
     ARTIFICIALLY_ACCELERATE_TIME_FOR_TESTING = false;
     ARTIFICIALLY_SET_CLOSE_TIME_FOR_TESTING = 0;
@@ -127,8 +149,10 @@ Config::Config() : NODE_SEED(SecretKey::random())
     MAX_SLOTS_TO_REMEMBER = 12;
     METADATA_OUTPUT_STREAM = "";
 
-    LOG_FILE_PATH = "stellar-core.%datetime{%Y.%M.%d-%H:%m:%s}.log";
+    LOG_FILE_PATH = "stellar-core-{datetime:%Y-%m-%d_%H-%M-%S}.log";
     BUCKET_DIR_PATH = "buckets";
+
+    LOG_COLOR = false;
 
     TESTING_UPGRADE_DESIRED_FEE = LedgerManager::GENESIS_LEDGER_BASE_FEE;
     TESTING_UPGRADE_RESERVE = LedgerManager::GENESIS_LEDGER_BASE_RESERVE;
@@ -147,15 +171,8 @@ Config::Config() : NODE_SEED(SecretKey::random())
     PEER_TIMEOUT = 30;
     PEER_STRAGGLER_TIMEOUT = 120;
 
-    // time spent picking up items from a connection all at once, this should be
-    // picked high enough that we can pick up as many items as possible but low
-    // enough that we give a chance to cycle through all connections in a
-    // reasonable amount of time. 10ms would allow to cycle through 100
-    // connections in one second
-    MAX_BATCH_READ_PERIOD_MS = std::chrono::milliseconds(10);
-    // during transaction spikes, we want to increase the chance of picking up
-    // items behind transactions
-    MAX_BATCH_READ_COUNT = 1000;
+    FLOOD_OP_RATE_PER_LEDGER = 1.0;
+    FLOOD_TX_PERIOD_MS = 200;
 
     MAX_BATCH_WRITE_COUNT = 1024;
     MAX_BATCH_WRITE_BYTES = 1 * 1024 * 1024;
@@ -180,11 +197,14 @@ Config::Config() : NODE_SEED(SecretKey::random())
     DATABASE = SecretValue{"sqlite3://:memory:"};
 
     ENTRY_CACHE_SIZE = 100000;
-    BEST_OFFERS_CACHE_SIZE = 64;
     PREFETCH_BATCH_SIZE = 1000;
 
 #ifdef BUILD_TESTS
     TEST_CASES_ENABLED = false;
+#endif
+
+#ifdef BEST_OFFER_DEBUGGING
+    BEST_OFFER_DEBUGGING_ENABLED = false;
 #endif
 }
 
@@ -198,9 +218,19 @@ readBool(ConfigItem const& item)
 {
     if (!item.second->as<bool>())
     {
-        throw std::invalid_argument(fmt::format("invalid {}", item.first));
+        throw std::invalid_argument(fmt::format("invalid '{}'", item.first));
     }
     return item.second->as<bool>()->get();
+}
+
+double
+readDouble(ConfigItem const& item)
+{
+    if (!item.second->as<double>())
+    {
+        throw std::invalid_argument(fmt::format("invalid '{}'", item.first));
+    }
+    return item.second->as<double>()->get();
 }
 
 std::string
@@ -208,28 +238,29 @@ readString(ConfigItem const& item)
 {
     if (!item.second->as<std::string>())
     {
-        throw std::invalid_argument(fmt::format("invalid {}", item.first));
+        throw std::invalid_argument(fmt::format("invalid '{}'", item.first));
     }
     return item.second->as<std::string>()->get();
 }
 
-std::vector<std::string>
-readStringArray(ConfigItem const& item)
+template <typename T>
+std::vector<T>
+readArray(ConfigItem const& item)
 {
-    auto result = std::vector<std::string>{};
+    auto result = std::vector<T>{};
     if (!item.second->is_array())
     {
         throw std::invalid_argument(
-            fmt::format("{} must be an array", item.first));
+            fmt::format("'{}' must be an array", item.first));
     }
     for (auto v : item.second->as_array()->get())
     {
-        if (!v->as<std::string>())
+        if (!v->as<T>())
         {
             throw std::invalid_argument(
-                fmt::format("invalid element of {}", item.first));
+                fmt::format("invalid element of '{}'", item.first));
         }
-        result.push_back(v->as<std::string>()->get());
+        result.push_back(v->as<T>()->get());
     }
     return result;
 }
@@ -241,14 +272,52 @@ readInt(ConfigItem const& item, T min = std::numeric_limits<T>::min(),
 {
     if (!item.second->as<int64_t>())
     {
-        throw std::invalid_argument(fmt::format("invalid {}", item.first));
+        throw std::invalid_argument(fmt::format("invalid '{}'", item.first));
     }
     int64_t v = item.second->as<int64_t>()->get();
     if (v < min || v > max)
     {
-        throw std::invalid_argument(fmt::format("bad {}", item.first));
+        throw std::invalid_argument(fmt::format("bad '{}'", item.first));
     }
     return static_cast<T>(v);
+}
+
+template <typename T>
+std::vector<T>
+readXdrEnumArray(ConfigItem const& item)
+{
+    UnorderedMap<std::string, T> enumNames;
+    for (auto enumVal : xdr::xdr_traits<T>::enum_values())
+    {
+        auto enumNameCharPtr =
+            xdr::xdr_traits<T>::enum_name(static_cast<T>(enumVal));
+        assert(enumNameCharPtr);
+        enumNames.emplace(enumNameCharPtr, static_cast<T>(enumVal));
+    }
+
+    std::vector<T> result;
+    if (!item.second->is_array())
+    {
+        throw std::invalid_argument(
+            fmt::format("'{}' must be an array", item.first));
+    }
+    for (auto v : item.second->as_array()->get())
+    {
+        if (!v->as<std::string>())
+        {
+            throw std::invalid_argument(
+                fmt::format("invalid element of '{}'", item.first));
+        }
+
+        auto name = v->as<std::string>()->get();
+        if (enumNames.find(name) == enumNames.end())
+        {
+            throw std::invalid_argument(
+                fmt::format("invalid element of '{}'", item.first));
+        }
+        result.push_back(enumNames[name]);
+    }
+    return result;
 }
 }
 
@@ -286,7 +355,7 @@ Config::loadQset(std::shared_ptr<cpptoml::table> group, SCPQuorumSet& qset,
         }
         else if (item.first == "VALIDATORS")
         {
-            auto values = readStringArray(item);
+            auto values = readArray<std::string>(item);
             for (auto v : values)
             {
                 PublicKey nodeID;
@@ -340,7 +409,7 @@ Config::addHistoryArchive(std::string const& name, std::string const& get,
     if (!r.second)
     {
         throw std::invalid_argument(
-            fmt::format("Conflicting archive name {}", name));
+            fmt::format("Conflicting archive name '{}'", name));
     }
 }
 
@@ -367,7 +436,7 @@ Config::parseQuality(std::string const& q) const
     }
     else
     {
-        throw std::invalid_argument(fmt::format("Unknown QUALITY {}", q));
+        throw std::invalid_argument(fmt::format("Unknown QUALITY '{}'", q));
     }
     return res;
 }
@@ -375,7 +444,7 @@ Config::parseQuality(std::string const& q) const
 std::vector<Config::ValidatorEntry>
 Config::parseValidators(
     std::shared_ptr<cpptoml::base> validators,
-    std::unordered_map<std::string, ValidatorQuality> const& domainQualityMap)
+    UnorderedMap<std::string, ValidatorQuality> const& domainQualityMap)
 {
     std::vector<ValidatorEntry> res;
 
@@ -438,7 +507,7 @@ Config::parseValidators(
         if (pubKey.empty() || ve.mHomeDomain.empty())
         {
             throw std::invalid_argument(
-                fmt::format("malformed VALIDATORS entry {}", ve.mName));
+                fmt::format("malformed VALIDATORS entry '{}'", ve.mName));
         }
         auto globQualityIt = domainQualityMap.find(ve.mHomeDomain);
         if (globQualityIt != domainQualityMap.end())
@@ -446,8 +515,8 @@ Config::parseValidators(
             if (qualitySet)
             {
                 throw std::invalid_argument(
-                    fmt::format("malformed VALIDATORS entry {}: quality "
-                                "already defined in home domain {}",
+                    fmt::format("malformed VALIDATORS entry '{}': quality "
+                                "already defined in home domain '{}'",
                                 ve.mName, ve.mHomeDomain));
             }
             else
@@ -459,7 +528,7 @@ Config::parseValidators(
         if (!qualitySet)
         {
             throw std::invalid_argument(fmt::format(
-                "malformed VALIDATORS entry {} (missing quality)", ve.mName));
+                "malformed VALIDATORS entry '{}' (missing quality)", ve.mName));
         }
         addValidatorName(pubKey, ve.mName);
         ve.mKey = KeyUtils::fromStrKey<PublicKey>(pubKey);
@@ -472,20 +541,20 @@ Config::parseValidators(
              ve.mQuality == ValidatorQuality::VALIDATOR_CRITICAL_QUALITY) &&
             hist.empty())
         {
-            throw std::invalid_argument(fmt::format(
-                "malformed VALIDATORS entry {} (critical and high quality must "
-                "have an archive)",
-                ve.mName));
+            throw std::invalid_argument(
+                fmt::format("malformed VALIDATORS entry '{}' (critical and "
+                            "high quality must have an archive)",
+                            ve.mName));
         }
         res.emplace_back(ve);
     }
     return res;
 }
 
-std::unordered_map<std::string, Config::ValidatorQuality>
+UnorderedMap<std::string, Config::ValidatorQuality>
 Config::parseDomainsQuality(std::shared_ptr<cpptoml::base> domainsQuality)
 {
-    std::unordered_map<std::string, ValidatorQuality> res;
+    UnorderedMap<std::string, ValidatorQuality> res;
     auto tarr = domainsQuality->as_table_array();
     if (!tarr)
     {
@@ -516,19 +585,19 @@ Config::parseDomainsQuality(std::shared_ptr<cpptoml::base> domainsQuality)
             else
             {
                 throw std::invalid_argument(
-                    fmt::format("Unknown field {} in HOME_DOMAINS", f.first));
+                    fmt::format("Unknown field '{}' in HOME_DOMAINS", f.first));
             }
         }
         if (!qualitySet || domain.empty())
         {
             throw std::invalid_argument(
-                fmt::format("Malformed HOME_DOMAINS {}", domain));
+                fmt::format("Malformed HOME_DOMAINS '{}'", domain));
         }
         auto p = res.emplace(std::make_pair(domain, quality));
         if (!p.second)
         {
             throw std::invalid_argument(
-                fmt::format("Malformed HOME_DOMAINS: duplicate {}", domain));
+                fmt::format("Malformed HOME_DOMAINS: duplicate '{}'", domain));
         }
     }
     return res;
@@ -545,7 +614,7 @@ Config::load(std::string const& filename)
         throw std::invalid_argument(s);
     }
 
-    LOG(DEBUG) << "Loading config from: " << filename;
+    LOG_DEBUG(DEFAULT_LOG, "Loading config from: {}", filename);
     try
     {
         if (filename == Config::STDIN_SPECIAL_NAME)
@@ -558,7 +627,7 @@ Config::load(std::string const& filename)
             if (!ifs)
             {
                 throw std::runtime_error(
-                    fmt::format("Error opening file {}", filename));
+                    fmt::format("Error opening file '{}'", filename));
             }
             ifs.exceptions(std::ios::badbit);
             load(ifs);
@@ -586,14 +655,20 @@ Config::load(std::istream& in)
 void
 Config::addSelfToValidators(
     std::vector<ValidatorEntry>& validators,
-    std::unordered_map<std::string, ValidatorQuality> const& domainQualityMap)
+    UnorderedMap<std::string, ValidatorQuality> const& domainQualityMap)
 {
-    auto it = domainQualityMap.find(NODE_HOME_DOMAIN);
+    if (NODE_HOME_DOMAIN.empty())
+    {
+        throw std::invalid_argument("NODE_HOME_DOMAIN must be set");
+    }
+
     ValidatorEntry self;
     self.mKey = NODE_SEED.getPublicKey();
     self.mHomeDomain = NODE_HOME_DOMAIN;
     self.mName = "self";
     self.mHasHistory = false;
+
+    auto it = domainQualityMap.find(NODE_HOME_DOMAIN);
     if (it != domainQualityMap.end())
     {
         self.mQuality = it->second;
@@ -601,7 +676,9 @@ Config::addSelfToValidators(
     else
     {
         throw std::invalid_argument(
-            "Must specify a matching HOME_DOMAINS for self");
+            fmt::format("Validator configured with NODE_HOME_DOMAIN='{}' "
+                        "but there is no matching HOME_DOMAINS",
+                        NODE_HOME_DOMAIN));
     }
     validators.emplace_back(self);
 }
@@ -620,18 +697,52 @@ Config::verifyHistoryValidatorsBlocking(
     }
     if (!LocalNode::isVBlocking(QUORUM_SET, archives))
     {
-        LOG(WARNING) << "Quorum can be reached without validators with "
-                        "an archive";
+        LOG_WARNING(DEFAULT_LOG,
+                    "Quorum can be reached without validators with "
+                    "an archive");
         if (!UNSAFE_QUORUM)
         {
-            LOG(ERROR) << "Potentially unsafe configuration: "
-                          "validators with known archives should be "
-                          "included in all quorums. If this is really "
-                          "what you want, set UNSAFE_QUORUM=true. Be "
-                          "sure you know what you are doing!";
+            LOG_ERROR(DEFAULT_LOG, "Potentially unsafe configuration: "
+                                   "validators with known archives should be "
+                                   "included in all quorums. If this is really "
+                                   "what you want, set UNSAFE_QUORUM=true. Be "
+                                   "sure you know what you are doing!");
             throw std::invalid_argument("SCP unsafe");
         }
     }
+}
+
+std::vector<std::chrono::microseconds>
+Config::processOpApplySleepTimeForTestingConfigs()
+{
+    if (OP_APPLY_SLEEP_TIME_WEIGHT_FOR_TESTING.size() !=
+        OP_APPLY_SLEEP_TIME_DURATION_FOR_TESTING.size())
+    {
+        throw std::invalid_argument(
+            "OP_APPLY_SLEEP_TIME_DURATION_FOR_TESTING and "
+            "OP_APPLY_SLEEP_TIME_WEIGHT_FOR_TESTING must be defined together "
+            "and have the same size");
+    }
+    if (std::accumulate(OP_APPLY_SLEEP_TIME_WEIGHT_FOR_TESTING.begin(),
+                        OP_APPLY_SLEEP_TIME_WEIGHT_FOR_TESTING.end(), 0) != 100)
+    {
+        throw std::invalid_argument(
+            "The sum of the weights in "
+            "OP_APPLY_SLEEP_TIME_WEIGHT_FOR_TESTING must equal 100");
+    }
+    std::vector<std::chrono::microseconds> ret;
+    ret.reserve(100);
+    for (size_t i = 0; i < OP_APPLY_SLEEP_TIME_WEIGHT_FOR_TESTING.size(); i++)
+    {
+        LOG_INFO(DEFAULT_LOG, "Sleeps for {} {}% of the time",
+                 OP_APPLY_SLEEP_TIME_DURATION_FOR_TESTING[i],
+                 OP_APPLY_SLEEP_TIME_WEIGHT_FOR_TESTING[i]);
+        for (size_t j = 0; j < OP_APPLY_SLEEP_TIME_WEIGHT_FOR_TESTING[i]; j++)
+        {
+            ret.push_back(OP_APPLY_SLEEP_TIME_DURATION_FOR_TESTING[i]);
+        }
+    }
+    return ret;
 }
 
 void
@@ -642,15 +753,14 @@ Config::processConfig(std::shared_ptr<cpptoml::table> t)
         {
             if (item.second->template as<bool>()->get())
             {
-                LOG(INFO) << fmt::format(
-                    "{} enabled in configuration file - {}", item.first,
-                    message);
+                LOG_INFO(DEFAULT_LOG, "'{}' enabled in configuration file - {}",
+                         item.first, message);
             }
         }
         else
         {
-            LOG(INFO) << fmt::format("{} set in configuration file - {}",
-                                     item.first, message);
+            LOG_INFO(DEFAULT_LOG, "'{}' set in configuration file - {}",
+                     item.first, message);
         }
     };
 
@@ -661,13 +771,13 @@ Config::processConfig(std::shared_ptr<cpptoml::table> t)
             throw std::runtime_error("Could not parse toml");
         }
         std::vector<ValidatorEntry> validators;
-        std::unordered_map<std::string, ValidatorQuality> domainQualityMap;
+        UnorderedMap<std::string, ValidatorQuality> domainQualityMap;
 
         // cpptoml returns the items in non-deterministic order
         // so we need to process items that are potential dependencies first
         for (auto& item : *t)
         {
-            LOG(DEBUG) << "Config item: " << item.first;
+            LOG_DEBUG(DEFAULT_LOG, "Config item: {}", item.first);
             if (TESTING_ONLY_OPTIONS.count(item.first) > 0)
             {
                 logIfSet(item,
@@ -711,9 +821,13 @@ Config::processConfig(std::shared_ptr<cpptoml::table> t)
             {
                 METADATA_OUTPUT_STREAM = readString(item);
             }
+            else if (item.first == "EXPERIMENTAL_PRECAUTION_DELAY_META")
+            {
+                EXPERIMENTAL_PRECAUTION_DELAY_META = readBool(item);
+            }
             else if (item.first == "KNOWN_CURSORS")
             {
-                KNOWN_CURSORS = readStringArray(item);
+                KNOWN_CURSORS = readArray<std::string>(item);
                 for (auto const& c : KNOWN_CURSORS)
                 {
                     if (!ExternalQueue::validateResourceID(c))
@@ -779,6 +893,10 @@ Config::processConfig(std::shared_ptr<cpptoml::table> t)
             {
                 LOG_FILE_PATH = readString(item);
             }
+            else if (item.first == "LOG_COLOR")
+            {
+                LOG_COLOR = readBool(item);
+            }
             else if (item.first == "TMP_DIR_PATH")
             {
                 throw std::invalid_argument("TMP_DIR_PATH is not supported "
@@ -791,7 +909,7 @@ Config::processConfig(std::shared_ptr<cpptoml::table> t)
             }
             else if (item.first == "NODE_NAMES")
             {
-                auto names = readStringArray(item);
+                auto names = readArray<std::string>(item);
                 for (auto v : names)
                 {
                     PublicKey nodeID;
@@ -840,15 +958,6 @@ Config::processConfig(std::shared_ptr<cpptoml::table> t)
                 PEER_STRAGGLER_TIMEOUT = readInt<unsigned short>(
                     item, 1, std::numeric_limits<unsigned short>::max());
             }
-            else if (item.first == "MAX_BATCH_READ_PERIOD_MS")
-            {
-                MAX_BATCH_READ_PERIOD_MS =
-                    std::chrono::milliseconds(readInt<int>(item, 1));
-            }
-            else if (item.first == "MAX_BATCH_READ_COUNT")
-            {
-                MAX_BATCH_READ_COUNT = readInt<int>(item, 1);
-            }
             else if (item.first == "MAX_BATCH_WRITE_COUNT")
             {
                 MAX_BATCH_WRITE_COUNT = readInt<int>(item, 1);
@@ -857,9 +966,22 @@ Config::processConfig(std::shared_ptr<cpptoml::table> t)
             {
                 MAX_BATCH_WRITE_BYTES = readInt<int>(item, 1);
             }
+            else if (item.first == "FLOOD_OP_RATE_PER_LEDGER")
+            {
+                FLOOD_OP_RATE_PER_LEDGER = readDouble(item);
+                if (FLOOD_OP_RATE_PER_LEDGER <= 0.0)
+                {
+                    throw std::invalid_argument(
+                        "bad value for FLOOD_OP_RATE_PER_LEDGER");
+                }
+            }
+            else if (item.first == "FLOOD_TX_PERIOD_MS")
+            {
+                FLOOD_TX_PERIOD_MS = readInt<int>(item, 0);
+            }
             else if (item.first == "PREFERRED_PEERS")
             {
-                PREFERRED_PEERS = readStringArray(item);
+                PREFERRED_PEERS = readArray<std::string>(item);
             }
             else if (item.first == "PREFERRED_PEER_KEYS")
             {
@@ -871,7 +993,7 @@ Config::processConfig(std::shared_ptr<cpptoml::table> t)
             }
             else if (item.first == "KNOWN_PEERS")
             {
-                auto peers = readStringArray(item);
+                auto peers = readArray<std::string>(item);
                 KNOWN_PEERS.insert(KNOWN_PEERS.begin(), peers.begin(),
                                    peers.end());
             }
@@ -881,7 +1003,7 @@ Config::processConfig(std::shared_ptr<cpptoml::table> t)
             }
             else if (item.first == "COMMANDS")
             {
-                COMMANDS = readStringArray(item);
+                COMMANDS = readArray<std::string>(item);
             }
             else if (item.first == "WORKER_THREADS")
             {
@@ -906,7 +1028,8 @@ Config::processConfig(std::shared_ptr<cpptoml::table> t)
                 {
                     for (auto const& archive : *hist)
                     {
-                        LOG(DEBUG) << "History archive: " << archive.first;
+                        LOG_DEBUG(DEFAULT_LOG, "History archive: {}",
+                                  archive.first);
                         auto tab = archive.second->as_table();
                         if (!tab)
                         {
@@ -956,15 +1079,11 @@ Config::processConfig(std::shared_ptr<cpptoml::table> t)
             }
             else if (item.first == "INVARIANT_CHECKS")
             {
-                INVARIANT_CHECKS = readStringArray(item);
+                INVARIANT_CHECKS = readArray<std::string>(item);
             }
             else if (item.first == "ENTRY_CACHE_SIZE")
             {
                 ENTRY_CACHE_SIZE = readInt<uint32_t>(item);
-            }
-            else if (item.first == "BEST_OFFERS_CACHE_SIZE")
-            {
-                BEST_OFFERS_CACHE_SIZE = readInt<uint32_t>(item);
             }
             else if (item.first == "PREFETCH_BATCH_SIZE")
             {
@@ -987,6 +1106,33 @@ Config::processConfig(std::shared_ptr<cpptoml::table> t)
                 // processed later (may depend on previously defined public
                 // keys)
             }
+            else if (item.first ==
+                     "EXCLUDE_TRANSACTIONS_CONTAINING_OPERATION_TYPE")
+            {
+                EXCLUDE_TRANSACTIONS_CONTAINING_OPERATION_TYPE =
+                    readXdrEnumArray<OperationType>(item);
+            }
+            else if (item.first == "OP_APPLY_SLEEP_TIME_DURATION_FOR_TESTING")
+            {
+                auto input = readArray<int64_t>(item);
+                OP_APPLY_SLEEP_TIME_DURATION_FOR_TESTING.reserve(input.size());
+                // Convert int64_t to std::chrono::microseconds
+                std::transform(
+                    input.begin(), input.end(),
+                    std::back_inserter(
+                        OP_APPLY_SLEEP_TIME_DURATION_FOR_TESTING),
+                    [](int64_t x) { return std::chrono::microseconds(x); });
+            }
+            else if (item.first == "OP_APPLY_SLEEP_TIME_WEIGHT_FOR_TESTING")
+            {
+                auto input = readArray<int64_t>(item);
+                OP_APPLY_SLEEP_TIME_WEIGHT_FOR_TESTING.reserve(input.size());
+                // Convert int64_t to unsigned short
+                std::transform(
+                    input.begin(), input.end(),
+                    std::back_inserter(OP_APPLY_SLEEP_TIME_WEIGHT_FOR_TESTING),
+                    [](int64_t x) { return static_cast<unsigned short>(x); });
+            }
             else
             {
                 std::string err("Unknown configuration entry: '");
@@ -995,6 +1141,16 @@ Config::processConfig(std::shared_ptr<cpptoml::table> t)
                 throw std::invalid_argument(err);
             }
         }
+
+        if (!OP_APPLY_SLEEP_TIME_DURATION_FOR_TESTING.empty() ||
+            !OP_APPLY_SLEEP_TIME_WEIGHT_FOR_TESTING.empty())
+        {
+            mOpApplySleepTimeForTesting =
+                processOpApplySleepTimeForTestingConfigs();
+        }
+
+        gIsProductionNetwork = NETWORK_PASSPHRASE ==
+                               "Public Global Stellar Network ; September 2015";
 
         // Validators default to starting the network from local state
         FORCE_SCP = NODE_IS_VALIDATOR;
@@ -1031,16 +1187,18 @@ Config::processConfig(std::shared_ptr<cpptoml::table> t)
                 loadQset(qset->as_table(), QUORUM_SET, 0);
             }
             auto s = toString(QUORUM_SET);
-            LOG(INFO) << "Using QUORUM_SET: " << s;
+            LOG_INFO(DEFAULT_LOG, "Using QUORUM_SET: {}", s);
             if (s != autoQSetStr && !validators.empty())
             {
-                LOG(WARNING) << "Differs from generated: " << autoQSetStr;
+                LOG_WARNING(DEFAULT_LOG, "Differs from generated: {}",
+                            autoQSetStr);
                 if (!UNSAFE_QUORUM)
                 {
-                    LOG(ERROR) << "Can't override [[VALIDATORS]] with "
-                                  "QUORUM_SET unless you also set "
-                                  "UNSAFE_QUORUM=true. Be sure you know what "
-                                  "you are doing!";
+                    LOG_ERROR(DEFAULT_LOG,
+                              "Can't override [[VALIDATORS]] with "
+                              "QUORUM_SET unless you also set "
+                              "UNSAFE_QUORUM=true. Be sure you know what "
+                              "you are doing!");
                     throw std::invalid_argument("SCP unsafe");
                 }
             }
@@ -1050,11 +1208,11 @@ Config::processConfig(std::shared_ptr<cpptoml::table> t)
         }
         else
         {
-            LOG(INFO) << "Generated QUORUM_SET: " << autoQSetStr;
+            LOG_INFO(DEFAULT_LOG, "Generated QUORUM_SET: {}", autoQSetStr);
             QUORUM_SET = autoQSet;
             verifyHistoryValidatorsBlocking(validators);
             // count the number of domains
-            std::unordered_set<std::string> domains;
+            UnorderedSet<std::string> domains;
             for (auto const& v : validators)
             {
                 domains.insert(v.mHomeDomain);
@@ -1177,15 +1335,17 @@ Config::adjust()
 void
 Config::logBasicInfo()
 {
-    LOG(INFO) << "Connection effective settings:";
-    LOG(INFO) << "TARGET_PEER_CONNECTIONS: " << TARGET_PEER_CONNECTIONS;
-    LOG(INFO) << "MAX_ADDITIONAL_PEER_CONNECTIONS: "
-              << MAX_ADDITIONAL_PEER_CONNECTIONS;
-    LOG(INFO) << "MAX_PENDING_CONNECTIONS: " << MAX_PENDING_CONNECTIONS;
-    LOG(INFO) << "MAX_OUTBOUND_PENDING_CONNECTIONS: "
-              << MAX_OUTBOUND_PENDING_CONNECTIONS;
-    LOG(INFO) << "MAX_INBOUND_PENDING_CONNECTIONS: "
-              << MAX_INBOUND_PENDING_CONNECTIONS;
+    LOG_INFO(DEFAULT_LOG, "Connection effective settings:");
+    LOG_INFO(DEFAULT_LOG, "TARGET_PEER_CONNECTIONS: {}",
+             TARGET_PEER_CONNECTIONS);
+    LOG_INFO(DEFAULT_LOG, "MAX_ADDITIONAL_PEER_CONNECTIONS: {}",
+             MAX_ADDITIONAL_PEER_CONNECTIONS);
+    LOG_INFO(DEFAULT_LOG, "MAX_PENDING_CONNECTIONS: {}",
+             MAX_PENDING_CONNECTIONS);
+    LOG_INFO(DEFAULT_LOG, "MAX_OUTBOUND_PENDING_CONNECTIONS: {}",
+             MAX_OUTBOUND_PENDING_CONNECTIONS);
+    LOG_INFO(DEFAULT_LOG, "MAX_INBOUND_PENDING_CONNECTIONS: {}",
+             MAX_INBOUND_PENDING_CONNECTIONS);
 }
 
 void
@@ -1217,18 +1377,20 @@ Config::validateConfig(ValidationThresholdLevels thresholdLevel)
                                                  QUORUM_SET.innerSets.size());
         FAILURE_SAFETY = topLevelCount - minSize;
 
-        LOG(INFO) << "Assigning calculated value of " << FAILURE_SAFETY
-                  << " to FAILURE_SAFETY";
+        LOG_INFO(DEFAULT_LOG,
+                 "Assigning calculated value of {} to FAILURE_SAFETY",
+                 FAILURE_SAFETY);
     }
 
     try
     {
         if (FAILURE_SAFETY >= static_cast<int32_t>(r.size()))
         {
-            LOG(ERROR) << "Not enough nodes / thresholds too strict in your "
-                          "Quorum set to ensure your desired level of "
-                          "FAILURE_SAFETY. Reduce FAILURE_SAFETY or fix "
-                          "quorum set";
+            LOG_ERROR(DEFAULT_LOG,
+                      "Not enough nodes / thresholds too strict in your "
+                      "Quorum set to ensure your desired level of "
+                      "FAILURE_SAFETY. Reduce FAILURE_SAFETY or fix "
+                      "quorum set");
             throw std::invalid_argument(
                 "FAILURE_SAFETY incompatible with QUORUM_SET");
         }
@@ -1237,33 +1399,34 @@ Config::validateConfig(ValidationThresholdLevels thresholdLevel)
         {
             if (FAILURE_SAFETY == 0)
             {
-                LOG(ERROR)
-                    << "Can't have FAILURE_SAFETY=0 unless you also set "
-                       "UNSAFE_QUORUM=true. Be sure you know what you are "
-                       "doing!";
+                LOG_ERROR(DEFAULT_LOG,
+                          "Can't have FAILURE_SAFETY=0 unless you also set "
+                          "UNSAFE_QUORUM=true. Be sure you know what you are "
+                          "doing!");
                 throw std::invalid_argument("SCP unsafe");
             }
 
             if (QUORUM_SET.threshold < minSize)
             {
-                LOG(ERROR) << "Your THRESHOLD_PERCENTAGE is too low. If you "
-                              "really want this set UNSAFE_QUORUM=true. Be "
-                              "sure you know what you are doing!";
+                LOG_ERROR(DEFAULT_LOG,
+                          "Your THRESHOLD_PERCENTAGE is too low. If you "
+                          "really want this set UNSAFE_QUORUM=true. Be "
+                          "sure you know what you are doing!");
                 throw std::invalid_argument("SCP unsafe");
             }
         }
     }
     catch (...)
     {
-        LOG(INFO) << " Current QUORUM_SET breaks with " << r.size()
-                  << " failures";
+        LOG_INFO(DEFAULT_LOG, " Current QUORUM_SET breaks with {} failures",
+                 r.size());
         throw;
     }
 
     const char* errString = nullptr;
     if (!isQuorumSetSane(QUORUM_SET, !UNSAFE_QUORUM, errString))
     {
-        LOG(FATAL) << fmt::format("Invalid QUORUM_SET: {}", errString);
+        LOG_FATAL(DEFAULT_LOG, "Invalid QUORUM_SET: {}", errString);
         throw std::invalid_argument("Invalid QUORUM_SET");
     }
 }
@@ -1352,7 +1515,7 @@ Config::parseNodeIDsIntoSet(std::shared_ptr<cpptoml::table> t,
         auto nodes = t->get(configStr);
         if (nodes)
         {
-            auto values = readStringArray(ConfigItem{configStr, nodes});
+            auto values = readArray<std::string>(ConfigItem{configStr, nodes});
             for (auto const& v : values)
             {
                 PublicKey nodeID;
@@ -1460,6 +1623,40 @@ Config::getExpectedLedgerCloseTime() const
 }
 
 void
+Config::setInMemoryMode()
+{
+    MODE_USES_IN_MEMORY_LEDGER = true;
+    DATABASE = SecretValue{"sqlite3://:memory:"};
+    MODE_STORES_HISTORY_MISC = false;
+    MODE_STORES_HISTORY_LEDGERHEADERS = false;
+    MODE_ENABLES_BUCKETLIST = true;
+}
+
+bool
+Config::isInMemoryMode() const
+{
+    return MODE_USES_IN_MEMORY_LEDGER;
+}
+
+bool
+Config::isInMemoryModeWithoutMinimalDB() const
+{
+    return MODE_USES_IN_MEMORY_LEDGER && !MODE_STORES_HISTORY_LEDGERHEADERS;
+}
+
+bool
+Config::modeStoresAllHistory() const
+{
+    return MODE_STORES_HISTORY_LEDGERHEADERS && MODE_STORES_HISTORY_MISC;
+}
+
+bool
+Config::modeStoresAnyHistory() const
+{
+    return MODE_STORES_HISTORY_LEDGERHEADERS || MODE_STORES_HISTORY_MISC;
+}
+
+void
 Config::setNoListen()
 {
     // prevent opening up a port for other peers
@@ -1494,9 +1691,9 @@ Config::generateQuorumSetHelper(
         {
             if (it2->mQuality != it->mQuality)
             {
-                throw std::invalid_argument(
-                    fmt::format("Validators {} and {} must have same quality",
-                                it->mName, it2->mName));
+                throw std::invalid_argument(fmt::format(
+                    "Validators '{}' and '{}' must have same quality",
+                    it->mName, it2->mName));
             }
             vals.emplace_back(it2->mKey);
         }
@@ -1505,9 +1702,9 @@ Config::generateQuorumSetHelper(
              it->mQuality == ValidatorQuality::VALIDATOR_CRITICAL_QUALITY))
         {
             throw std::invalid_argument(
-                fmt::format("Critical and High quality validators {} must have "
-                            "redundancy of at least 3",
-                            it->mName));
+                fmt::format("Critical and High quality validators for '{}' "
+                            "must have redundancy of at least 3",
+                            it->mHomeDomain));
         }
         innerSet.threshold = computeDefaultThreshold(
             innerSet, ValidationThresholdLevels::SIMPLE_MAJORITY);
@@ -1520,7 +1717,7 @@ Config::generateQuorumSetHelper(
         if (it->mQuality > curQuality)
         {
             throw std::invalid_argument(fmt::format(
-                "invalid validator quality for {} (must be ascending)",
+                "invalid validator quality for '{}' (must be ascending)",
                 it->mName));
         }
         auto lowQ = generateQuorumSetHelper(it, end, it->mQuality);
@@ -1568,5 +1765,12 @@ Config::toString(SCPQuorumSet const& qset)
     return fw.write(json);
 }
 
+std::vector<std::chrono::microseconds> const&
+Config::getOpApplySleepTimeForTesting() const
+{
+    return mOpApplySleepTimeForTesting;
+}
+
 std::string const Config::STDIN_SPECIAL_NAME = "/dev/stdin";
+
 }

@@ -6,6 +6,7 @@
 #include "crypto/ByteSlice.h"
 #include "crypto/SignerKey.h"
 #include "database/Database.h"
+#include "herder/Herder.h"
 #include "invariant/InvariantManager.h"
 #include "ledger/LedgerTxn.h"
 #include "ledger/LedgerTxnEntry.h"
@@ -186,12 +187,10 @@ applyCheck(TransactionFramePtr tx, Application& app, bool checkSeqNum)
             REQUIRE(ltxDelta.entry.size() == 1);
             auto current = ltxDelta.entry.begin()->second.current;
             REQUIRE(current);
-            REQUIRE(current->type() ==
-                    GeneralizedLedgerEntryType::LEDGER_ENTRY);
+            REQUIRE(current->type() == InternalLedgerEntryType::LEDGER_ENTRY);
             auto previous = ltxDelta.entry.begin()->second.previous;
             REQUIRE(previous);
-            REQUIRE(previous->type() ==
-                    GeneralizedLedgerEntryType::LEDGER_ENTRY);
+            REQUIRE(previous->type() == InternalLedgerEntryType::LEDGER_ENTRY);
             auto currAcc = current->ledgerEntry().data.account();
             auto prevAcc = previous->ledgerEntry().data.account();
             REQUIRE(prevAcc == srcAccountBefore);
@@ -300,11 +299,11 @@ applyCheck(TransactionFramePtr tx, Application& app, bool checkSeqNum)
                             auto current = kvp.second.current;
                             REQUIRE(current);
                             REQUIRE(current->type() ==
-                                    GeneralizedLedgerEntryType::LEDGER_ENTRY);
+                                    InternalLedgerEntryType::LEDGER_ENTRY);
                             auto previous = kvp.second.previous;
                             REQUIRE(previous);
                             REQUIRE(previous->type() ==
-                                    GeneralizedLedgerEntryType::LEDGER_ENTRY);
+                                    InternalLedgerEntryType::LEDGER_ENTRY);
 
                             // From V13, it's possible to remove one-time
                             // signers on early failures
@@ -396,18 +395,41 @@ validateTxResults(TransactionFramePtr const& tx, Application& app,
 
 TxSetResultMeta
 closeLedgerOn(Application& app, uint32 ledgerSeq, int day, int month, int year,
-              std::vector<TransactionFrameBasePtr> const& txs, bool skipValid)
+              std::vector<TransactionFrameBasePtr> const& txs, bool strictOrder)
 {
     return closeLedgerOn(app, ledgerSeq, getTestDate(day, month, year), txs,
-                         skipValid);
+                         strictOrder);
 }
+
+class TxSetFrameStrictOrderForTesting : public TxSetFrame
+{
+  public:
+    TxSetFrameStrictOrderForTesting(Hash const& previousLedgerHash)
+        : TxSetFrame(previousLedgerHash){};
+
+    std::vector<TransactionFrameBasePtr>
+    sortForApply() override
+    {
+        return mTransactions;
+    };
+
+    void sortForHash() override{};
+};
 
 TxSetResultMeta
 closeLedgerOn(Application& app, uint32 ledgerSeq, time_t closeTime,
-              std::vector<TransactionFrameBasePtr> const& txs, bool skipValid)
+              std::vector<TransactionFrameBasePtr> const& txs, bool strictOrder)
 {
-    auto txSet = std::make_shared<TxSetFrame>(
-        app.getLedgerManager().getLastClosedLedgerHeader().hash);
+    std::shared_ptr<TxSetFrame> txSet;
+    auto lclHash = app.getLedgerManager().getLastClosedLedgerHeader().hash;
+    if (strictOrder)
+    {
+        txSet = std::make_shared<TxSetFrameStrictOrderForTesting>(lclHash);
+    }
+    else
+    {
+        txSet = std::make_shared<TxSetFrame>(lclHash);
+    }
 
     for (auto const& tx : txs)
     {
@@ -415,13 +437,15 @@ closeLedgerOn(Application& app, uint32 ledgerSeq, time_t closeTime,
     }
 
     txSet->sortForHash();
-    if (!skipValid)
+    if (!strictOrder)
     {
         REQUIRE(txSet->checkValid(app, 0, 0));
     }
 
-    StellarValue sv(txSet->getContentsHash(), closeTime, emptyUpgradeSteps,
-                    STELLAR_VALUE_BASIC);
+    StellarValue sv = app.getHerder().makeStellarValue(
+        txSet->getContentsHash(), closeTime, emptyUpgradeSteps,
+        app.getConfig().NODE_SEED);
+
     LedgerCloseData ledgerData(ledgerSeq, txSet, sv);
     app.getLedgerManager().closeLedger(ledgerData);
 
@@ -647,6 +671,16 @@ makeAsset(SecretKey const& issuer, std::string const& code)
     asset.type(ASSET_TYPE_CREDIT_ALPHANUM4);
     asset.alphaNum4().issuer = issuer.getPublicKey();
     strToAssetCode(asset.alphaNum4().assetCode, code);
+    return asset;
+}
+
+Asset
+makeAssetAlphanum12(SecretKey const& issuer, std::string const& code)
+{
+    Asset asset;
+    asset.type(ASSET_TYPE_CREDIT_ALPHANUM12);
+    asset.alphaNum12().issuer = issuer.getPublicKey();
+    strToAssetCode(asset.alphaNum12().assetCode, code);
     return asset;
 }
 
@@ -1026,7 +1060,7 @@ SetOptionsArguments
 setMasterWeight(int master)
 {
     SetOptionsArguments result;
-    result.masterWeight = make_optional<int>(master);
+    result.masterWeight = std::make_optional<int>(master);
     return result;
 }
 
@@ -1034,7 +1068,7 @@ SetOptionsArguments
 setLowThreshold(int low)
 {
     SetOptionsArguments result;
-    result.lowThreshold = make_optional<int>(low);
+    result.lowThreshold = std::make_optional<int>(low);
     return result;
 }
 
@@ -1042,7 +1076,7 @@ SetOptionsArguments
 setMedThreshold(int med)
 {
     SetOptionsArguments result;
-    result.medThreshold = make_optional<int>(med);
+    result.medThreshold = std::make_optional<int>(med);
     return result;
 }
 
@@ -1050,7 +1084,7 @@ SetOptionsArguments
 setHighThreshold(int high)
 {
     SetOptionsArguments result;
-    result.highThreshold = make_optional<int>(high);
+    result.highThreshold = std::make_optional<int>(high);
     return result;
 }
 
@@ -1058,7 +1092,7 @@ SetOptionsArguments
 setSigner(Signer signer)
 {
     SetOptionsArguments result;
-    result.signer = make_optional<Signer>(signer);
+    result.signer = std::make_optional<Signer>(signer);
     return result;
 }
 
@@ -1066,7 +1100,7 @@ SetOptionsArguments
 setFlags(uint32_t setFlags)
 {
     SetOptionsArguments result;
-    result.setFlags = make_optional<uint32_t>(setFlags);
+    result.setFlags = std::make_optional<uint32_t>(setFlags);
     return result;
 }
 
@@ -1074,7 +1108,7 @@ SetOptionsArguments
 clearFlags(uint32_t clearFlags)
 {
     SetOptionsArguments result;
-    result.clearFlags = make_optional<uint32_t>(clearFlags);
+    result.clearFlags = std::make_optional<uint32_t>(clearFlags);
     return result;
 }
 
@@ -1082,7 +1116,7 @@ SetOptionsArguments
 setInflationDestination(AccountID inflationDest)
 {
     SetOptionsArguments result;
-    result.inflationDest = make_optional<AccountID>(inflationDest);
+    result.inflationDest = std::make_optional<AccountID>(inflationDest);
     return result;
 }
 
@@ -1090,7 +1124,49 @@ SetOptionsArguments
 setHomeDomain(std::string const& homeDomain)
 {
     SetOptionsArguments result;
-    result.homeDomain = make_optional<std::string>(homeDomain);
+    result.homeDomain = std::make_optional<std::string>(homeDomain);
+    return result;
+}
+
+SetTrustLineFlagsArguments
+operator|(SetTrustLineFlagsArguments const& x,
+          SetTrustLineFlagsArguments const& y)
+{
+    auto result = SetTrustLineFlagsArguments{};
+    result.setFlags = y.setFlags | x.setFlags;
+    result.clearFlags = y.clearFlags | x.clearFlags;
+    return result;
+}
+
+Operation
+setTrustLineFlags(PublicKey const& trustor, Asset const& asset,
+                  SetTrustLineFlagsArguments const& arguments)
+{
+    Operation op;
+    op.body.type(SET_TRUST_LINE_FLAGS);
+
+    SetTrustLineFlagsOp& setOp = op.body.setTrustLineFlagsOp();
+    setOp.trustor = trustor;
+    setOp.asset = asset;
+    setOp.setFlags = arguments.setFlags;
+    setOp.clearFlags = arguments.clearFlags;
+
+    return op;
+}
+
+SetTrustLineFlagsArguments
+setTrustLineFlags(uint32_t setFlags)
+{
+    SetTrustLineFlagsArguments result;
+    result.setFlags = setFlags;
+    return result;
+}
+
+SetTrustLineFlagsArguments
+clearTrustLineFlags(uint32_t clearFlags)
+{
+    SetTrustLineFlagsArguments result;
+    result.clearFlags = clearFlags;
     return result;
 }
 
@@ -1189,6 +1265,27 @@ revokeSponsorship(AccountID const& accID, SignerKey const& key)
     op.body.revokeSponsorshipOp().type(REVOKE_SPONSORSHIP_SIGNER);
     op.body.revokeSponsorshipOp().signer().accountID = accID;
     op.body.revokeSponsorshipOp().signer().signerKey = key;
+    return op;
+}
+
+Operation
+clawback(AccountID const& from, Asset const& asset, int64_t amount)
+{
+    Operation op;
+    op.body.type(CLAWBACK);
+    op.body.clawbackOp().from = toMuxedAccount(from);
+    op.body.clawbackOp().amount = amount;
+    op.body.clawbackOp().asset = asset;
+
+    return op;
+}
+
+Operation
+clawbackClaimableBalance(ClaimableBalanceID const& balanceID)
+{
+    Operation op;
+    op.body.type(CLAWBACK_CLAIMABLE_BALANCE);
+    op.body.clawbackClaimableBalanceOp().balanceID = balanceID;
     return op;
 }
 

@@ -44,6 +44,8 @@ class TCPPeer : public Peer
 
     size_t getIncomingMsgLength();
     virtual void connected() override;
+    void scheduleRead();
+    virtual bool sendQueueIsOverloaded() const override;
     void startRead();
 
     static constexpr size_t HDRSZ = 4;
@@ -69,7 +71,7 @@ class TCPPeer : public Peer
 
     TCPPeer(Application& app, Peer::PeerRole role,
             std::shared_ptr<SocketType> socket); // hollow
-                                                 // constuctor; use
+                                                 // constructor; use
                                                  // `initiate` or
                                                  // `accept` instead
 

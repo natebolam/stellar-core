@@ -170,7 +170,7 @@ The version number scheme that we follow is `protocol_version.release_number.pat
 See the [INSTALL](https://github.com/stellar/stellar-core/blob/master/INSTALL.md) for build instructions.
 
 ### Package based Installation
-If you are using Ubuntu 16.04 LTS we provide the latest stable releases of [stellar-core](https://github.com/stellar/stellar-core) and [stellar-horizon](https://github.com/stellar/go/tree/master/services/horizon) in Debian binary package format.
+If you are using a recent LTS version of Ubuntu we provide the latest stable releases of [stellar-core](https://github.com/stellar/stellar-core) and [stellar-horizon](https://github.com/stellar/go/tree/master/services/horizon) in Debian binary package format.
 
 See [detailed installation instructions](https://github.com/stellar/packages#sdf---packages)
 
@@ -218,21 +218,29 @@ Secret seed: SBAAOHEU4WSWX6GBZ3VOXEGQGWRBJ72ZN3B3MFAJZWXRYGDIWHQO37SY
 Public: GDMTUTQRCP6L3JQKX3OOKYIGZC6LG2O6K2BSUCI6WNGLL4XXCIB3OK2P
 ```
 
-Place the seed in your config:
+Place the seed in your config, and mark the node as "validator":
 
-`NODE_SEED="SBAAOHEU4WSWX6GBZ3VOXEGQGWRBJ72ZN3B3MFAJZWXRYGDIWHQO37SY"`
+```
+NODE_SEED="SBAAOHEU4WSWX6GBZ3VOXEGQGWRBJ72ZN3B3MFAJZWXRYGDIWHQO37SY mynode"
+NODE_IS_VALIDATOR=true
 
-and set the following value in your config:
+NODE_HOME_DOMAIN=<your domain name here - ie stellar.org>
 
-`NODE_IS_VALIDATOR=true`
+[[HOME_DOMAINS]]
+HOME_DOMAIN=<your domain name here, same than NODE_HOME_DOMAIN>
+QUALITY="MEDIUM"
+```
 
 If you don't include a `NODE_SEED` or set `NODE_IS_VALIDATOR=true`, you will still
 watch SCP and see all the data in the network but will not send validation messages.
 
-NB: if you run more than one node, set the `HOME_DOMAIN` common to those nodes using the `NODE_HOME_DOMAIN` property.
-Doing so will allow your nodes to be grouped correctly during [quorum set generation](#home-domains-array).
+If you run multiple validators, make sure to set `NODE_HOME_DOMAIN` to the same value
+so that your nodes get grouped correctly during [quorum set generation](#home-domains-array).
+You also need to include those other nodes in your configuration.
 
-If you want other validators to add your node to their quorum sets, you should also share your public key (GDMTUTQ... ) by publishing a stellar.toml file on your homedomain following specs laid out in [SEP-20](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0020.md). 
+If you want other validators to add your node to their quorum sets, you should also
+share your public key (GDMTUTQ... ) by publishing a stellar.toml file on your homedomain
+following specs laid out in [SEP-20](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0020.md).
 
 ### Choosing your quorum set
 A good quorum set:
@@ -416,6 +424,13 @@ By default, stellar-core will perform this automatic maintenance, so be sure to 
 
 If you need to regenerate the meta data, the simplest way is to replay ledgers for the range you're interested in after (optionally) clearing the database with `newdb`.
 
+Note that in some cases automatic maintenance has just too much work to do in order to get back to the nominal state.
+This can occur following large catchup operations such as when performing a full catchup that may create a backlog of 10s of millions of ledgers.
+
+If this happens, database performance can be restored; the node will take some downtime while performing the following recovery commands:
+1. run the `maintenance` http command manually with a large number of ledgers,
+2. perform a database maintenance operation such as `VACUUM FULL` to reclaim/rebuild the database as needed
+
 ##### Meta data snapshots and restoration
 
 Some deployments of stellar-core and Horizon will want to retain meta data for the _entire history_ of the network. This meta data can be quite large and computationally expensive to regenerate anew by replaying ledgers in stellar-core from an empty initial database state, as described in the previous section.
@@ -586,7 +601,10 @@ configurable as `LOG_FILE_PATH`.
 
  Log messages are classified by progressive _priority levels_:
   `TRACE`, `DEBUG`, `INFO`, `WARNING`, `ERROR` and `FATAL`.
-   The logging system only emits those messages at or above its configured logging level. 
+   The logging system only emits those messages at or above its configured logging level.
+
+Log messages at different priority levels can be color-coded on standard output
+by setting `LOG_COLOR=true` in the config file. By default they are not color-coded.
 
 The log level can be controlled by configuration, the `-ll` command-line flag 
 or adjusted dynamically by administrative (HTTP) commands. Run:

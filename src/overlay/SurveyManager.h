@@ -9,7 +9,9 @@
 #include "overlay/StellarXDR.h"
 #include "overlay/SurveyMessageLimiter.h"
 #include "util/Timer.h"
+#include "util/UnorderedSet.h"
 #include <lib/json/json.h>
+#include <optional>
 
 namespace stellar
 {
@@ -37,10 +39,11 @@ class SurveyManager : public std::enable_shared_from_this<SurveyManager>,
     Json::Value const& getJsonResults();
 
     static std::string getMsgSummary(StellarMessage const& msg);
+    StellarMessage makeSurveyRequest(NodeID const& nodeToSurvey) const;
 
   private:
     // topology specific methods
-    void sendTopologyRequest(NodeID const& nodeToSurvey) const;
+    void sendTopologyRequest(NodeID const& nodeToSurvey);
     void processTopologyResponse(NodeID const& surveyedPeerID,
                                  SurveyResponseBody const& body);
     void processTopologyRequest(SurveyRequestMessage const& request) const;
@@ -71,17 +74,17 @@ class SurveyManager : public std::enable_shared_from_this<SurveyManager>,
     uint32_t const NUM_LEDGERS_BEFORE_IGNORE;
     uint32_t const MAX_REQUEST_LIMIT_PER_LEDGER;
 
-    optional<SurveyMessageCommandType> mRunningSurveyType;
+    std::optional<SurveyMessageCommandType> mRunningSurveyType;
     Curve25519Secret mCurve25519SecretKey;
     Curve25519Public mCurve25519PublicKey;
     SurveyMessageLimiter mMessageLimiter;
 
-    std::unordered_set<NodeID> mPeersToSurvey;
+    UnorderedSet<NodeID> mPeersToSurvey;
     std::queue<NodeID> mPeersToSurveyQueue;
 
     std::chrono::seconds const SURVEY_THROTTLE_TIMEOUT_SEC;
 
-    std::unordered_set<NodeID> mBadResponseNodes;
+    UnorderedSet<NodeID> mBadResponseNodes;
     Json::Value mResults;
 };
 }

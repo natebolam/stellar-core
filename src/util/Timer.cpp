@@ -17,10 +17,9 @@ namespace stellar
 
 using namespace std;
 
-static const uint32_t RECENT_CRANK_WINDOW = 1024;
 static const std::chrono::milliseconds CRANK_TIME_SLICE(500);
 static const size_t CRANK_EVENT_SLICE = 100;
-static const std::chrono::seconds SCHEDULER_LATENCY_WINDOW(5);
+const std::chrono::seconds SCHEDULER_LATENCY_WINDOW(5);
 
 VirtualClock::VirtualClock(Mode mode)
     : mMode(mode)
@@ -28,7 +27,6 @@ VirtualClock::VirtualClock(Mode mode)
           std::make_unique<Scheduler>(*this, SCHEDULER_LATENCY_WINDOW))
     , mRealTimer(mIOContext)
 {
-    resetIdleCrankPercent();
 }
 
 VirtualClock::time_point
@@ -125,7 +123,7 @@ VirtualClock::to_time_t(system_time_point point)
 time_t
 timegm(struct tm* tm)
 {
-    // Timezone independant version
+    // Timezone independent version
     return _mkgmtime(tm);
 }
 #endif
@@ -199,7 +197,6 @@ VirtualClock::enqueue(shared_ptr<VirtualClockEvent> ve)
         return;
     }
     assertThreadIsMain();
-    // LOG(DEBUG) << "VirtualClock::enqueue";
     mEvents.emplace(ve);
     maybeSetRealtimer();
 }
@@ -223,7 +220,6 @@ VirtualClock::flushCancelledEvents()
         return;
     }
     assertThreadIsMain();
-    // LOG(DEBUG) << "VirtualClock::cancelAllEventsFrom";
 
     auto toKeep = vector<shared_ptr<VirtualClockEvent>>();
     toKeep.reserve(mEvents.size());
@@ -356,9 +352,9 @@ VirtualClock::crank(bool block)
         {
             ZoneNamedN(ioPollZone, "ASIO polling", true);
             ZoneText(overloadStr.c_str(), overloadStr.size());
-            progressCount +=
-                crankStep(*this, [this] { return this->mIOContext.poll_one(); },
-                          ioDivisor);
+            progressCount += crankStep(
+                *this, [this] { return this->mIOContext.poll_one(); },
+                ioDivisor);
         }
 
         // Dispatch some scheduled actions.
@@ -386,7 +382,6 @@ VirtualClock::crank(bool block)
         // If we didn't make progress and caller wants blocking, block now.
         progressCount += mIOContext.run_one();
     }
-    noteCrankOccurred(progressCount == 0);
     return progressCount;
 }
 
@@ -421,60 +416,10 @@ VirtualClock::actionQueueIsOverloaded() const
     return mActionScheduler->getOverloadedDuration().count() != 0;
 }
 
-void
-VirtualClock::noteCrankOccurred(bool hadIdle)
+Scheduler::ActionType
+VirtualClock::currentSchedulerActionType() const
 {
-    // Record execution of a crank and, optionally, whether we had an idle
-    // poll event; this is used to estimate overall business of the system
-    // via recentIdleCrankPercent().
-    ++mRecentCrankCount;
-    if (hadIdle)
-    {
-        ++mRecentIdleCrankCount;
-    }
-
-    // Divide-out older samples once we have a suitable number of cranks to
-    // evaluate a ratio. This makes the measurement "present-biased" and
-    // the threshold (RECENT_CRANK_WINDOW) sets the size of the window (in
-    // cranks) that we consider as "the present". Using an event count
-    // rather than a time based EWMA (as in a medida::Meter) makes the
-    // ratio more precise, at the expense of accuracy of present-focus --
-    // we might accidentally consider samples from 1s, 1m or even 1h ago as
-    // "present" if the system is very lightly loaded. But since we're
-    // going to use this value to disconnect peers when overloaded, this is
-    // the preferred tradeoff.
-    if (mRecentCrankCount > RECENT_CRANK_WINDOW)
-    {
-        mRecentCrankCount >>= 1;
-        mRecentIdleCrankCount >>= 1;
-    }
-}
-
-uint32_t
-VirtualClock::recentIdleCrankPercent() const
-{
-    if (mRecentCrankCount == 0)
-    {
-        return 0;
-    }
-    uint32_t v = static_cast<uint32_t>(
-        (100ULL * static_cast<uint64_t>(mRecentIdleCrankCount)) /
-        static_cast<uint64_t>(mRecentCrankCount));
-
-    LOG(DEBUG) << "Estimated clock loop idle: " << v << "% ("
-               << mRecentIdleCrankCount << "/" << mRecentCrankCount << ")";
-
-    // This should _really_ never be >100, it's a bug in our code if so.
-    assert(v <= 100);
-
-    return v;
-}
-
-void
-VirtualClock::resetIdleCrankPercent()
-{
-    mRecentCrankCount = RECENT_CRANK_WINDOW >> 1;
-    mRecentIdleCrankCount = RECENT_CRANK_WINDOW >> 1;
+    return mActionScheduler->currentActionType();
 }
 
 asio::io_context&
@@ -499,8 +444,6 @@ VirtualClock::advanceToNow()
     }
     assertThreadIsMain();
 
-    // LOG(DEBUG) << "VirtualClock::advanceTo("
-    //            << n.time_since_epoch().count() << ")";
     auto n = now();
     vector<shared_ptr<VirtualClockEvent>> toDispatch;
     while (!mEvents.empty())
@@ -517,7 +460,6 @@ VirtualClock::advanceToNow()
     {
         ev->trigger();
     }
-    // LOG(DEBUG) << "VirtualClock::advanceTo done";
     maybeSetRealtimer();
     return toDispatch.size();
 }

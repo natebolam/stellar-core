@@ -50,10 +50,13 @@ class LedgerManagerImpl : public LedgerManager
     medida::Timer& mLedgerClose;
     medida::Buckets& mLedgerAgeClosed;
     medida::Counter& mLedgerAge;
+    medida::Timer& mMetaStreamWriteTime;
     VirtualClock::time_point mLastClose;
 
     std::unique_ptr<VirtualClock::time_point> mStartCatchup;
     medida::Timer& mCatchupDuration;
+
+    std::unique_ptr<LedgerCloseMeta> mNextMetaToEmit;
 
     void
     processFeesSeqNums(std::vector<TransactionFrameBasePtr>& txs,
@@ -74,6 +77,8 @@ class LedgerManagerImpl : public LedgerManager
 
     State mState;
     void setState(State s);
+
+    void emitNextMeta();
 
   protected:
     virtual void transferLedgerEntriesToBucketList(AbstractLedgerTxn& ltx,
@@ -121,6 +126,8 @@ class LedgerManagerImpl : public LedgerManager
     void closeLedger(LedgerCloseData const& ledgerData) override;
     void deleteOldEntries(Database& db, uint32_t ledgerSeq,
                           uint32_t count) override;
+
+    void deleteNewerEntries(Database& db, uint32_t ledgerSeq) override;
 
     void
     setLastClosedLedger(LedgerHeaderHistoryEntry const& lastClosed) override;

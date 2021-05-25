@@ -6,12 +6,14 @@
 
 // C++ value-semantic / convenience wrapper around C bitset_t
 
+#include "util/Logging.h"
 #include <functional>
 #include <memory>
 #include <ostream>
 #include <set>
 
-extern "C" {
+extern "C"
+{
 #include "util/cbitset.h"
 };
 
@@ -31,7 +33,7 @@ class BitSet
 
     // If mPtr == &mInlineBitset then we are using the inline bitset
     // (mInlineBitset.array === &mInlineBits) and do not need to free either the
-    // desriptor or the array. If mPtr != &mInlineBitset then it's pointing to
+    // descriptor or the array. If mPtr != &mInlineBitset then it's pointing to
     // an out-of-line bitset which we need to free.
     bitset_t* mPtr{nullptr};
     bitset_t mInlineBitset{nullptr, INLINE_NWORDS, INLINE_NWORDS};
@@ -157,12 +159,6 @@ class BitSet
         return bitset_subseteq(mPtr, other.mPtr);
     }
 
-    bool
-    operator<=(BitSet const& other) const
-    {
-        return isSubsetEq(other);
-    }
-
     size_t
     size() const
     {
@@ -210,10 +206,6 @@ class BitSet
         size_t tmp = 0;
         return !nextSet(tmp);
     }
-    operator bool() const
-    {
-        return !empty();
-    }
     size_t
     min() const
     {
@@ -253,7 +245,8 @@ class BitSet
         bitset_inplace_intersection(mPtr, other.mPtr);
         mCountDirty = true;
     }
-    BitSet operator&(BitSet const& other) const
+    BitSet
+    operator&(BitSet const& other) const
     {
         BitSet tmp(*this);
         tmp.inplaceIntersection(other);
@@ -351,6 +344,25 @@ class BitSet
     {
         streamWith(out, [](std::ostream& out, size_t i) { out << i; });
     }
+    class HashFunction
+    {
+        std::hash<uint64_t> mHasher;
+
+      public:
+        size_t
+        operator()(BitSet const& bitset) const noexcept
+        {
+            // Implementation taken from Boost.
+            // https://www.boost.org/doc/libs/1_35_0/doc/html/boost/hash_combine_id241013.html
+            size_t seed = 0;
+            for (size_t i = 0; i < bitset.mPtr->arraysize; i++)
+            {
+                seed ^= mHasher(bitset.mPtr->array[i]) + 0x9e3779b9 +
+                        (seed << 6) + (seed >> 2);
+            }
+            return seed;
+        }
+    };
 };
 
 inline std::ostream&

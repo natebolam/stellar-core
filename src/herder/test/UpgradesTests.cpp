@@ -24,8 +24,8 @@
 #include "transactions/TransactionUtils.h"
 #include "util/StatusManager.h"
 #include "util/Timer.h"
-#include "util/optional.h"
 #include <fmt/format.h>
+#include <optional>
 #include <xdrpp/marshal.h>
 
 using namespace stellar;
@@ -96,8 +96,8 @@ simulateUpgrade(std::vector<LedgerUpgradeNode> const& nodes,
     qSet.validators.push_back(keys[1].getPublicKey());
     qSet.validators.push_back(keys[2].getPublicKey());
 
-    auto setUpgrade = [](optional<uint32>& o, uint32 v) {
-        o = make_optional<uint32>(v);
+    auto setUpgrade = [](std::optional<uint32>& o, uint32 v) {
+        o = std::make_optional<uint32>(v);
     };
     // create nodes
     for (size_t i = 0; i < nodes.size(); i++)
@@ -170,7 +170,7 @@ simulateUpgrade(std::vector<LedgerUpgradeNode> const& nodes,
 
     if (checkUpgradeStatus)
     {
-        // at least one node should show message thats it has some
+        // at least one node should show message that it has some
         // pending upgrades
         REQUIRE(std::any_of(
             std::begin(keys), std::end(keys), [&](SecretKey const& key) {
@@ -229,7 +229,8 @@ executeUpgrades(Application& app, xdr::xvector<UpgradeType, 6> const& upgrades)
     auto const& lcl = lm.getLastClosedLedgerHeader();
     auto txSet = std::make_shared<TxSetFrame>(lcl.hash);
 
-    StellarValue sv{txSet->getContentsHash(), 2, upgrades, STELLAR_VALUE_BASIC};
+    StellarValue sv = app.getHerder().makeStellarValue(
+        txSet->getContentsHash(), 2, upgrades, app.getConfig().NODE_SEED);
     LedgerCloseData ledgerData(lcl.header.ledgerSeq + 1, txSet, sv);
 
     app.getLedgerManager().closeLedger(ledgerData);
@@ -1459,29 +1460,32 @@ TEST_CASE("upgrade to version 11", "[upgrades]")
             ledgerUpgrade.newLedgerVersion() = newProto;
             auto v = xdr::xdr_to_opaque(ledgerUpgrade);
             upgrades.push_back(UpgradeType{v.begin(), v.end()});
-            CLOG(INFO, "Ledger")
-                << "Ledger " << ledgerSeq << " upgrading to v" << newProto;
+            CLOG_INFO(Ledger, "Ledger {} upgrading to v{}", ledgerSeq,
+                      newProto);
         }
-        StellarValue sv(txSet->getContentsHash(), closeTime, upgrades,
-                        STELLAR_VALUE_BASIC);
+
+        StellarValue sv = app->getHerder().makeStellarValue(
+            txSet->getContentsHash(), closeTime, upgrades,
+            app->getConfig().NODE_SEED);
         lm.closeLedger(LedgerCloseData(ledgerSeq, txSet, sv));
         auto& bm = app->getBucketManager();
         auto mc = bm.readMergeCounters();
-        CLOG(INFO, "Bucket")
-            << "Ledger " << ledgerSeq << " did "
-            << mc.mPreInitEntryProtocolMerges << " old-protocol merges, "
-            << mc.mPostInitEntryProtocolMerges << " new-protocol merges, "
-            << mc.mNewInitEntries << " new INITENTRYs, " << mc.mOldInitEntries
-            << " old INITENTRYs";
+        CLOG_INFO(Bucket,
+                  "Ledger {} did {} old-protocol merges, {} new-protocol "
+                  "merges, {} new INITENTRYs, {} old INITENTRYs",
+                  ledgerSeq, mc.mPreInitEntryProtocolMerges,
+                  mc.mPostInitEntryProtocolMerges, mc.mNewInitEntries,
+                  mc.mOldInitEntries);
         for (uint32_t level = 0; level < BucketList::kNumLevels; ++level)
         {
             auto& lev = bm.getBucketList().getLevel(level);
             BucketTests::EntryCounts currCounts(lev.getCurr());
             BucketTests::EntryCounts snapCounts(lev.getSnap());
-            CLOG(INFO, "Bucket")
-                << "post-ledger " << ledgerSeq << " close, init counts: level "
-                << level << ", " << currCounts.nInit << " in curr, "
-                << snapCounts.nInit << " in snap";
+            CLOG_INFO(
+                Bucket,
+                "post-ledger {} close, init counts: level {}, {} in curr, "
+                "{} in snap",
+                ledgerSeq, level, currCounts.nInit, snapCounts.nInit);
         }
         if (ledgerSeq < 5)
         {
@@ -1573,11 +1577,12 @@ TEST_CASE("upgrade to version 12", "[upgrades]")
             ledgerUpgrade.newLedgerVersion() = newProto;
             auto v = xdr::xdr_to_opaque(ledgerUpgrade);
             upgrades.push_back(UpgradeType{v.begin(), v.end()});
-            CLOG(INFO, "Ledger")
-                << "Ledger " << ledgerSeq << " upgrading to v" << newProto;
+            CLOG_INFO(Ledger, "Ledger {} upgrading to v{}", ledgerSeq,
+                      newProto);
         }
-        StellarValue sv(txSet->getContentsHash(), closeTime, upgrades,
-                        STELLAR_VALUE_BASIC);
+        StellarValue sv = app->getHerder().makeStellarValue(
+            txSet->getContentsHash(), closeTime, upgrades,
+            app->getConfig().NODE_SEED);
         lm.closeLedger(LedgerCloseData(ledgerSeq, txSet, sv));
         auto& bm = app->getBucketManager();
         auto& bl = bm.getBucketList();
@@ -1674,9 +1679,10 @@ TEST_CASE("upgrade to version 13", "[upgrades]")
                                               ledgerSeq, emptyTxSet);
 
         auto upgrade = toUpgradeType(makeProtocolVersionUpgrade(13));
-        StellarValue sv{emptyTxSet->getContentsHash(), 2,
-                        xdr::xvector<UpgradeType, 6>({upgrade}),
-                        STELLAR_VALUE_BASIC};
+        StellarValue sv =
+            herder.makeStellarValue(emptyTxSet->getContentsHash(), 2,
+                                    xdr::xvector<UpgradeType, 6>({upgrade}),
+                                    app->getConfig().NODE_SEED);
         herder.getHerderSCPDriver().valueExternalized(ledgerSeq,
                                                       xdr::xdr_to_opaque(sv));
     }
@@ -2131,7 +2137,6 @@ TEST_CASE("upgrade base reserve", "[upgrades]")
             };
 
             for_versions_from(14, *app, [&] {
-
                 // Swap the seeds to test that the ordering of accounts doesn't
                 // matter when upgrading
                 SECTION("account A is sponsored")
@@ -2313,4 +2318,34 @@ TEST_CASE("validate upgrade expiration logic", "[upgrades]")
         REQUIRE(upgrades.mMaxTxSize);
         REQUIRE(upgrades.mBaseReserve);
     }
+}
+
+TEST_CASE("upgrade from cpp14 serialized data", "[upgrades]")
+{
+    std::string in = R"({
+    "time": 1618016242,
+    "version": {
+        "has": true,
+        "val": 17
+    },
+    "fee": {
+        "has": false
+    },
+    "maxtxsize": {
+        "has": true,
+        "val": 10000
+    },
+    "reserve": {
+        "has": false
+    }
+})";
+    Upgrades::UpgradeParameters up;
+    up.fromJson(in);
+    REQUIRE(VirtualClock::to_time_t(up.mUpgradeTime) == 1618016242);
+    REQUIRE(up.mProtocolVersion.has_value());
+    REQUIRE(up.mProtocolVersion.value() == 17);
+    REQUIRE(!up.mBaseFee.has_value());
+    REQUIRE(up.mMaxTxSize.has_value());
+    REQUIRE(up.mMaxTxSize.value() == 10000);
+    REQUIRE(!up.mBaseReserve.has_value());
 }

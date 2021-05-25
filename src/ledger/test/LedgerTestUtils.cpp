@@ -109,7 +109,7 @@ makeValid(AccountEntry& a)
 
     if (a.inflationDest)
     {
-        *a.inflationDest = PubKeyUtils::random();
+        *a.inflationDest = PubKeyUtils::pseudoRandomForTesting();
     }
 
     std::sort(
@@ -131,7 +131,7 @@ makeValid(AccountEntry& a)
     {
         a.seqNum = -a.seqNum;
     }
-    a.flags = a.flags & MASK_ACCOUNT_FLAGS;
+    a.flags = a.flags & MASK_ACCOUNT_FLAGS_V17;
 
     if (a.ext.v() == 1)
     {
@@ -182,7 +182,7 @@ makeValid(TrustLineEntry& tl)
     tl.asset.type(ASSET_TYPE_CREDIT_ALPHANUM4);
     strToAssetCode(tl.asset.alphaNum4().assetCode, "USD");
     clampHigh<int64_t>(tl.limit, tl.balance);
-    tl.flags = tl.flags & MASK_TRUSTLINE_FLAGS;
+    tl.flags = tl.flags & MASK_TRUSTLINE_FLAGS_V17;
 
     if (tl.ext.v() == 1)
     {
@@ -235,6 +235,15 @@ makeValid(ClaimableBalanceEntry& c)
 
     c.asset.type(ASSET_TYPE_CREDIT_ALPHANUM4);
     strToAssetCode(c.asset.alphaNum4().assetCode, "CAD");
+
+    if (Config::CURRENT_LEDGER_PROTOCOL_VERSION < 17)
+    {
+        c.ext.v(0);
+    }
+    if (c.ext.v() == 1)
+    {
+        c.ext.v1().flags = MASK_CLAIMABLE_BALANCE_FLAGS;
+    }
 }
 
 void
@@ -262,7 +271,8 @@ makeValid(std::vector<LedgerHeaderHistoryEntry>& lhv,
                 lh.header.ledgerVersion += 1;
                 break;
             case HistoryManager::VERIFY_STATUS_ERR_BAD_HASH:
-                lh.header.previousLedgerHash = HashUtils::random();
+                lh.header.previousLedgerHash =
+                    HashUtils::pseudoRandomForTesting();
                 break;
             case HistoryManager::VERIFY_STATUS_ERR_UNDERSHOT:
                 lh.header.ledgerSeq -= 1;
@@ -278,7 +288,7 @@ makeValid(std::vector<LedgerHeaderHistoryEntry>& lhv,
         if (i == randomIndex &&
             state == HistoryManager::VERIFY_STATUS_ERR_BAD_HASH && rand_flip())
         {
-            lh.hash = HashUtils::random();
+            lh.hash = HashUtils::pseudoRandomForTesting();
         }
         else
         {
@@ -319,42 +329,42 @@ static auto validLedgerEntryGenerator = autocheck::map(
             break;
         }
 
-        return le;
+        return std::move(le);
     },
     autocheck::generator<LedgerEntry>());
 
 static auto validAccountEntryGenerator = autocheck::map(
     [](AccountEntry&& ae, size_t s) {
         makeValid(ae);
-        return ae;
+        return std::move(ae);
     },
     autocheck::generator<AccountEntry>());
 
 static auto validTrustLineEntryGenerator = autocheck::map(
     [](TrustLineEntry&& tl, size_t s) {
         makeValid(tl);
-        return tl;
+        return std::move(tl);
     },
     autocheck::generator<TrustLineEntry>());
 
 static auto validOfferEntryGenerator = autocheck::map(
     [](OfferEntry&& o, size_t s) {
         makeValid(o);
-        return o;
+        return std::move(o);
     },
     autocheck::generator<OfferEntry>());
 
 static auto validDataEntryGenerator = autocheck::map(
     [](DataEntry&& d, size_t s) {
         makeValid(d);
-        return d;
+        return std::move(d);
     },
     autocheck::generator<DataEntry>());
 
 static auto validClaimableBalanceEntryGenerator = autocheck::map(
     [](ClaimableBalanceEntry&& c, size_t s) {
         makeValid(c);
-        return c;
+        return std::move(c);
     },
     autocheck::generator<ClaimableBalanceEntry>());
 

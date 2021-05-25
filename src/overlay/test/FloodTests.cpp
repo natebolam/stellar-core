@@ -31,10 +31,11 @@ TEST_CASE("Flooding", "[flood][overlay][acceptance]")
     Hash networkID = sha256(getTestConfig().NETWORK_PASSPHRASE);
     Simulation::pointer simulation;
 
-    // make closing very slow
     auto cfgGen = [](int cfgNum) {
         Config cfg = getTestConfig(cfgNum);
-        cfg.ARTIFICIALLY_SET_CLOSE_TIME_FOR_TESTING = 10000;
+        // do not close ledgers
+        cfg.MANUAL_CLOSE = true;
+        cfg.FORCE_SCP = false;
         return cfg;
     };
 
@@ -84,7 +85,7 @@ TEST_CASE("Flooding", "[flood][overlay][acceptance]")
         // enough for connections to be made
         simulation->crankForAtLeast(std::chrono::seconds(1), false);
 
-        LOG(DEBUG) << "Injecting work";
+        LOG_DEBUG(DEFAULT_LOG, "Injecting work");
 
         // inject transactions
         for (int i = 0; i < nbTx; i++)
@@ -92,7 +93,7 @@ TEST_CASE("Flooding", "[flood][overlay][acceptance]")
             inject(i);
         }
 
-        LOG(DEBUG) << "Done injecting work";
+        LOG_DEBUG(DEFAULT_LOG, "Done injecting work");
 
         auto checkSim = [&]() {
             bool res = true;
@@ -122,8 +123,8 @@ TEST_CASE("Flooding", "[flood][overlay][acceptance]")
                     kv.second->Process(reporter);
                 }
             }
-            LOG(DEBUG) << " ~~~~~~ " << n->getConfig().PEER_PORT << " :\n"
-                       << out.str();
+            LOG_DEBUG(DEFAULT_LOG, " ~~~~~~ {} :\n{}", n->getConfig().PEER_PORT,
+                      out.str());
         }
         REQUIRE(checkSim());
     };
@@ -160,43 +161,61 @@ TEST_CASE("Flooding", "[flood][overlay][acceptance]")
                         : 0;
             }
             bool res = okCount == sources.size();
-            LOG(DEBUG) << app->getConfig().PEER_PORT
-                       << (res ? " OK " : " BEHIND ") << okCount << " / "
-                       << sources.size() << " authenticated peers: "
-                       << app->getOverlayManager().getAuthenticatedPeersCount();
+            LOG_DEBUG(DEFAULT_LOG, "{}{}{} / {} authenticated peers: {}",
+                      app->getConfig().PEER_PORT, (res ? " OK " : " BEHIND "),
+                      okCount, sources.size(),
+                      app->getOverlayManager().getAuthenticatedPeersCount());
             return res;
         };
 
-        SECTION("core")
-        {
-            SECTION("loopback")
+        auto txFloodingTests = [&](bool delayed) {
+            auto cfgGen2 = [&](int n) {
+                auto cfg = cfgGen(n);
+                // adjust delayed tx flooding
+                cfg.FLOOD_TX_PERIOD_MS = delayed ? 10 : 0;
+                return cfg;
+            };
+            SECTION("core")
             {
-                simulation = Topologies::core(
-                    4, .666f, Simulation::OVER_LOOPBACK, networkID, cfgGen);
-                test(injectTransaction, ackedTransactions);
+                SECTION("loopback")
+                {
+                    simulation =
+                        Topologies::core(4, .666f, Simulation::OVER_LOOPBACK,
+                                         networkID, cfgGen2);
+                    test(injectTransaction, ackedTransactions);
+                }
+                SECTION("tcp")
+                {
+                    simulation = Topologies::core(
+                        4, .666f, Simulation::OVER_TCP, networkID, cfgGen2);
+                    test(injectTransaction, ackedTransactions);
+                }
             }
-            SECTION("tcp")
-            {
-                simulation = Topologies::core(4, .666f, Simulation::OVER_TCP,
-                                              networkID, cfgGen);
-                test(injectTransaction, ackedTransactions);
-            }
-        }
 
-        SECTION("outer nodes")
+            SECTION("outer nodes")
+            {
+                SECTION("loopback")
+                {
+                    simulation = Topologies::hierarchicalQuorumSimplified(
+                        5, 10, Simulation::OVER_LOOPBACK, networkID, cfgGen2);
+                    test(injectTransaction, ackedTransactions);
+                }
+                SECTION("tcp")
+                {
+                    simulation = Topologies::hierarchicalQuorumSimplified(
+                        5, 10, Simulation::OVER_TCP, networkID, cfgGen2);
+                    test(injectTransaction, ackedTransactions);
+                }
+            }
+        };
+
+        SECTION("direct tx broadcast")
         {
-            SECTION("loopback")
-            {
-                simulation = Topologies::hierarchicalQuorumSimplified(
-                    5, 10, Simulation::OVER_LOOPBACK, networkID, cfgGen);
-                test(injectTransaction, ackedTransactions);
-            }
-            SECTION("tcp")
-            {
-                simulation = Topologies::hierarchicalQuorumSimplified(
-                    5, 10, Simulation::OVER_TCP, networkID, cfgGen);
-                test(injectTransaction, ackedTransactions);
-            }
+            txFloodingTests(false);
+        }
+        SECTION("delayed tx broadcast")
+        {
+            txFloodingTests(true);
         }
     }
 
@@ -207,7 +226,7 @@ TEST_CASE("Flooding", "[flood][overlay][acceptance]")
         // a valid transaction set
 
         std::vector<SecretKey> keys;
-        std::unordered_map<PublicKey, SecretKey> keysMap;
+        UnorderedMap<PublicKey, SecretKey> keysMap;
         for (int i = 0; i < nbTx; i++)
         {
             keys.emplace_back(SecretKey::pseudoRandomForTesting());
@@ -247,10 +266,8 @@ TEST_CASE("Flooding", "[flood][overlay][acceptance]")
             auto ct = std::max<uint64>(
                 lcl.header.scpValue.closeTime + 1,
                 VirtualClock::to_time_t(inApp->getClock().system_now()));
-            StellarValue sv(txSet.getContentsHash(), ct, emptyUpgradeSteps,
-                            STELLAR_VALUE_BASIC);
-
-            herder.signStellarValue(keys[0], sv);
+            StellarValue sv = herder.makeStellarValue(
+                txSet.getContentsHash(), ct, emptyUpgradeSteps, keys[0]);
 
             SCPEnvelope envelope;
 
@@ -289,10 +306,10 @@ TEST_CASE("Flooding", "[flood][overlay][acceptance]")
                 },
                 true);
             bool res = okCount == sources.size();
-            LOG(DEBUG) << app->getConfig().PEER_PORT
-                       << (res ? " OK " : " BEHIND ") << okCount << " / "
-                       << sources.size() << " authenticated peers: "
-                       << app->getOverlayManager().getAuthenticatedPeersCount();
+            LOG_DEBUG(DEFAULT_LOG, "{}{}{} / {} authenticated peers: {}",
+                      app->getConfig().PEER_PORT, (res ? " OK " : " BEHIND "),
+                      okCount, sources.size(),
+                      app->getOverlayManager().getAuthenticatedPeersCount());
             return res;
         };
 

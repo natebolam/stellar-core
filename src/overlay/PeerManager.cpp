@@ -199,8 +199,9 @@ PeerManager::removePeersWithManyFailures(int minNumFailures,
     }
     catch (soci_error& err)
     {
-        CLOG(ERROR, "Overlay")
-            << "PeerManager::removePeersWithManyFailures error: " << err.what();
+        CLOG_ERROR(Overlay,
+                   "PeerManager::removePeersWithManyFailures error: {}",
+                   err.what());
     }
 }
 
@@ -260,8 +261,8 @@ PeerManager::load(PeerBareAddress const& address)
     }
     catch (soci_error& err)
     {
-        CLOG(ERROR, "Overlay") << "PeerManager::load error: " << err.what()
-                               << " on " << address.toString();
+        CLOG_ERROR(Overlay, "PeerManager::load error: {} on {}", err.what(),
+                   address.toString());
     }
 
     return std::make_pair(result, inDatabase);
@@ -307,15 +308,15 @@ PeerManager::store(PeerBareAddress const& address, PeerRecord const& peerRecord,
             st.execute(true);
             if (st.get_affected_rows() != 1)
             {
-                CLOG(ERROR, "Overlay")
-                    << "PeerManager::store failed on " + address.toString();
+                CLOG_ERROR(Overlay, "PeerManager::store failed on {}",
+                           address.toString());
             }
         }
     }
     catch (soci_error& err)
     {
-        CLOG(ERROR, "Overlay") << "PeerManager::store error: " << err.what()
-                               << " on " << address.toString();
+        CLOG_ERROR(Overlay, "PeerManager::store error: {} on {}", err.what(),
+                   address.toString());
     }
 }
 
@@ -324,9 +325,12 @@ PeerManager::update(PeerRecord& peer, TypeUpdate type)
 {
     switch (type)
     {
-    case TypeUpdate::SET_OUTBOUND:
+    case TypeUpdate::ENSURE_OUTBOUND:
     {
-        peer.mType = static_cast<int>(PeerType::OUTBOUND);
+        if (peer.mType == static_cast<int>(PeerType::INBOUND))
+        {
+            peer.mType = static_cast<int>(PeerType::OUTBOUND);
+        }
         break;
     }
     case TypeUpdate::SET_PREFERRED:
@@ -334,17 +338,9 @@ PeerManager::update(PeerRecord& peer, TypeUpdate type)
         peer.mType = static_cast<int>(PeerType::PREFERRED);
         break;
     }
-    case TypeUpdate::REMOVE_PREFERRED:
+    case TypeUpdate::ENSURE_NOT_PREFERRED:
     {
         if (peer.mType == static_cast<int>(PeerType::PREFERRED))
-        {
-            peer.mType = static_cast<int>(PeerType::OUTBOUND);
-        }
-        break;
-    }
-    case TypeUpdate::UPDATE_TO_OUTBOUND:
-    {
-        if (peer.mType == static_cast<int>(PeerType::INBOUND))
         {
             peer.mType = static_cast<int>(PeerType::OUTBOUND);
         }
@@ -409,18 +405,64 @@ PeerManager::ensureExists(PeerBareAddress const& address)
     auto peer = load(address);
     if (!peer.second)
     {
-        CLOG(TRACE, "Overlay") << "Learned peer " << address.toString() << " @"
-                               << mApp.getConfig().PEER_PORT;
+        CLOG_TRACE(Overlay, "Learned peer {}", address.toString());
         store(address, peer.first, peer.second);
     }
 }
 
+static PeerManager::TypeUpdate
+getTypeUpdate(PeerRecord const& peer, PeerType observedType,
+              bool preferredTypeKnown)
+{
+    PeerManager::TypeUpdate typeUpdate;
+    bool isPreferredInDB = peer.mType == static_cast<int>(PeerType::PREFERRED);
+
+    switch (observedType)
+    {
+    case PeerType::PREFERRED:
+    {
+        // Always update to preferred
+        typeUpdate = PeerManager::TypeUpdate::SET_PREFERRED;
+        break;
+    }
+    case PeerType::OUTBOUND:
+    {
+        if (isPreferredInDB && preferredTypeKnown)
+        {
+            // Downgrade to outbound if peer is definitely not preferred
+            typeUpdate = PeerManager::TypeUpdate::ENSURE_NOT_PREFERRED;
+        }
+        else
+        {
+            // Maybe upgrade to outbound, or keep preferred
+            typeUpdate = PeerManager::TypeUpdate::ENSURE_OUTBOUND;
+        }
+        break;
+    }
+    case PeerType::INBOUND:
+    {
+        // Either keep inbound type, or downgrade preferred to outbound
+        typeUpdate = PeerManager::TypeUpdate::ENSURE_NOT_PREFERRED;
+        break;
+    }
+    default:
+    {
+        abort();
+    }
+    }
+
+    return typeUpdate;
+}
+
 void
-PeerManager::update(PeerBareAddress const& address, TypeUpdate type)
+PeerManager::update(PeerBareAddress const& address, PeerType observedType,
+                    bool preferredTypeKnown)
 {
     ZoneScoped;
     auto peer = load(address);
-    update(peer.first, type);
+    TypeUpdate typeUpdate =
+        getTypeUpdate(peer.first, observedType, preferredTypeKnown);
+    update(peer.first, typeUpdate);
     store(address, peer.first, peer.second);
 }
 
@@ -434,12 +476,14 @@ PeerManager::update(PeerBareAddress const& address, BackOffUpdate backOff)
 }
 
 void
-PeerManager::update(PeerBareAddress const& address, TypeUpdate type,
-                    BackOffUpdate backOff)
+PeerManager::update(PeerBareAddress const& address, PeerType observedType,
+                    bool preferredTypeKnown, BackOffUpdate backOff)
 {
     ZoneScoped;
     auto peer = load(address);
-    update(peer.first, type);
+    TypeUpdate typeUpdate =
+        getTypeUpdate(peer.first, observedType, preferredTypeKnown);
+    update(peer.first, typeUpdate);
     update(peer.first, backOff, mApp);
     store(address, peer.first, peer.second);
 }
@@ -466,7 +510,7 @@ PeerManager::countPeers(std::string const& where,
     }
     catch (soci_error& err)
     {
-        CLOG(ERROR, "Overlay") << "countPeers error: " << err.what();
+        CLOG_ERROR(Overlay, "countPeers error: {}", err.what());
     }
 
     return count;
@@ -513,7 +557,7 @@ PeerManager::loadPeers(int limit, int offset, std::string const& where,
     }
     catch (soci_error& err)
     {
-        CLOG(ERROR, "Overlay") << "loadPeers error: " << err.what();
+        CLOG_ERROR(Overlay, "loadPeers error: {}", err.what());
     }
 
     return result;
@@ -524,6 +568,61 @@ PeerManager::dropAll(Database& db)
 {
     db.getSession() << "DROP TABLE IF EXISTS peers;";
     db.getSession() << kSQLCreateStatement;
+}
+
+std::vector<std::pair<PeerBareAddress, PeerRecord>>
+PeerManager::loadAllPeers()
+{
+    ZoneScoped;
+    std::vector<std::pair<PeerBareAddress, PeerRecord>> result;
+    std::string sql =
+        "SELECT ip, port, nextattempt, numfailures, type FROM peers";
+
+    try
+    {
+        std::string ip;
+        int port;
+        PeerRecord record;
+
+        auto prep = mApp.getDatabase().getPreparedStatement(sql);
+        auto& st = prep.statement();
+
+        st.exchange(into(ip));
+        st.exchange(into(port));
+        st.exchange(into(record.mNextAttempt));
+        st.exchange(into(record.mNumFailures));
+        st.exchange(into(record.mType));
+
+        st.define_and_bind();
+        {
+            auto timer = mApp.getDatabase().getSelectTimer("peer");
+            st.execute(true);
+        }
+        while (st.got_data())
+        {
+            PeerBareAddress pba{ip, static_cast<unsigned short>(port)};
+            result.emplace_back(std::make_pair(pba, record));
+            st.fetch();
+        }
+    }
+    catch (soci_error& err)
+    {
+        CLOG_ERROR(Overlay, "loadPeers error: {}", err.what());
+    }
+
+    return result;
+}
+
+void
+PeerManager::storePeers(
+    std::vector<std::pair<PeerBareAddress, PeerRecord>> peers)
+{
+    soci::transaction tx(mApp.getDatabase().getSession());
+    for (auto const& peer : peers)
+    {
+        store(peer.first, peer.second, /* inDatabase */ false);
+    }
+    tx.commit();
 }
 
 const char* PeerManager::kSQLCreateStatement =

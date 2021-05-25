@@ -28,7 +28,7 @@ PathPaymentOpFrameBase::getDestID() const
 
 void
 PathPaymentOpFrameBase::insertLedgerKeysToPrefetch(
-    std::unordered_set<LedgerKey>& keys) const
+    UnorderedSet<LedgerKey>& keys) const
 {
     auto destID = getDestID();
     keys.emplace(accountKey(destID));
@@ -72,20 +72,20 @@ PathPaymentOpFrameBase::convert(AbstractLedgerTxn& ltx,
     assert(!(sendAsset == recvAsset));
 
     // sendAsset -> recvAsset
-    ConvertResult r = convertWithOffers(ltx, sendAsset, maxSend, amountSend,
-                                        recvAsset, maxRecv, amountRecv, round,
-                                        [this](LedgerTxnEntry const& o) {
-                                            auto const& offer =
-                                                o.current().data.offer();
-                                            if (offer.sellerID == getSourceID())
-                                            {
-                                                // we are crossing our own offer
-                                                setResultOfferCrossSelf();
-                                                return OfferFilterResult::eStop;
-                                            }
-                                            return OfferFilterResult::eKeep;
-                                        },
-                                        offerTrail, maxOffersToCross);
+    ConvertResult r = convertWithOffers(
+        ltx, sendAsset, maxSend, amountSend, recvAsset, maxRecv, amountRecv,
+        round,
+        [this](LedgerTxnEntry const& o) {
+            auto const& offer = o.current().data.offer();
+            if (offer.sellerID == getSourceID())
+            {
+                // we are crossing our own offer
+                setResultOfferCrossSelf();
+                return OfferFilterResult::eStop;
+            }
+            return OfferFilterResult::eKeep;
+        },
+        offerTrail, maxOffersToCross);
 
     if (amountSend < 0 || amountRecv < 0)
     {

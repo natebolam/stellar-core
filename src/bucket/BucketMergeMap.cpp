@@ -9,11 +9,11 @@
 
 namespace
 {
-std::unordered_set<stellar::Hash>
+stellar::UnorderedSet<stellar::Hash>
 getMergeKeyHashes(stellar::MergeKey const& key)
 {
     ZoneScoped;
-    std::unordered_set<stellar::Hash> hashes;
+    stellar::UnorderedSet<stellar::Hash> hashes;
     hashes.emplace(key.mInputCurrBucket);
     hashes.emplace(key.mInputSnapBucket);
     for (auto const& in : key.mInputShadowBuckets)
@@ -35,17 +35,17 @@ BucketMergeMap::recordMerge(MergeKey const& input, Hash const& output)
     mOutputToMergeKey.emplace(output, input);
     for (auto const& in : getMergeKeyHashes(input))
     {
-        CLOG(TRACE, "Bucket") << "BucketMergeMap retaining mapping for "
-                              << hexAbbrev(in) << " -> " << hexAbbrev(output);
+        CLOG_TRACE(Bucket, "BucketMergeMap retaining mapping for {} -> {}",
+                   hexAbbrev(in), hexAbbrev(output));
         mInputToOutput.emplace(in, output);
     }
 }
 
-std::unordered_set<MergeKey>
+UnorderedSet<MergeKey>
 BucketMergeMap::forgetAllMergesProducing(Hash const& outputBeingDropped)
 {
     ZoneScoped;
-    std::unordered_set<MergeKey> ret;
+    UnorderedSet<MergeKey> ret;
     auto mergesProducingOutput =
         mOutputToMergeKey.equal_range(outputBeingDropped);
     for (auto mergeProducingOutput = mergesProducingOutput.first;
@@ -63,17 +63,17 @@ BucketMergeMap::forgetAllMergesProducing(Hash const& outputBeingDropped)
         if ((mOutputToMergeKey.size() > mMergeKeyToOutput.size()) ||
             (mMergeKeyToOutput.size() > mInputToOutput.size()))
         {
-            CLOG(WARNING, "Bucket")
-                << "BucketMergeMap inconsistent map sizes: "
-                << "out->in:" << mOutputToMergeKey.size()
-                << ", coarse in->out:" << mMergeKeyToOutput.size()
-                << ", fine in->out:" << mInputToOutput.size();
+            CLOG_WARNING(Bucket,
+                         "BucketMergeMap inconsistent map sizes: out->in:{}, "
+                         "coarse in->out:{}, fine in->out:{}",
+                         mOutputToMergeKey.size(), mMergeKeyToOutput.size(),
+                         mInputToOutput.size());
         }
 
-        CLOG(TRACE, "Bucket")
-            << "BucketMergeMap forgetting mappings for merge "
-            << mergeKeyProducingOutput
-            << " <-> output=" << hexAbbrev(outputBeingDropped);
+        CLOG_TRACE(
+            Bucket,
+            "BucketMergeMap forgetting mappings for merge {} <-> output={}",
+            mergeKeyProducingOutput, hexAbbrev(outputBeingDropped));
 
         // We first remove all the (in,out) pairs from the decomposed
         // mapping mInputToOutput, used for rooting the
@@ -87,10 +87,9 @@ BucketMergeMap::forgetAllMergesProducing(Hash const& outputBeingDropped)
                 auto const& outputUsingInput = mergeUsingInput->second;
                 if (outputUsingInput == outputBeingDropped)
                 {
-                    CLOG(TRACE, "Bucket")
-                        << "BucketMergeMap forgetting mapping for "
-                        << hexAbbrev(input) << " -> "
-                        << hexAbbrev(outputUsingInput);
+                    CLOG_TRACE(Bucket,
+                               "BucketMergeMap forgetting mapping for {} -> {}",
+                               hexAbbrev(input), hexAbbrev(outputUsingInput));
                     mInputToOutput.erase(mergeUsingInput);
                     break;
                 }
@@ -125,9 +124,8 @@ BucketMergeMap::getOutputsUsingInput(Hash const& input,
     for (auto i = pair.first; i != pair.second; ++i)
     {
         outputs.emplace(i->second);
-        CLOG(TRACE, "Bucket")
-            << hexAbbrev(i->second) << " referenced as output of merge of "
-            << hexAbbrev(input);
+        CLOG_TRACE(Bucket, "{} referenced as output of merge of {}",
+                   hexAbbrev(i->second), hexAbbrev(input));
     }
 }
 }

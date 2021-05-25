@@ -32,12 +32,12 @@ class PeerStub : public Peer
   public:
     int sent = 0;
 
-    PeerStub(Application& app, PeerBareAddress const& addres)
+    PeerStub(Application& app, PeerBareAddress const& address)
         : Peer(app, WE_CALLED_REMOTE)
     {
         mPeerID = SecretKey::pseudoRandomForTesting().getPublicKey();
         mState = GOT_AUTH;
-        mAddress = addres;
+        mAddress = address;
     }
     virtual std::string
     getIP() const override
@@ -227,6 +227,16 @@ class OverlayManagerTests
     }
 
     void
+    crank(size_t n)
+    {
+        while (n != 0)
+        {
+            clock.crank(false);
+            n--;
+        }
+    }
+
+    void
     testBroadcast()
     {
         OverlayManagerStub& pm = app->getOverlayManager();
@@ -255,12 +265,15 @@ class OverlayManagerTests
             }
         }
         pm.broadcastMessage(AtoB);
+        crank(10);
         std::vector<int> expected{1, 1, 0, 1, 1};
         REQUIRE(sentCounts(pm) == expected);
         pm.broadcastMessage(AtoB);
+        crank(10);
         REQUIRE(sentCounts(pm) == expected);
         StellarMessage CtoD = c.tx({payment(d, 10)})->toStellarMessage();
         pm.broadcastMessage(CtoD);
+        crank(10);
         std::vector<int> expectedFinal{2, 2, 1, 2, 2};
         REQUIRE(sentCounts(pm) == expectedFinal);
 
@@ -268,6 +281,7 @@ class OverlayManagerTests
         StellarMessage AtoC = a.tx({payment(c, 10)})->toStellarMessage();
         pm.updateFloodRecord(AtoB, AtoC);
         pm.broadcastMessage(AtoC);
+        crank(10);
         REQUIRE(sentCounts(pm) == expectedFinal);
     }
 };

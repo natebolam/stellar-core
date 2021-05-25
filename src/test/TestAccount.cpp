@@ -8,6 +8,7 @@
 #include "ledger/LedgerTxn.h"
 #include "ledger/LedgerTxnEntry.h"
 #include "ledger/LedgerTxnHeader.h"
+#include "ledger/TrustLineWrapper.h"
 #include "main/Application.h"
 #include "test/TestExceptions.h"
 #include "test/TxTests.h"
@@ -39,6 +40,24 @@ TestAccount::updateSequenceNumber()
             mSn = entry.current().data.account().seqNum;
         }
     }
+}
+
+uint32_t
+TestAccount::getTrustlineFlags(Asset const& asset) const
+{
+    LedgerTxn ltx(mApp.getLedgerTxnRoot());
+    auto trust = ltx.load(trustlineKey(getPublicKey(), asset));
+    REQUIRE(trust);
+    return trust.current().data.trustLine().flags;
+}
+
+int64_t
+TestAccount::getTrustlineBalance(Asset const& asset) const
+{
+    LedgerTxn ltx(mApp.getLedgerTxnRoot());
+    auto trustLine = stellar::loadTrustLine(ltx, getPublicKey(), asset);
+    REQUIRE(trustLine);
+    return trustLine.getBalance();
 }
 
 int64_t
@@ -171,24 +190,75 @@ TestAccount::allowTrust(Asset const& asset, PublicKey const& trustor,
 }
 
 void
-TestAccount::allowTrust(Asset const& asset, PublicKey const& trustor)
+TestAccount::allowTrust(Asset const& asset, PublicKey const& trustor,
+                        TrustFlagOp op)
 {
-    applyTx(tx({txtest::allowTrust(trustor, asset, AUTHORIZED_FLAG)}), mApp);
+    if (op == TrustFlagOp::ALLOW_TRUST)
+    {
+        applyTx(tx({txtest::allowTrust(trustor, asset, AUTHORIZED_FLAG)}),
+                mApp);
+    }
+    else if (op == TrustFlagOp::SET_TRUST_LINE_FLAGS)
+    {
+        auto flags = txtest::setTrustLineFlags(AUTHORIZED_FLAG) |
+                     txtest::clearTrustLineFlags(
+                         AUTHORIZED_TO_MAINTAIN_LIABILITIES_FLAG);
+        applyTx(tx({txtest::setTrustLineFlags(trustor, asset, flags)}), mApp);
+    }
+    else
+    {
+        REQUIRE(false);
+    }
 }
 
 void
-TestAccount::denyTrust(Asset const& asset, PublicKey const& trustor)
+TestAccount::denyTrust(Asset const& asset, PublicKey const& trustor,
+                       TrustFlagOp op)
 {
-    applyTx(tx({txtest::allowTrust(trustor, asset, 0)}), mApp);
+    if (op == TrustFlagOp::ALLOW_TRUST)
+    {
+        applyTx(tx({txtest::allowTrust(trustor, asset, 0)}), mApp);
+    }
+    else if (op == TrustFlagOp::SET_TRUST_LINE_FLAGS)
+    {
+        auto flags = txtest::clearTrustLineFlags(TRUSTLINE_AUTH_FLAGS);
+        applyTx(tx({txtest::setTrustLineFlags(trustor, asset, flags)}), mApp);
+    }
+    else
+    {
+        REQUIRE(false);
+    }
 }
 
 void
 TestAccount::allowMaintainLiabilities(Asset const& asset,
-                                      PublicKey const& trustor)
+                                      PublicKey const& trustor, TrustFlagOp op)
 {
-    applyTx(tx({txtest::allowTrust(trustor, asset,
-                                   AUTHORIZED_TO_MAINTAIN_LIABILITIES_FLAG)}),
-            mApp);
+    if (op == TrustFlagOp::ALLOW_TRUST)
+    {
+        applyTx(tx({txtest::allowTrust(
+                    trustor, asset, AUTHORIZED_TO_MAINTAIN_LIABILITIES_FLAG)}),
+                mApp);
+    }
+    else if (op == TrustFlagOp::SET_TRUST_LINE_FLAGS)
+    {
+        auto flags =
+            txtest::setTrustLineFlags(AUTHORIZED_TO_MAINTAIN_LIABILITIES_FLAG) |
+            txtest::clearTrustLineFlags(AUTHORIZED_FLAG);
+        applyTx(tx({txtest::setTrustLineFlags(trustor, asset, flags)}), mApp);
+    }
+    else
+    {
+        REQUIRE(false);
+    }
+}
+
+void
+TestAccount::setTrustLineFlags(
+    Asset const& asset, PublicKey const& trustor,
+    txtest::SetTrustLineFlagsArguments const& arguments)
+{
+    applyTx(tx({txtest::setTrustLineFlags(trustor, asset, arguments)}), mApp);
 }
 
 TrustLineEntry
@@ -442,5 +512,20 @@ TestAccount::pathPaymentStrictSend(PublicKey const& destination,
     REQUIRE(!noIssuer);
 
     return getFirstResult(*transaction).tr().pathPaymentStrictSendResult();
+}
+
+void
+TestAccount::clawback(PublicKey const& from, Asset const& asset, int64_t amount)
+{
+    applyTx(tx({txtest::clawback(from, asset, amount)}), mApp);
+}
+
+void
+TestAccount::clawbackClaimableBalance(ClaimableBalanceID const& balanceID)
+{
+    applyTx(tx({txtest::clawbackClaimableBalance(balanceID)}), mApp);
+
+    LedgerTxn ltx(mApp.getLedgerTxnRoot());
+    REQUIRE(!stellar::loadClaimableBalance(ltx, balanceID));
 }
 };

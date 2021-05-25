@@ -1,5 +1,6 @@
 *.a
 *.o
+*.o.tmp
 *.obj
 *.la
 *.lo
@@ -39,6 +40,7 @@ compile_commands.json
 
 /INSTALL
 
+/src/archtmp-*
 /src/main/StellarCoreVersion.cpp
 /src/testdata
 /src/xdr/*.h
@@ -80,7 +82,8 @@ compile_commands.json
 # test output
 stellar-core-test-*
 test-partitions.*
-/fuzz-findings/
+fuzz-findings/
+min-testcases/
 /my-history/
 
 # Windows specific

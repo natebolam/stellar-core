@@ -6,16 +6,22 @@
 
 #include "history/HistoryArchive.h"
 #include "main/Application.h"
+#include <optional>
 
 namespace stellar
 {
 
 class CatchupConfiguration;
 
-int runWithConfig(Config cfg, optional<CatchupConfiguration> cc);
+// Create application and validate its configuration
+Application::pointer setupApp(Config& cfg, VirtualClock& clock,
+                              uint32_t startAtLedger,
+                              std::string const& startAtHash);
+int runApp(Application::pointer app);
 void setForceSCPFlag();
 void initializeDatabase(Config cfg);
 void httpCommand(std::string const& command, unsigned short port);
+int selfCheck(Config cfg);
 void showOfflineInfo(Config cfg);
 int reportLastHistoryCheckpoint(Config cfg, std::string const& outputFile);
 #ifdef BUILD_TESTS
@@ -29,5 +35,8 @@ void writeCatchupInfo(Json::Value const& catchupInfo,
                       std::string const& outputFile);
 int catchup(Application::pointer app, CatchupConfiguration cc,
             Json::Value& catchupInfo, std::shared_ptr<HistoryArchive> archive);
+// Reduild ledger state based on the buckets. Ensure ledger state is properly
+// reset before calling this function.
+bool applyBucketsForLCL(Application& app);
 int publish(Application::pointer app);
 }

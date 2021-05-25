@@ -16,20 +16,21 @@ endif # !BUILD_TESTS
 
 stellar_core_LDADD = $(soci_LIBS) $(libmedida_LIBS)		\
 	$(top_builddir)/lib/lib3rdparty.a $(sqlite3_LIBS)	\
-	$(libpq_LIBS) $(xdrpp_LIBS) $(libsodium_LIBS)
+	$(libpq_LIBS) $(xdrpp_LIBS) $(libsodium_LIBS) $(libunwind_LIBS)
 
 TESTDATA_DIR = testdata
 TEST_FILES = $(TESTDATA_DIR)/stellar-core_example.cfg $(TESTDATA_DIR)/stellar-core_standalone.cfg \
              $(TESTDATA_DIR)/stellar-core_testnet.cfg $(TESTDATA_DIR)/stellar-core_testnet_legacy.cfg \
-	     $(TESTDATA_DIR)/stellar-history.testnet.6714239.json $(TESTDATA_DIR)/stellar-history.livenet.15686975.json $(TESTDATA_DIR)/stellar-core_example_validators.cfg \
-	     $(TESTDATA_DIR)/stellar-history.testnet.6714239.networkPassphrase.json
+             $(TESTDATA_DIR)/stellar-history.testnet.6714239.json $(TESTDATA_DIR)/stellar-history.livenet.15686975.json \
+             $(TESTDATA_DIR)/stellar-core_testnet_validator.cfg $(TESTDATA_DIR)/stellar-core_example_validators.cfg \
+             $(TESTDATA_DIR)/stellar-history.testnet.6714239.networkPassphrase.json
 
 BUILT_SOURCES = $(SRC_X_FILES:.x=.h) main/StellarCoreVersion.cpp $(TEST_FILES)
 
 $(SRC_X_FILES:.x=.h): $(XDRC)
 SUFFIXES = .x .h
 .x.h:
-	$(XDRC) -hh -o $@ $<
+	$(XDRC) -hh -pedantic -o $@ $<
 
 $(srcdir)/src.mk: $(top_srcdir)/make-mks
 	cd $(top_srcdir) && ./make-mks
@@ -71,16 +72,20 @@ FUZZER_MODE ?= overlay
 fuzz-testcases: stellar-core
 	mkdir -p fuzz-testcases
 	for i in `seq 1 10000`; do \
-	    ./stellar-core gen-fuzz fuzz-testcases/fuzz$$i.xdr --mode=${FUZZER_MODE}; \
+	    ./stellar-core gen-fuzz --mode=${FUZZER_MODE} fuzz-testcases/fuzz$$i.xdr ; \
 	done
 	mkdir -p min-testcases
-	afl-cmin -i fuzz-testcases -o min-testcases -m 250 -t 250 ./stellar-core fuzz @@ --mode=${FUZZER_MODE}
+	afl-cmin -i fuzz-testcases -o min-testcases -m 500 -t 250 ./stellar-core fuzz --ll ERROR --mode=${FUZZER_MODE} @@
 	rm -Rf fuzz-testcases
+
+# when running in parallel,
+# run the same command than below replacing `-M main` with `-S worker_N`
+# and `--process-id 0` with `--process-id N`
 
 fuzz: fuzz-testcases stellar-core
 	mkdir -p fuzz-findings
-	afl-fuzz -m 250 -t 250 -i min-testcases -o fuzz-findings \
-	    ./stellar-core fuzz @@ --mode=${FUZZER_MODE}
+	afl-fuzz -m 500 -M main -t 250 -i min-testcases -o fuzz-findings \
+	    ./stellar-core fuzz --ll ERROR --process-id 0 --mode=${FUZZER_MODE} @@
 
 fuzz-clean: always
 	rm -Rf fuzz-testcases fuzz-findings

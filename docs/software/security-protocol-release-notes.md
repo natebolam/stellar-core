@@ -53,10 +53,51 @@ It then follows that:
 
 # List of releases
 
+## v16.0.0 (2021-04-09)
+
+* `Ledger` - protocol - fixed potential local state corruption when loading offers that could potentially corrupt sponsorships. Upgrade fixed offer 289733046 corrupted when constructing ledger 34793621 on the public network.
+
+## v15.5.0 (2021-04-07)
+
+* `Ledger` - work around a local corruption issues when loading offers that would lead to Offers potentially getting corrupt sponsorships.
+
+## v15.0.0 (2020-10-27)
+
+* `Ledger` - protocol - CAP0023 - Fixed `LedgerKey` input validation issue
+
+## v14.1.1 (2020-10-01)
+
+* `Ledger` - security - fixed potential local state corruption when applying transactions from history archive
+    * exploited: no
+    * mitigation: code fix
+
+## v14.1.0 (2020-09-28)
+
+* `Ledger` - security - fixed potential non deterministic computation of best offer
+    * exploited: no
+    * mitigation: code fix
+
 ## v14.0.0 (2020-08-20)
 
 * `Ledger` - protocol - CAP0023 - Two-Part Payments with ClaimableBalanceEntry
 * `Ledger` - protocol - CAP0033 - Sponsored Reserve
+* `SCP` - protocol - CAP0034 - Preserve Transaction-Set/Close-Time Affinity During Nomination
+* `SCP` - security - fix an edge case that could lead to nominating an invalid close time
+    * exploited: no
+    * mitigation: code fix
+
+## v13.2.0 (2020-06-30)
+
+* `SCP` - security - fixed crash that could be triggered when receiving out of order messages at the wrong time
+    * exploited: no
+    * mitigation: code fix
+
+## v13.1.0 (2020-05-29)
+
+* `Overlay` - security - remote crash via unhandled exception during connection handshake (DoS)
+    * exploited: no
+    * mitigation: code fix
+    * bug bounty: [ahook](https://hackerone.com/ahook)
 
 ## v13.0.0 (2020-04-29)
 
@@ -228,7 +269,7 @@ of a signer to more than 255.
 
 * `Ledger` - protocol - updated protocol version to 5
 
-* `Ledger` - protocol - don't allow merging accounts from non-existant accounts (bad fix)
+* `Ledger` - protocol - don't allow merging accounts from non-existent accounts (bad fix)
 
 ## v0.6.1 (2017-03-07)
 

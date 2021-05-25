@@ -9,6 +9,7 @@
 #include "medida/timer.h"
 #include "scp/SCPDriver.h"
 #include "xdr/Stellar-ledger.h"
+#include <optional>
 
 namespace medida
 {
@@ -141,7 +142,7 @@ class HerderSCPDriver : public SCPDriver
                                  SCPBallot const& ballot) override;
     void acceptedCommit(uint64_t slotIndex, SCPBallot const& ballot) override;
 
-    optional<VirtualClock::time_point> getPrepareStart(uint64_t slotIndex);
+    std::optional<VirtualClock::time_point> getPrepareStart(uint64_t slotIndex);
 
     // converts a Value into a StellarValue
     // returns false on error
@@ -159,22 +160,9 @@ class HerderSCPDriver : public SCPDriver
     // clean up older slots
     void purgeSlots(uint64_t maxSlotIndex);
 
-    // Does the nomination protocol output a BASIC or a SIGNED
-    // StellarValue?
-    virtual StellarValueType compositeValueType() const;
-
-    // Does the current protocol version contain the CAP-0034 closeTime
-    // semantics change?
-    bool curProtocolPreservesTxSetCloseTimeAffinity() const;
-
     double getExternalizeLag(NodeID const& id) const;
 
     Json::Value getQsetLagInfo(bool summary, bool fullKeys);
-
-    void reportCostOutliersForSlot(int64_t slotIndex, bool updateMetrics);
-
-    Json::Value getJsonValidatorCost(bool summary, bool fullKeys,
-                                     uint64 index) const;
 
   private:
     Application& mApp;
@@ -183,8 +171,6 @@ class HerderSCPDriver : public SCPDriver
     Upgrades const& mUpgrades;
     PendingEnvelopes& mPendingEnvelopes;
     SCP mSCP;
-
-    static uint32_t const FIRST_PROTOCOL_WITH_TXSET_CLOSETIME_AFFINITY;
 
     struct SCPMetrics
     {
@@ -201,11 +187,8 @@ class HerderSCPDriver : public SCPDriver
         medida::Timer& mPrepareToExternalize;
 
         // Timers tracking externalize messages
-        medida::Timer& mExternalizeLag;
-        medida::Timer& mExternalizeDelay;
-
-        // Tracked cost per slot
-        medida::Histogram& mCostPerSlot;
+        medida::Timer& mFirstToSelfExternalizeLag;
+        medida::Timer& mSelfToOthersExternalizeLag;
 
         SCPMetrics(Application& app);
     };
@@ -218,12 +201,12 @@ class HerderSCPDriver : public SCPDriver
     medida::Histogram& mPrepareTimeout;
 
     // Externalize lag tracking for nodes in qset
-    std::unordered_map<NodeID, medida::Timer> mQSetLag;
+    UnorderedMap<NodeID, medida::Timer> mQSetLag;
 
     struct SCPTiming
     {
-        optional<VirtualClock::time_point> mNominationStart;
-        optional<VirtualClock::time_point> mPrepareStart;
+        std::optional<VirtualClock::time_point> mNominationStart;
+        std::optional<VirtualClock::time_point> mPrepareStart;
 
         // Nomination timeouts before first prepare
         int64_t mNominationTimeoutCount{0};
@@ -231,8 +214,8 @@ class HerderSCPDriver : public SCPDriver
         int64_t mPrepareTimeoutCount{0};
 
         // externalize timing information
-        optional<VirtualClock::time_point> mFirstExternalize;
-        optional<VirtualClock::time_point> mSelfExternalize;
+        std::optional<VirtualClock::time_point> mFirstExternalize;
+        std::optional<VirtualClock::time_point> mSelfExternalize;
     };
 
     // Map of time points for each slot to measure key protocol metrics:

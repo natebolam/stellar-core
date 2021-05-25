@@ -29,7 +29,6 @@ TxSimGenerateBucketsWork::TxSimGenerateBucketsWork(
     , mMultiplier(multiplier)
     , mLevel(0)
     , mIsCurr(true)
-    , mTimer(std::make_unique<VirtualTimer>(app.getClock()))
 {
 }
 
@@ -100,7 +99,7 @@ TxSimGenerateBucketsWork::processGeneratedBucket()
     // Forget any intermediate buckets produced
     mApp.getBucketManager().forgetUnreferencedBuckets();
 
-    CLOG(INFO, "History") << "Generated bucket: " << hexAbbrev(hash);
+    CLOG_INFO(History, "Generated bucket: {}", hexAbbrev(hash));
     auto& level = mGeneratedApplyState.currentBuckets[mLevel];
     if (mIsCurr)
     {
@@ -121,8 +120,7 @@ TxSimGenerateBucketsWork::onRun()
     // to finish
     if (!checkOrStartMerges())
     {
-        mTimer->expires_from_now(std::chrono::milliseconds(100));
-        mTimer->async_wait(wakeSelfUpCallback(), &VirtualTimer::onFailureNoop);
+        setupWaitingCallback(std::chrono::milliseconds(100));
         return BasicWork::State::WORK_WAITING;
     }
 
@@ -148,8 +146,8 @@ TxSimGenerateBucketsWork::onRun()
             }
             catch (std::exception const& e)
             {
-                CLOG(ERROR, "History") << "Error saving HAS file: " << e.what();
-                CLOG(ERROR, "History") << POSSIBLY_CORRUPTED_LOCAL_FS;
+                CLOG_ERROR(History, "Error saving HAS file: {}", e.what());
+                CLOG_ERROR(History, "{}", POSSIBLY_CORRUPTED_LOCAL_FS);
                 return State::WORK_FAILURE;
             }
         }
@@ -163,13 +161,13 @@ TxSimGenerateBucketsWork::onRun()
         auto bucketHash = mIsCurr ? currentLevel.curr : currentLevel.snap;
         auto bucket =
             mApp.getBucketManager().getBucketByHash(hexToBin256(bucketHash));
-        CLOG(INFO, "History") << "Simulating " << (mIsCurr ? "curr" : "snap")
-                              << " bucketlist level: " << mLevel;
+        CLOG_INFO(History, "Simulating {} bucketlist level: {}",
+                  (mIsCurr ? "curr" : "snap"), mLevel);
         startBucketGeneration(bucket);
     }
     catch (std::runtime_error const& e)
     {
-        CLOG(ERROR, "History") << "Unable to generate bucket: " << e.what();
+        CLOG_ERROR(History, "Unable to generate bucket: {}", e.what());
         return BasicWork::State::WORK_FAILURE;
     }
 

@@ -40,9 +40,9 @@ DownloadApplyTxsWork::yieldMoreWork()
         throw std::runtime_error("Work has no more children to iterate over!");
     }
 
-    CLOG(INFO, "History") << "Downloading, unzipping and applying "
-                          << HISTORY_FILE_TYPE_TRANSACTIONS
-                          << " for checkpoint " << mCheckpointToQueue;
+    CLOG_INFO(History,
+              "Downloading, unzipping and applying {} for checkpoint {}",
+              HISTORY_FILE_TYPE_TRANSACTIONS, mCheckpointToQueue);
     FileTransferInfo ft(mDownloadDir, HISTORY_FILE_TYPE_TRANSACTIONS,
                         mCheckpointToQueue);
     auto getAndUnzip =
@@ -51,8 +51,28 @@ DownloadApplyTxsWork::yieldMoreWork()
     auto const& hm = mApp.getHistoryManager();
     auto low = hm.firstLedgerInCheckpointContaining(mCheckpointToQueue);
     auto high = std::min(mCheckpointToQueue, mRange.last());
+
+    TmpDir const& dir = mDownloadDir;
+    uint32_t checkpoint = mCheckpointToQueue;
+    auto getFileWeak = std::weak_ptr<GetAndUnzipRemoteFileWork>(getAndUnzip);
+
+    OnFailureCallback cb = [getFileWeak, checkpoint, &dir]() {
+        auto getFile = getFileWeak.lock();
+        if (getFile)
+        {
+            auto archive = getFile->getArchive();
+            if (archive)
+            {
+                FileTransferInfo ti(dir, HISTORY_FILE_TYPE_TRANSACTIONS,
+                                    checkpoint);
+                CLOG_ERROR(History, "Archive {} maybe contains corrupt file {}",
+                           archive->getName(), ti.remoteName());
+            }
+        }
+    };
+
     auto apply = std::make_shared<ApplyCheckpointWork>(
-        mApp, mDownloadDir, LedgerRange::inclusive(low, high));
+        mApp, mDownloadDir, LedgerRange::inclusive(low, high), cb);
 
     std::vector<std::shared_ptr<BasicWork>> seq{getAndUnzip};
 
@@ -60,10 +80,8 @@ DownloadApplyTxsWork::yieldMoreWork()
     {
         auto prev = mLastYieldedWork;
         bool pqFellBehind = false;
-        auto predicate = [
-            prev, pqFellBehind, waitForPublish = mWaitForPublish, &hm
-        ]() mutable
-        {
+        auto predicate = [prev, pqFellBehind, waitForPublish = mWaitForPublish,
+                          &hm]() mutable {
             if (!prev)
             {
                 throw std::runtime_error("Download and apply txs: related Work "

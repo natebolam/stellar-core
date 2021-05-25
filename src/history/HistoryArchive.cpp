@@ -17,6 +17,7 @@
 #include "main/StellarCoreVersion.h"
 #include "process/ProcessManager.h"
 #include "util/Fs.h"
+#include "util/GlobalChecks.h"
 #include "util/Logging.h"
 #include <Tracy.hpp>
 #include <fmt/format.h>
@@ -48,10 +49,9 @@ formatString(std::string const& templateString, Tokens const&... tokens)
     }
     catch (fmt::format_error const& ex)
     {
-        CLOG(ERROR, "History") << "Failed to format string \"" << templateString
-                               << "\":" << ex.what();
-        CLOG(ERROR, "History")
-            << "Check your HISTORY entry in configuration file";
+        CLOG_ERROR(History, "Failed to format string \"{}\":{}", templateString,
+                   ex.what());
+        CLOG_ERROR(History, "Check your HISTORY entry in configuration file");
         throw std::runtime_error("failed to format command string");
     }
 }
@@ -144,8 +144,8 @@ HistoryArchiveState::load(std::string const& inFile)
     serialize(ar);
     if (version != HISTORY_ARCHIVE_STATE_VERSION)
     {
-        CLOG(ERROR, "History")
-            << "Unexpected history archive state version: " << version;
+        CLOG_ERROR(History, "Unexpected history archive state version: {}",
+                   version);
         throw std::runtime_error("unexpected history archive state version");
     }
 }
@@ -191,9 +191,10 @@ HistoryArchiveState::remoteName(uint32_t snapshotNumber)
 }
 
 std::string
-HistoryArchiveState::localName(Application& app, std::string const& archiveName)
+HistoryArchiveState::localName(Application& app,
+                               std::string const& uniquePrefix)
 {
-    return app.getHistoryManager().localFilename(archiveName + "-" +
+    return app.getHistoryManager().localFilename(uniquePrefix + "-" +
                                                  baseName());
 }
 
@@ -285,39 +286,92 @@ HistoryArchiveState::containsValidBuckets(Application& app) const
 {
     ZoneScoped;
     // This function assumes presence of required buckets to verify state
-    // Level 0 future buckets are always clear
-    assert(currentBuckets[0].next.isClear());
+    uint32_t minBucketVersion = 0;
+    bool nonEmptySeen = false;
+    Hash const emptyHash;
 
-    for (uint32_t i = 1; i < BucketList::kNumLevels; i++)
-    {
-        auto& level = currentBuckets[i];
-        auto& prev = currentBuckets[i - 1];
-        Hash const emptyHash;
-
-        auto snap =
-            app.getBucketManager().getBucketByHash(hexToBin256(prev.snap));
-        assert(snap);
-        if (snap->getHash() == emptyHash)
+    auto validateBucketVersion = [&](uint32_t bucketVersion) {
+        if (bucketVersion < minBucketVersion)
         {
-            continue;
+            CLOG_ERROR(History,
+                       "Incompatible bucket versions: expected version "
+                       "{} or higher, got {}",
+                       minBucketVersion, bucketVersion);
+            return false;
         }
-        else if (Bucket::getBucketVersion(snap) >=
-                 Bucket::FIRST_PROTOCOL_SHADOWS_REMOVED)
+        minBucketVersion = bucketVersion;
+        return true;
+    };
+
+    // Process bucket, return version
+    auto processBucket = [&](std::string const& bucketHash) {
+        auto bucket =
+            app.getBucketManager().getBucketByHash(hexToBin256(bucketHash));
+        releaseAssert(bucket);
+        int32_t version = 0;
+        if (bucket->getHash() != emptyHash)
+        {
+            version = Bucket::getBucketVersion(bucket);
+            if (!nonEmptySeen)
+            {
+                nonEmptySeen = true;
+            }
+        }
+        return version;
+    };
+
+    // Iterate bottom-up, from oldest to newest buckets
+    for (uint32_t j = BucketList::kNumLevels; j != 0; --j)
+    {
+        auto i = j - 1;
+        auto const& level = currentBuckets[i];
+
+        // Note: snap is always older than curr, and therefore must be processed
+        // first
+        if (!validateBucketVersion(processBucket(level.snap)) ||
+            !validateBucketVersion(processBucket(level.curr)))
+        {
+            return false;
+        }
+
+        // Level 0 future buckets are always clear
+        if (i == 0)
         {
             if (!level.next.isClear())
             {
-                CLOG(ERROR, "History")
-                    << "Invalid HAS: future must be cleared ";
+                CLOG_ERROR(History,
+                           "Invalid HAS: next must be clear at level 0");
+                return false;
+            }
+            break;
+        }
+
+        // Validate "next" field
+        // Use previous level snap to determine "next" validity
+        auto const& prev = currentBuckets[i - 1];
+        uint32_t prevSnapVersion = processBucket(prev.snap);
+
+        if (!nonEmptySeen)
+        {
+            // No real buckets seen yet, move on
+            continue;
+        }
+        else if (prevSnapVersion >= Bucket::FIRST_PROTOCOL_SHADOWS_REMOVED)
+        {
+            if (!level.next.isClear())
+            {
+                CLOG_ERROR(History, "Invalid HAS: future must be cleared ");
                 return false;
             }
         }
         else if (!level.next.hasOutputHash())
         {
-            CLOG(ERROR, "History")
-                << "Invalid HAS: future must have resolved output";
+            CLOG_ERROR(History,
+                       "Invalid HAS: future must have resolved output");
             return false;
         }
     }
+
     return true;
 }
 

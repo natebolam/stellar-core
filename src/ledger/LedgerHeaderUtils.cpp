@@ -51,7 +51,7 @@ storeInDatabase(Database& db, LedgerHeader const& header)
     std::string headerEncoded;
     headerEncoded = decoder::encode_b64(headerBytes);
 
-    // note: columns other than "data" are there to faciliate lookup/processing
+    // note: columns other than "data" are there to facilitate lookup/processing
     auto prep = db.getPreparedStatement(
         "INSERT INTO ledgerheaders "
         "(ledgerhash, prevhash, bucketlisthash, ledgerseq, closetime, data) "
@@ -117,7 +117,7 @@ loadByHash(Database& db, Hash const& hash)
     {
         auto lh = decodeFromData(headerEncoded);
         lhPtr = std::make_shared<LedgerHeader>(lh);
-        auto ledgerHash = sha256(xdr::xdr_to_opaque(lh));
+        auto ledgerHash = xdrSha256(lh);
         if (ledgerHash != hash)
         {
             throw std::runtime_error(
@@ -168,6 +168,14 @@ deleteOldEntries(Database& db, uint32_t ledgerSeq, uint32_t count)
                                           "ledgerheaders", "ledgerseq");
 }
 
+void
+deleteNewerEntries(Database& db, uint32_t ledgerSeq)
+{
+    ZoneScoped;
+    DatabaseUtils::deleteNewerEntriesHelper(db.getSession(), ledgerSeq,
+                                            "ledgerheaders", "ledgerseq");
+}
+
 size_t
 copyToStream(Database& db, soci::session& sess, uint32_t ledgerSeq,
              uint32_t ledgerCount, XDROutputFileStream& headersOut)
@@ -191,9 +199,8 @@ copyToStream(Database& db, soci::session& sess, uint32_t ledgerSeq,
     {
         LedgerHeaderHistoryEntry lhe;
         lhe.header = decodeFromData(headerEncoded);
-        lhe.hash = sha256(xdr::xdr_to_opaque(lhe.header));
-        CLOG(DEBUG, "Ledger")
-            << "Streaming ledger-header " << lhe.header.ledgerSeq;
+        lhe.hash = xdrSha256(lhe.header);
+        CLOG_DEBUG(Ledger, "Streaming ledger-header {}", lhe.header.ledgerSeq);
         headersOut.writeOne(lhe);
         ++n;
         st.fetch();

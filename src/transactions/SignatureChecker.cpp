@@ -9,7 +9,7 @@
 #include "crypto/SecretKey.h"
 #include "crypto/SignerKey.h"
 #include "transactions/SignatureUtils.h"
-#include "util/Algoritm.h"
+#include "util/Algorithm.h"
 #include "util/XDROperators.h"
 #include <Tracy.hpp>
 
@@ -27,8 +27,7 @@ SignatureChecker::SignatureChecker(
 }
 
 bool
-SignatureChecker::checkSignature(AccountID const& accountID,
-                                 std::vector<Signer> const& signersV,
+SignatureChecker::checkSignature(std::vector<Signer> const& signersV,
                                  int neededWeight)
 {
 #ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION

@@ -12,6 +12,7 @@
 #include "util/Fs.h"
 #include "util/Logging.h"
 #include "util/Timer.h"
+#include "util/TmpDir.h"
 #include "xdrpp/autocheck.h"
 #include <chrono>
 #include <fmt/format.h>
@@ -30,10 +31,10 @@ TEST_CASE("subprocess", "[process]")
     auto evt = app->getProcessManager().runProcess("hostname", "").lock();
     REQUIRE(evt);
     evt->async_wait([&](asio::error_code ec) {
-        CLOG(DEBUG, "Process") << "process exited: " << ec;
+        CLOG_DEBUG(Process, "process exited: {}", ec);
         if (ec)
         {
-            CLOG(DEBUG, "Process") << "error code: " << ec.message();
+            CLOG_DEBUG(Process, "error code: {}", ec.message());
         }
         failed = !!ec;
         exited = true;
@@ -58,10 +59,10 @@ TEST_CASE("subprocess fails", "[process]")
                    .lock();
     REQUIRE(evt);
     evt->async_wait([&](asio::error_code ec) {
-        CLOG(DEBUG, "Process") << "process exited: " << ec;
+        CLOG_DEBUG(Process, "process exited: {}", ec);
         if (ec)
         {
-            CLOG(DEBUG, "Process") << "error code: " << ec.message();
+            CLOG_DEBUG(Process, "error code: {}", ec.message());
         }
         failed = !!ec;
         exited = true;
@@ -74,21 +75,22 @@ TEST_CASE("subprocess fails", "[process]")
     REQUIRE(failed);
 }
 
-TEST_CASE("subprocess redirect to file", "[process]")
+TEST_CASE("subprocess redirect to new file", "[process]")
 {
     VirtualClock clock;
     Config const& cfg = getTestConfig();
     Application::pointer appPtr = createTestApplication(clock, cfg);
     Application& app = *appPtr;
-    std::string filename("hostname.txt");
+    TmpDir tmpDir = app.getTmpDirManager().tmpDir("subprocess-redirect");
+    std::string filename(fmt::format("{}/hostname.txt", tmpDir.getName()));
     bool exited = false;
     auto evt = app.getProcessManager().runProcess("hostname", filename).lock();
     REQUIRE(evt);
     evt->async_wait([&](asio::error_code ec) {
-        CLOG(DEBUG, "Process") << "process exited: " << ec;
+        CLOG_DEBUG(Process, "process exited: {}", ec);
         if (ec)
         {
-            CLOG(DEBUG, "Process") << "error code: " << ec.message();
+            CLOG_DEBUG(Process, "error code: {}", ec.message());
         }
         exited = true;
     });
@@ -103,9 +105,36 @@ TEST_CASE("subprocess redirect to file", "[process]")
     in.exceptions(std::ios::badbit);
     std::string s;
     in >> s;
-    CLOG(DEBUG, "Process") << "opened redirect file, read: " << s;
+    CLOG_DEBUG(Process, "opened redirect file, read: {}", s);
     CHECK(!s.empty());
-    std::remove(filename.c_str());
+}
+
+TEST_CASE("subprocess redirect to existing file", "[process]")
+{
+    // This test should have the process fail, because there's already
+    // an existing file.
+
+    VirtualClock clock;
+    Config const& cfg = getTestConfig();
+    Application::pointer appPtr = createTestApplication(clock, cfg);
+    Application& app = *appPtr;
+    TmpDir tmpDir = app.getTmpDirManager().tmpDir("subprocess-redirect");
+    std::string filename(fmt::format("{}/hostname.txt", tmpDir.getName()));
+    std::string data = "12345hello54321";
+    {
+        std::ofstream tout(filename);
+        tout << data;
+    }
+
+    auto evt = app.getProcessManager().runProcess("hostname", filename).lock();
+    REQUIRE(!evt);
+    std::ifstream in(filename);
+    CHECK(in);
+    in.exceptions(std::ios::badbit);
+    std::string s;
+    in >> s;
+    CLOG_DEBUG(Process, "opened redirect file, read: {}", s);
+    CHECK(s == data);
 }
 
 TEST_CASE("subprocess storm", "[process]")
@@ -114,12 +143,12 @@ TEST_CASE("subprocess storm", "[process]")
     Config const& cfg = getTestConfig();
     Application::pointer appPtr = createTestApplication(clock, cfg);
     Application& app = *appPtr;
+    TmpDir tmpDir = app.getTmpDirManager().tmpDir("process-storm");
 
     size_t n = 100;
     size_t completed = 0;
 
-    std::string dir(cfg.BUCKET_DIR_PATH + "/tmp/process-storm");
-    fs::mkdir(dir);
+    std::string dir = tmpDir.getName();
     fs::mkpath(dir + "/src");
     fs::mkpath(dir + "/dst");
 
@@ -127,7 +156,7 @@ TEST_CASE("subprocess storm", "[process]")
     {
         std::string src(fmt::format("{:s}/src/{:d}", dir, i));
         std::string dst(fmt::format("{:s}/dst/{:d}", dir, i));
-        CLOG(INFO, "Process") << "making file " << src;
+        CLOG_INFO(Process, "making file {}", src);
         {
             std::ofstream out;
             out.exceptions(std::ios::failbit | std::ios::badbit);
@@ -139,10 +168,10 @@ TEST_CASE("subprocess storm", "[process]")
                        .lock();
         REQUIRE(evt);
         evt->async_wait([&](asio::error_code ec) {
-            CLOG(INFO, "Process") << "process exited: " << ec;
+            CLOG_INFO(Process, "process exited: {}", ec);
             if (ec)
             {
-                CLOG(DEBUG, "Process") << "error code: " << ec.message();
+                CLOG_DEBUG(Process, "error code: {}", ec.message());
             }
             ++completed;
         });
@@ -155,7 +184,7 @@ TEST_CASE("subprocess storm", "[process]")
         size_t n2 = app.getProcessManager().getNumRunningProcesses();
         if (last != n2)
         {
-            CLOG(INFO, "Process") << "running subprocess count: " << n2;
+            CLOG_INFO(Process, "running subprocess count: {}", n2);
         }
         last = n2;
         REQUIRE(n2 <= cfg.MAX_CONCURRENT_SUBPROCESSES);
@@ -193,10 +222,10 @@ TEST_CASE("shutdown while process running", "[process]")
     {
         REQUIRE(event);
         event->async_wait([&](asio::error_code ec) {
-            CLOG(DEBUG, "Process") << "process exited: " << ec;
+            CLOG_DEBUG(Process, "process exited: {}", ec);
             if (ec)
             {
-                CLOG(DEBUG, "Process") << "error code: " << ec.message();
+                CLOG_DEBUG(Process, "error code: {}", ec.message());
             }
             exitedCount++;
             errorCodes.push_back(ec);
@@ -242,10 +271,10 @@ TEST_CASE("ProcessManager::tryProcessShutdown test", "[process]")
 
     REQUIRE(event);
     event->async_wait([&](asio::error_code ec) {
-        CLOG(DEBUG, "Process") << "process exited: " << ec;
+        CLOG_DEBUG(Process, "process exited: {}", ec);
         if (ec)
         {
-            CLOG(DEBUG, "Process") << "error code: " << ec.message();
+            CLOG_DEBUG(Process, "error code: {}", ec.message());
         }
         errorCode = ec;
         exited = true;

@@ -18,7 +18,6 @@ ConditionalWork::ConditionalWork(Application& app, std::string name,
     , mCondition(std::move(condition))
     , mConditionedWork(std::move(conditionedWork))
     , mSleepDelay(sleepTime)
-    , mSleepTimer(std::make_unique<VirtualTimer>(app.getClock()))
 {
     if (!mConditionedWork)
     {
@@ -46,27 +45,15 @@ ConditionalWork::onRun()
     // Work is not started, so check the condition
     if (!mCondition())
     {
-        std::weak_ptr<ConditionalWork> weak(
-            std::static_pointer_cast<ConditionalWork>(shared_from_this()));
-        auto handler = [weak](asio::error_code const& ec) {
-            auto self = weak.lock();
-            if (self)
-            {
-                self->wakeUp();
-            }
-        };
-
-        CLOG(TRACE, "Work")
-            << fmt::format("Condition for {} is not satisfied: sleeping {} ms",
-                           getName(), mSleepDelay.count());
-        mSleepTimer->expires_from_now(mSleepDelay);
-        mSleepTimer->async_wait(handler);
+        CLOG_TRACE(Work, "Condition for {} is not satisfied: sleeping {} ms",
+                   getName(), mSleepDelay.count());
+        setupWaitingCallback(mSleepDelay);
         return State::WORK_WAITING;
     }
     else
     {
-        CLOG(TRACE, "Work") << fmt::format(
-            "Condition for {} is satisfied: starting work", getName());
+        CLOG_TRACE(Work, "Condition for {} is satisfied: starting work",
+                   getName());
         mConditionedWork->startWork(wakeSelfUpCallback());
         mWorkStarted = true;
         mCondition = nullptr;

@@ -48,6 +48,7 @@
 #include <numeric>
 #include <regex>
 #include <sstream>
+#include <thread>
 
 /*
 The ledger module:
@@ -87,7 +88,7 @@ LedgerManager::create(Application& app)
 std::string
 LedgerManager::ledgerAbbrev(LedgerHeader const& header)
 {
-    return ledgerAbbrev(header, sha256(xdr::xdr_to_opaque(header)));
+    return ledgerAbbrev(header, xdrSha256(header));
 }
 
 std::string
@@ -119,8 +120,7 @@ LedgerManagerImpl::LedgerManagerImpl(Application& app)
     , mOperationCount(
           app.getMetrics().NewHistogram({"ledger", "operation", "count"}))
     , mPrefetchHitRate(
-          app.getMetrics().NewHistogram({"ledger", "prefetch", "hit-rate"},
-                                        medida::SamplingInterface::kSliding))
+          app.getMetrics().NewHistogram({"ledger", "prefetch", "hit-rate"}))
     , mLedgerClose(app.getMetrics().NewTimer({"ledger", "ledger", "close"}))
     , mLedgerAgeClosed(app.getMetrics().NewBuckets(
           {"ledger", "age", "closed"}, {5000.0, 7000.0, 10000.0, 20000.0}))
@@ -129,6 +129,8 @@ LedgerManagerImpl::LedgerManagerImpl(Application& app)
     , mLastClose(mApp.getClock().now())
     , mCatchupDuration(
           app.getMetrics().NewTimer({"ledger", "catchup", "duration"}))
+    , mMetaStreamWriteTime(
+          app.getMetrics().NewTimer({"ledger", "metastream", "write"}))
     , mState(LM_BOOTING_STATE)
 
 {
@@ -149,8 +151,7 @@ LedgerManagerImpl::setState(State s)
         std::string oldState = getStateHuman();
         mState = s;
         mApp.syncOwnMetrics();
-        CLOG(INFO, "Ledger")
-            << "Changing state " << oldState << " -> " << getStateHuman();
+        CLOG_INFO(Ledger, "Changing state {} -> {}", oldState, getStateHuman());
         if (mState != LM_CATCHING_UP_STATE)
         {
             mApp.getCatchupManager().logAndUpdateCatchupStatus(true);
@@ -166,10 +167,8 @@ LedgerManagerImpl::setState(State s)
             std::chrono::nanoseconds duration =
                 mApp.getClock().now() - *mStartCatchup;
             mCatchupDuration.Update(duration);
-            CLOG(DEBUG, "Perf")
-                << "Caught up to the network in "
-                << std::chrono::duration<double>(duration).count()
-                << " seconds";
+            CLOG_DEBUG(Perf, "Caught up to the network in {} seconds",
+                       std::chrono::duration<double>(duration).count());
         }
     }
 }
@@ -206,7 +205,6 @@ LedgerManager::genesisLedger()
 void
 LedgerManagerImpl::startNewLedger(LedgerHeader const& genesisLedger)
 {
-    DBTimeExcluder qtExclude(mApp);
     auto ledgerTime = mLedgerClose.TimeScope();
     SecretKey skey = SecretKey::fromSeed(mApp.getNetworkID());
 
@@ -222,8 +220,9 @@ LedgerManagerImpl::startNewLedger(LedgerHeader const& genesisLedger)
     rootAccount.balance = genesisLedger.totalCoins;
     ltx.create(rootEntry);
 
-    CLOG(INFO, "Ledger") << "Established genesis ledger, closing";
-    CLOG(INFO, "Ledger") << "Root account seed: " << skey.getStrKeySeed().value;
+    CLOG_INFO(Ledger, "Established genesis ledger, closing");
+    CLOG_INFO(Ledger, "Root account: {}", skey.getStrKeyPublic());
+    CLOG_INFO(Ledger, "Root account seed: {}", skey.getStrKeySeed().value);
     ledgerClosed(ltx);
     ltx.commit();
 }
@@ -249,7 +248,6 @@ LedgerManagerImpl::loadLastKnownLedger(
     function<void(asio::error_code const& ec)> handler)
 {
     ZoneScoped;
-    DBTimeExcluder qtExclude(mApp);
     auto ledgerTime = mLedgerClose.TimeScope();
 
     string lastLedger =
@@ -262,11 +260,10 @@ LedgerManagerImpl::loadLastKnownLedger(
     }
     else
     {
-        CLOG(INFO, "Ledger")
-            << "Last closed ledger (LCL) hash is " << lastLedger;
+        CLOG_INFO(Ledger, "Last closed ledger (LCL) hash is {}", lastLedger);
         Hash lastLedgerHash = hexToBin256(lastLedger);
 
-        if (mApp.getConfig().MODE_STORES_HISTORY)
+        if (mApp.getConfig().MODE_STORES_HISTORY_LEDGERHEADERS)
         {
             auto currentLedger =
                 LedgerHeaderUtils::loadByHash(getDatabase(), lastLedgerHash);
@@ -274,8 +271,8 @@ LedgerManagerImpl::loadLastKnownLedger(
             {
                 throw std::runtime_error("Could not load ledger from database");
             }
-            CLOG(INFO, "Ledger") << "Loaded LCL header from database: "
-                                 << ledgerAbbrev(*currentLedger);
+            CLOG_INFO(Ledger, "Loaded LCL header from database: {}",
+                      ledgerAbbrev(*currentLedger));
             LedgerTxn ltx(mApp.getLedgerTxnRoot());
             ltx.loadHeader().current() = *currentLedger;
             ltx.commit();
@@ -287,8 +284,8 @@ LedgerManagerImpl::loadLastKnownLedger(
             releaseAssertOrThrow(mLastClosedLedger.hash == lastLedgerHash);
             releaseAssertOrThrow(mLastClosedLedger.header.ledgerSeq ==
                                  GENESIS_LEDGER_SEQ);
-            CLOG(INFO, "Ledger")
-                << "LCL is genesis: " << ledgerAbbrev(mLastClosedLedger);
+            CLOG_INFO(Ledger, "LCL is genesis: {}",
+                      ledgerAbbrev(mLastClosedLedger));
         }
 
         if (handler)
@@ -310,9 +307,9 @@ LedgerManagerImpl::loadLastKnownLedger(
                         {
                             mApp.getBucketManager().assumeState(
                                 has, header.current().ledgerVersion);
-                            CLOG(INFO, "Ledger")
-                                << "Assumed bucket-state for LCL: "
-                                << ledgerAbbrev(header.current());
+                            CLOG_INFO(Ledger,
+                                      "Assumed bucket-state for LCL: {}",
+                                      ledgerAbbrev(header.current()));
                         }
                         advanceLedgerPointers(header.current());
                     }
@@ -327,10 +324,9 @@ LedgerManagerImpl::loadLastKnownLedger(
             missing.insert(missing.end(), pubmissing.begin(), pubmissing.end());
             if (!missing.empty())
             {
-                CLOG(ERROR, "Ledger")
-                    << missing.size()
-                    << " buckets are missing from bucket directory '"
-                    << mApp.getBucketManager().getBucketDir() << "'";
+                CLOG_ERROR(
+                    Ledger, "{} buckets are missing from bucket directory '{}'",
+                    missing.size(), mApp.getBucketManager().getBucketDir());
                 throw std::runtime_error("Bucket directory is corrupt");
             }
             else
@@ -415,13 +411,12 @@ void
 LedgerManagerImpl::valueExternalized(LedgerCloseData const& ledgerData)
 {
     ZoneScoped;
-    CLOG(INFO, "Ledger")
-        << "Got consensus: "
-        << "[seq=" << ledgerData.getLedgerSeq()
-        << ", prev=" << hexAbbrev(ledgerData.getTxSet()->previousLedgerHash())
-        << ", txs=" << ledgerData.getTxSet()->sizeTx()
-        << ", ops=" << ledgerData.getTxSet()->sizeOp() << ", sv: "
-        << stellarValueToString(mApp.getConfig(), ledgerData.getValue()) << "]";
+    CLOG_INFO(Ledger,
+              "Got consensus: [seq={}, prev={}, txs={}, ops={}, sv: {}]",
+              ledgerData.getLedgerSeq(),
+              hexAbbrev(ledgerData.getTxSet()->previousLedgerHash()),
+              ledgerData.getTxSet()->sizeTx(), ledgerData.getTxSet()->sizeOp(),
+              stellarValueToString(mApp.getConfig(), ledgerData.getValue()));
 
     auto st = getState();
     if (st != LedgerManager::LM_BOOTING_STATE &&
@@ -458,32 +453,31 @@ LedgerManagerImpl::closeLedgerIf(LedgerCloseData const& ledgerData)
         // this ledger and potentially cause issues.
         if (cm.isCatchupInitialized() && !cm.catchupWorkIsDone())
         {
-            CLOG(INFO, "Ledger")
-                << "Can't close ledger: " << ledgerAbbrev(mLastClosedLedger)
-                << "  in LM because catchup is running";
+            CLOG_INFO(
+                Ledger,
+                "Can't close ledger: {}  in LM because catchup is running",
+                ledgerAbbrev(mLastClosedLedger));
             return;
         }
 
         closeLedger(ledgerData);
-        CLOG(INFO, "Ledger")
-            << "Closed ledger: " << ledgerAbbrev(mLastClosedLedger);
+        CLOG_INFO(Ledger, "Closed ledger: {}", ledgerAbbrev(mLastClosedLedger));
     }
     else if (ledgerData.getLedgerSeq() <= mLastClosedLedger.header.ledgerSeq)
     {
-        CLOG(INFO, "Ledger")
-            << "Skipping close ledger: local state is "
-            << mLastClosedLedger.header.ledgerSeq << ", more recent than "
-            << ledgerData.getLedgerSeq();
+        CLOG_INFO(
+            Ledger,
+            "Skipping close ledger: local state is {}, more recent than {}",
+            mLastClosedLedger.header.ledgerSeq, ledgerData.getLedgerSeq());
     }
     else
     {
         if (mState != LM_CATCHING_UP_STATE)
         {
             // Out of sync, buffer what we just heard and start catchup.
-            CLOG(INFO, "Ledger")
-                << "Lost sync, local LCL is "
-                << mLastClosedLedger.header.ledgerSeq
-                << ", network closed ledger " << ledgerData.getLedgerSeq();
+            CLOG_INFO(
+                Ledger, "Lost sync, local LCL is {}, network closed ledger {}",
+                mLastClosedLedger.header.ledgerSeq, ledgerData.getLedgerSeq());
         }
 
         setState(LM_CATCHING_UP_STATE);
@@ -514,6 +508,17 @@ LedgerManagerImpl::syncMetrics()
     mApp.syncOwnMetrics();
 }
 
+void
+LedgerManagerImpl::emitNextMeta()
+{
+    releaseAssert(mNextMetaToEmit);
+    releaseAssert(mMetaStream);
+    auto streamWrite = mMetaStreamWriteTime.TimeScope();
+    mMetaStream->writeOne(*mNextMetaToEmit);
+    mMetaStream->flush();
+    mNextMetaToEmit.reset();
+}
+
 /*
     This is the main method that closes the current ledger based on
 the close context that was computed by SCP or by the historical module
@@ -525,7 +530,6 @@ LedgerManagerImpl::closeLedger(LedgerCloseData const& ledgerData)
 {
     ZoneScoped;
     auto ledgerTime = mLedgerClose.TimeScope();
-    DBTimeExcluder qtExclude(mApp);
     LogSlowExecution closeLedgerTime{"closeLedger",
                                      LogSlowExecution::Mode::MANUAL, "",
                                      std::chrono::milliseconds::max()};
@@ -534,8 +538,8 @@ LedgerManagerImpl::closeLedger(LedgerCloseData const& ledgerData)
     auto header = ltx.loadHeader();
     ++header.current().ledgerSeq;
     header.current().previousLedgerHash = mLastClosedLedger.hash;
-    CLOG(DEBUG, "Ledger") << "starting closeLedger() on ledgerSeq="
-                          << header.current().ledgerSeq;
+    CLOG_DEBUG(Ledger, "starting closeLedger() on ledgerSeq={}",
+               header.current().ledgerSeq);
 
     ZoneValue(static_cast<int64_t>(header.current().ledgerSeq));
 
@@ -550,9 +554,9 @@ LedgerManagerImpl::closeLedger(LedgerCloseData const& ledgerData)
     if (header.current().ledgerVersion >
         mApp.getConfig().LEDGER_PROTOCOL_VERSION)
     {
-        CLOG(ERROR, "Ledger")
-            << "Unknown ledger version: " << header.current().ledgerVersion;
-        CLOG(ERROR, "Ledger") << UPGRADE_STELLAR_CORE;
+        CLOG_ERROR(Ledger, "Unknown ledger version: {}",
+                   header.current().ledgerVersion);
+        CLOG_ERROR(Ledger, "{}", UPGRADE_STELLAR_CORE);
         throw std::runtime_error(
             fmt::format("cannot apply ledger with not supported version: {}",
                         header.current().ledgerVersion));
@@ -560,26 +564,25 @@ LedgerManagerImpl::closeLedger(LedgerCloseData const& ledgerData)
 
     if (txSet->previousLedgerHash() != getLastClosedLedgerHeader().hash)
     {
-        CLOG(ERROR, "Ledger")
-            << "TxSet mismatch: LCD wants "
-            << ledgerAbbrev(ledgerData.getLedgerSeq() - 1,
-                            txSet->previousLedgerHash())
-            << ", LCL is " << ledgerAbbrev(getLastClosedLedgerHeader());
+        CLOG_ERROR(Ledger, "TxSet mismatch: LCD wants {}, LCL is {}",
+                   ledgerAbbrev(ledgerData.getLedgerSeq() - 1,
+                                txSet->previousLedgerHash()),
+                   ledgerAbbrev(getLastClosedLedgerHeader()));
 
-        CLOG(ERROR, "Ledger")
-            << "Full LCL: " << xdr_to_string(getLastClosedLedgerHeader());
-        CLOG(ERROR, "Ledger") << POSSIBLY_CORRUPTED_LOCAL_DATA;
+        CLOG_ERROR(Ledger, "{}",
+                   xdr_to_string(getLastClosedLedgerHeader(), "Full LCL"));
+        CLOG_ERROR(Ledger, "{}", POSSIBLY_CORRUPTED_LOCAL_DATA);
 
         throw std::runtime_error("txset mismatch");
     }
 
     if (txSet->getContentsHash() != ledgerData.getValue().txSetHash)
     {
-        CLOG(ERROR, "Ledger")
-            << "Corrupt transaction set: TxSet hash is "
-            << txSet->getContentsHash() << ", SCP value reports "
-            << ledgerData.getValue().txSetHash;
-        CLOG(ERROR, "Ledger") << POSSIBLY_CORRUPTED_QUORUM_SET;
+        CLOG_ERROR(
+            Ledger,
+            "Corrupt transaction set: TxSet hash is {}, SCP value reports {}",
+            txSet->getContentsHash(), ledgerData.getValue().txSetHash);
+        CLOG_ERROR(Ledger, "{}", POSSIBLY_CORRUPTED_QUORUM_SET);
 
         throw std::runtime_error("corrupt transaction set");
     }
@@ -594,6 +597,16 @@ LedgerManagerImpl::closeLedger(LedgerCloseData const& ledgerData)
     std::unique_ptr<LedgerCloseMeta> ledgerCloseMeta;
     if (mMetaStream)
     {
+        if (mNextMetaToEmit)
+        {
+            releaseAssert(mNextMetaToEmit->v0().ledgerHeader.hash ==
+                          getLastClosedLedgerHeader().hash);
+            emitNextMeta();
+        }
+        releaseAssert(!mNextMetaToEmit);
+        // Write to a local variable rather than a member variable first: this
+        // enables us to discard incomplete meta and retry, should anything in
+        // this method throw.
         ledgerCloseMeta = std::make_unique<LedgerCloseMeta>();
         ledgerCloseMeta->v0().txProcessing.reserve(txSet->sizeTx());
         txSet->toXDR(ledgerCloseMeta->v0().txSet);
@@ -604,7 +617,7 @@ LedgerManagerImpl::closeLedger(LedgerCloseData const& ledgerData)
     // sorted such that sequence numbers are respected
     vector<TransactionFrameBasePtr> txs = ledgerData.getTxSet()->sortForApply();
 
-    // first, prefetch source accounts fot txset, then charge fees
+    // first, prefetch source accounts for txset, then charge fees
     prefetchTxSourceIds(txs);
     processFeesSeqNums(txs, ltx, txSet->getBaseFee(header.current()),
                        ledgerCloseMeta);
@@ -613,8 +626,7 @@ LedgerManagerImpl::closeLedger(LedgerCloseData const& ledgerData)
     txResultSet.results.reserve(txs.size());
     applyTransactions(txs, ltx, txResultSet, ledgerCloseMeta);
 
-    ltx.loadHeader().current().txSetResultHash =
-        sha256(xdr::xdr_to_opaque(txResultSet));
+    ltx.loadHeader().current().txSetResultHash = xdrSha256(txResultSet);
 
     // apply any upgrades that were decided during consensus
     // this must be done after applying transactions as the txset
@@ -635,7 +647,7 @@ LedgerManagerImpl::closeLedger(LedgerCloseData const& ledgerData)
         case Upgrades::UpgradeValidity::INVALID:
             throw std::runtime_error(
                 fmt::format(FMT_STRING("Invalid upgrade at index {}: {}"), i,
-                            xdr_to_string(lupgrade)));
+                            xdr_to_string(lupgrade, "LedgerUpgrade")));
         }
 
         try
@@ -655,7 +667,7 @@ LedgerManagerImpl::closeLedger(LedgerCloseData const& ledgerData)
             }
             // Note: Index from 1 rather than 0 to match the behavior of
             // storeTransaction and storeTransactionFee.
-            if (mApp.getConfig().MODE_STORES_HISTORY)
+            if (mApp.getConfig().MODE_STORES_HISTORY_MISC)
             {
                 Upgrades::storeUpgradeHistory(getDatabase(), ledgerSeq,
                                               lupgrade, changes,
@@ -665,22 +677,39 @@ LedgerManagerImpl::closeLedger(LedgerCloseData const& ledgerData)
         }
         catch (std::runtime_error& e)
         {
-            CLOG(ERROR, "Ledger") << "Exception during upgrade: " << e.what();
+            CLOG_ERROR(Ledger, "Exception during upgrade: {}", e.what());
         }
         catch (...)
         {
-            CLOG(ERROR, "Ledger") << "Unknown exception during upgrade";
+            CLOG_ERROR(Ledger, "Unknown exception during upgrade");
         }
     }
 
     ledgerClosed(ltx);
 
+    if (ledgerData.getExpectedHash() &&
+        *ledgerData.getExpectedHash() != mLastClosedLedger.hash)
+    {
+        throw std::runtime_error("Local node's ledger corrupted during close");
+    }
+
     if (mMetaStream)
     {
         releaseAssert(ledgerCloseMeta);
         ledgerCloseMeta->v0().ledgerHeader = mLastClosedLedger;
-        mMetaStream->writeOne(*ledgerCloseMeta);
-        mMetaStream->flush();
+
+        // At this point we've got a complete meta and we can store it to the
+        // member variable: if we throw while committing below, we will at worst
+        // emit duplicate meta, when retrying.
+        mNextMetaToEmit = std::move(ledgerCloseMeta);
+
+        // If the LedgerCloseData provided an expected hash, then we validated
+        // it above.
+        if (!mApp.getConfig().EXPERIMENTAL_PRECAUTION_DELAY_META ||
+            ledgerData.getExpectedHash())
+        {
+            emitNextMeta();
+        }
     }
 
     // The next 4 steps happen in a relatively non-obvious, subtle order.
@@ -714,22 +743,28 @@ LedgerManagerImpl::closeLedger(LedgerCloseData const& ledgerData)
     // step 4
     mApp.getBucketManager().forgetUnreferencedBuckets();
 
-    // Maybe sleep for parameterized amount of time in simulation mode
-    auto sleepFor = std::chrono::microseconds{
-        mApp.getConfig().OP_APPLY_SLEEP_TIME_FOR_TESTING * txSet->sizeOp()};
-    std::chrono::microseconds applicationTime =
-        closeLedgerTime.checkElapsedTime();
-    if (applicationTime < sleepFor)
+    if (!mApp.getConfig().getOpApplySleepTimeForTesting().empty())
     {
-        sleepFor -= applicationTime;
-        CLOG(DEBUG, "Perf") << "Simulate application: sleep for "
-                            << sleepFor.count() << " microseconds";
-        std::this_thread::sleep_for(sleepFor);
+        // Sleep for a parameterized amount of time in simulation mode
+        std::chrono::microseconds sleepFor{0};
+        for (int i = 0; i < txSet->sizeOp(); i++)
+        {
+            sleepFor +=
+                rand_element(mApp.getConfig().getOpApplySleepTimeForTesting());
+        }
+        std::chrono::microseconds applicationTime =
+            closeLedgerTime.checkElapsedTime();
+        if (applicationTime < sleepFor)
+        {
+            sleepFor -= applicationTime;
+            CLOG_DEBUG(Perf, "Simulate application: sleep for {} microseconds",
+                       sleepFor.count());
+            std::this_thread::sleep_for(sleepFor);
+        }
     }
 
     std::chrono::duration<double> ledgerTimeSeconds = ledgerTime.Stop();
-    CLOG(DEBUG, "Perf") << "Applied ledger in " << ledgerTimeSeconds.count()
-                        << " seconds";
+    CLOG_DEBUG(Perf, "Applied ledger in {} seconds", ledgerTimeSeconds.count());
 }
 
 void
@@ -743,6 +778,25 @@ LedgerManagerImpl::deleteOldEntries(Database& db, uint32_t ledgerSeq,
     deleteOldTransactionHistoryEntries(db, ledgerSeq, count);
     HerderPersistence::deleteOldEntries(db, ledgerSeq, count);
     Upgrades::deleteOldEntries(db, ledgerSeq, count);
+    db.clearPreparedStatementCache();
+    txscope.commit();
+}
+
+void
+LedgerManagerImpl::deleteNewerEntries(Database& db, uint32_t ledgerSeq)
+{
+    ZoneScoped;
+    soci::transaction txscope(db.getSession());
+    db.clearPreparedStatementCache();
+
+    // as we use this method only when we apply buckets, we have to preserve
+    // data for everything but ledger header
+    LedgerHeaderUtils::deleteNewerEntries(db, ledgerSeq);
+    // for other data we delete data *after*
+    ++ledgerSeq;
+    deleteNewerTransactionHistoryEntries(db, ledgerSeq);
+    HerderPersistence::deleteNewerEntries(db, ledgerSeq);
+    Upgrades::deleteNewerEntries(db, ledgerSeq);
     db.clearPreparedStatementCache();
     txscope.commit();
 }
@@ -793,14 +847,13 @@ LedgerManagerImpl::setupLedgerCloseMetaStream()
         if (std::regex_match(cfg.METADATA_OUTPUT_STREAM, sm, fdrx))
         {
             int fd = std::stoi(sm[1]);
-            CLOG(INFO, "Ledger")
-                << "Streaming metadata to file descriptor " << fd;
+            CLOG_INFO(Ledger, "Streaming metadata to file descriptor {}", fd);
             mMetaStream->fdopen(fd);
         }
         else
         {
-            CLOG(INFO, "Ledger") << "Streaming metadata to '"
-                                 << cfg.METADATA_OUTPUT_STREAM << "'";
+            CLOG_INFO(Ledger, "Streaming metadata to '{}'",
+                      cfg.METADATA_OUTPUT_STREAM);
             mMetaStream->open(cfg.METADATA_OUTPUT_STREAM);
         }
     }
@@ -810,13 +863,13 @@ void
 LedgerManagerImpl::advanceLedgerPointers(LedgerHeader const& header,
                                          bool debugLog)
 {
-    auto ledgerHash = sha256(xdr::xdr_to_opaque(header));
+    auto ledgerHash = xdrSha256(header);
 
     if (debugLog)
     {
-        CLOG(DEBUG, "Ledger")
-            << "Advancing LCL: " << ledgerAbbrev(mLastClosedLedger) << " -> "
-            << ledgerAbbrev(header, ledgerHash);
+        CLOG_DEBUG(Ledger, "Advancing LCL: {} -> {}",
+                   ledgerAbbrev(mLastClosedLedger),
+                   ledgerAbbrev(header, ledgerHash));
     }
 
     mLastClosedLedger.hash = ledgerHash;
@@ -829,8 +882,8 @@ LedgerManagerImpl::processFeesSeqNums(
     int64_t baseFee, std::unique_ptr<LedgerCloseMeta> const& ledgerCloseMeta)
 {
     ZoneScoped;
-    CLOG(DEBUG, "Ledger")
-        << "processing fees and sequence numbers with base fee " << baseFee;
+    CLOG_DEBUG(Ledger, "processing fees and sequence numbers with base fee {}",
+               baseFee);
     int index = 0;
     try
     {
@@ -854,7 +907,7 @@ LedgerManagerImpl::processFeesSeqNums(
             // txs counting from 1, not 0. We preserve this for the time being
             // in case anyone depends on it.
             ++index;
-            if (mApp.getConfig().MODE_STORES_HISTORY)
+            if (mApp.getConfig().MODE_STORES_HISTORY_MISC)
             {
                 storeTransactionFee(mApp.getDatabase(), ledgerSeq, tx, changes,
                                     index);
@@ -865,9 +918,9 @@ LedgerManagerImpl::processFeesSeqNums(
     }
     catch (std::exception& e)
     {
-        CLOG(FATAL, "Ledger")
-            << "processFeesSeqNums error @ " << index << " : " << e.what();
-        CLOG(FATAL, "Ledger") << REPORT_INTERNAL_BUG;
+        CLOG_FATAL(Ledger, "processFeesSeqNums error @ {} : {}", index,
+                   e.what());
+        CLOG_FATAL(Ledger, "{}", REPORT_INTERNAL_BUG);
         throw;
     }
 }
@@ -879,7 +932,7 @@ LedgerManagerImpl::prefetchTxSourceIds(
     ZoneScoped;
     if (mApp.getConfig().PREFETCH_BATCH_SIZE > 0)
     {
-        std::unordered_set<LedgerKey> keys;
+        UnorderedSet<LedgerKey> keys;
         for (auto const& tx : txs)
         {
             tx->insertKeysForFeeProcessing(keys);
@@ -895,7 +948,7 @@ LedgerManagerImpl::prefetchTransactionData(
     ZoneScoped;
     if (mApp.getConfig().PREFETCH_BATCH_SIZE > 0)
     {
-        std::unordered_set<LedgerKey> keys;
+        UnorderedSet<LedgerKey> keys;
         for (auto const& tx : txs)
         {
             tx->insertKeysForTxApply(keys);
@@ -927,9 +980,8 @@ LedgerManagerImpl::applyTransactions(
                             });
         mOperationCount.Update(static_cast<int64_t>(numOps));
         TracyPlot("ledger.operation.count", static_cast<int64_t>(numOps));
-        CLOG(INFO, "Tx") << fmt::format("applying ledger {} (txs:{}, ops:{})",
-                                        ltx.loadHeader().current().ledgerSeq,
-                                        numTxs, numOps);
+        CLOG_INFO(Tx, "applying ledger {} (txs:{}, ops:{})",
+                  ltx.loadHeader().current().ledgerSeq, numTxs, numOps);
     }
 
     prefetchTransactionData(txs);
@@ -939,12 +991,10 @@ LedgerManagerImpl::applyTransactions(
         ZoneNamedN(txZone, "applyTransaction", true);
         auto txTime = mTransactionApply.TimeScope();
         TransactionMeta tm(2);
-        CLOG(DEBUG, "Tx") << " tx#" << index << " = "
-                          << hexAbbrev(tx->getContentsHash())
-                          << " ops=" << tx->getNumOperations()
-                          << " txseq=" << tx->getSeqNum() << " (@ "
-                          << mApp.getConfig().toShortString(tx->getSourceID())
-                          << ")";
+        CLOG_DEBUG(Tx, " tx#{} = {} ops={} txseq={} (@ {})", index,
+                   hexAbbrev(tx->getContentsHash()), tx->getNumOperations(),
+                   tx->getSeqNum(),
+                   mApp.getConfig().toShortString(tx->getSourceID()));
         tx->apply(mApp, ltx, tm);
 
         TransactionResultPair results;
@@ -975,7 +1025,7 @@ LedgerManagerImpl::applyTransactions(
         // txs counting from 1, not 0. We preserve this for the time being
         // in case anyone depends on it.
         ++index;
-        if (mApp.getConfig().MODE_STORES_HISTORY)
+        if (mApp.getConfig().MODE_STORES_HISTORY_MISC)
         {
             auto ledgerSeq = ltx.loadHeader().current().ledgerSeq;
             storeTransaction(mApp.getDatabase(), ledgerSeq, tx, tm,
@@ -993,9 +1043,8 @@ LedgerManagerImpl::logTxApplyMetrics(AbstractLedgerTxn& ltx, size_t numTxs,
     auto ledgerSeq = ltx.loadHeader().current().ledgerSeq;
     auto hitRate = mApp.getLedgerTxnRoot().getPrefetchHitRate() * 100;
 
-    CLOG(DEBUG, "Ledger") << "Ledger: " << ledgerSeq << " txs: " << numTxs
-                          << ", ops: " << numOps
-                          << ", prefetch hit rate (%): " << hitRate;
+    CLOG_DEBUG(Ledger, "Ledger: {} txs: {}, ops: {}, prefetch hit rate (%): {}",
+               ledgerSeq, numTxs, numOps, hitRate);
 
     // We lose a bit of precision here, as medida only accepts int64_t
     mPrefetchHitRate.Update(std::llround(hitRate));
@@ -1006,12 +1055,12 @@ void
 LedgerManagerImpl::storeCurrentLedger(LedgerHeader const& header)
 {
     ZoneScoped;
-    if (mApp.getConfig().MODE_STORES_HISTORY)
+    if (mApp.getConfig().MODE_STORES_HISTORY_LEDGERHEADERS)
     {
         LedgerHeaderUtils::storeInDatabase(mApp.getDatabase(), header);
     }
 
-    Hash hash = sha256(xdr::xdr_to_opaque(header));
+    Hash hash = xdrSha256(header);
     assert(!isZero(hash));
     mApp.getPersistentState().setState(PersistentState::kLastClosedLedger,
                                        binToHex(hash));
@@ -1053,9 +1102,9 @@ LedgerManagerImpl::ledgerClosed(AbstractLedgerTxn& ltx)
     ZoneScoped;
     auto ledgerSeq = ltx.loadHeader().current().ledgerSeq;
     auto ledgerVers = ltx.loadHeader().current().ledgerVersion;
-    CLOG(TRACE, "Ledger") << fmt::format(
-        "sealing ledger {} with version {}, sending to bucket list", ledgerSeq,
-        ledgerVers);
+    CLOG_TRACE(Ledger,
+               "sealing ledger {} with version {}, sending to bucket list",
+               ledgerSeq, ledgerVers);
 
     transferLedgerEntriesToBucketList(ltx, ledgerSeq, ledgerVers);
 

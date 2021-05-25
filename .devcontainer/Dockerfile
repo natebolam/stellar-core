@@ -2,7 +2,7 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License. See https://go.microsoft.com/fwlink/?linkid=2090316 for license information.
 #-------------------------------------------------------------------------------------------------------------
-FROM ubuntu:xenial
+FROM ubuntu:focal
 
 # Avoid warnings by switching to noninteractive
 ENV DEBIAN_FRONTEND=noninteractive
@@ -15,12 +15,30 @@ ARG USERNAME=vscode
 ARG USER_UID=1000
 ARG USER_GID=$USER_UID
 
-# Configure apt and install packages
+# setup apt / certificates
 RUN apt-get update \
-    && apt-get -y install --no-install-recommends apt-utils dialog 2>&1 \
-    #
-    # Verify git, process tools, lsb-release (common in install instructions for CLIs) installed
-    && apt-get -y install git iproute2 procps lsb-release \
+    && apt-get -y install --no-install-recommends apt-utils dialog ca-certificates 2>&1
+
+# use apt mirror instead of default archives if specified
+# to use, specify the build arg or as an env var on the host machine
+# e.g.:
+#   mirror://mirrors.ubuntu.com/mirrors.txt
+#   mirror://mirrors.ubuntu.com/<country-code>.txt
+#   http://<country-code>.archive.ubuntu.com/ubuntu/
+#   http://<aws-region>.ec2.archive.ubuntu.com/ubuntu
+ARG APT_MIRROR=
+RUN if [ ! -z "${APT_MIRROR}" ]; then \
+    sed -i \
+        -e "s|http://archive.ubuntu.com/ubuntu/|${APT_MIRROR}|" \
+        -e "s|http://security.ubuntu.com/ubuntu/|${APT_MIRROR}|" \
+        /etc/apt/sources.list \
+    ; fi \
+    ; grep "^[^#;]" /etc/apt/sources.list
+
+# install base container packages and prep for VSCode
+RUN apt-get update \
+    # Verify process tools, lsb-release (common in install instructions for CLIs) installed
+    && apt-get -y install iproute2 procps lsb-release \
     #
     # Create a non-root user to use if preferred - see https://aka.ms/vscode-remote/containers/non-root-user.
     && groupadd --gid $USER_GID $USERNAME \
@@ -28,32 +46,33 @@ RUN apt-get update \
     # [Optional] Add sudo support for the non-root user
     && apt-get install -y sudo \
     && echo $USERNAME ALL=\(root\) NOPASSWD:ALL > /etc/sudoers.d/$USERNAME\
-    && chmod 0440 /etc/sudoers.d/$USERNAME \
-    #
-    # Clean up
-    && apt-get autoremove -y \
-    && apt-get clean -y \
-    && rm -rf /var/lib/apt/lists/*
+    && chmod 0440 /etc/sudoers.d/$USERNAME
 
 # Add test tool chain
 # NOTE: newer version of the compilers are not
 #    provided by stock distributions
 #    and are provided by the /test toolchain
-RUN sudo apt-get update \
-    && sudo apt-get -y install software-properties-common \
-    && sudo add-apt-repository ppa:ubuntu-toolchain-r/test \
-    && sudo apt-get update
+# RUN apt-get -y install software-properties-common \
+#     && add-apt-repository ppa:ubuntu-toolchain-r/test \
+#    && apt-get update
 
 # Install common compilation tools
-RUN sudo apt-get -y install git build-essential pkg-config autoconf automake libtool bison flex libpq-dev parallel
+RUN apt-get -y install git build-essential pkg-config autoconf automake libtool bison flex libpq-dev parallel libunwind-dev
 
 # Update compiler tools
-RUN sudo apt-get -y install gcc-6 g++-6 cpp-6 libstdc++6
-ENV CC=gcc-6
-ENV CXX=g++-6
+RUN apt-get -y install libstdc++-8-dev clang-format-10 ccache
+
+# gcc
+RUN apt-get -y install cpp-8 gcc-8 g++-8
+# clang
+RUN apt-get -y install clang-10 llvm-10
+
+# clang by default
+ENV CC=clang-10
+ENV CXX=clang++-10
 
 # Install postgresql to enable tests under make check
-RUN sudo apt-get -y install postgresql
+RUN apt-get -y install postgresql
 
 # Set up locale
 RUN sed -i -e 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen \

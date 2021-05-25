@@ -7,8 +7,8 @@
 #include "ledger/LedgerTxn.h"
 #include "main/Application.h"
 #include "util/Logging.h"
+#include "util/UnorderedMap.h"
 #include <fmt/format.h>
-#include <unordered_map>
 
 namespace stellar
 {
@@ -30,7 +30,7 @@ calculateDelta(LedgerEntry const* current, LedgerEntry const* previous)
 
 static void
 updateChangedSubEntriesCount(
-    std::unordered_map<AccountID, SubEntriesChange>& subEntriesChange,
+    UnorderedMap<AccountID, SubEntriesChange>& subEntriesChange,
     LedgerEntry const* current, LedgerEntry const* previous)
 {
     auto valid = current ? current : previous;
@@ -84,12 +84,12 @@ updateChangedSubEntriesCount(
 
 static void
 updateChangedSubEntriesCount(
-    std::unordered_map<AccountID, SubEntriesChange>& subEntriesChange,
-    std::shared_ptr<GeneralizedLedgerEntry const> const& genCurrent,
-    std::shared_ptr<GeneralizedLedgerEntry const> const& genPrevious)
+    UnorderedMap<AccountID, SubEntriesChange>& subEntriesChange,
+    std::shared_ptr<InternalLedgerEntry const> const& genCurrent,
+    std::shared_ptr<InternalLedgerEntry const> const& genPrevious)
 {
     auto type = genCurrent ? genCurrent->type() : genPrevious->type();
-    if (type == GeneralizedLedgerEntryType::LEDGER_ENTRY)
+    if (type == InternalLedgerEntryType::LEDGER_ENTRY)
     {
         auto const* current = genCurrent ? &genCurrent->ledgerEntry() : nullptr;
         auto const* previous =
@@ -121,7 +121,7 @@ AccountSubEntriesCountIsValid::checkOnOperationApply(
     Operation const& operation, OperationResult const& result,
     LedgerTxnDelta const& ltxDelta)
 {
-    std::unordered_map<AccountID, SubEntriesChange> subEntriesChange;
+    UnorderedMap<AccountID, SubEntriesChange> subEntriesChange;
     for (auto const& entryDelta : ltxDelta.entry)
     {
         updateChangedSubEntriesCount(subEntriesChange,
@@ -151,7 +151,7 @@ AccountSubEntriesCountIsValid::checkOnOperationApply(
         assert(entryDelta.second.previous);
 
         auto const& genPrevious = *entryDelta.second.previous;
-        if (genPrevious.type() != GeneralizedLedgerEntryType::LEDGER_ENTRY)
+        if (genPrevious.type() != InternalLedgerEntryType::LEDGER_ENTRY)
         {
             continue;
         }

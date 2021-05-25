@@ -9,6 +9,7 @@
 #include "xdr/Stellar-SCP.h"
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace soci
@@ -40,14 +41,15 @@ class HerderPersistence
                                          uint32_t ledgerCount,
                                          XDROutputFileStream& scpHistory);
     // quorum information lookup
-    static optional<Hash> getNodeQuorumSet(Database& db, soci::session& sess,
-                                           NodeID const& nodeID);
+    static std::optional<Hash>
+    getNodeQuorumSet(Database& db, soci::session& sess, NodeID const& nodeID);
     static SCPQuorumSetPtr getQuorumSet(Database& db, soci::session& sess,
                                         Hash const& qSetHash);
 
     static void dropAll(Database& db);
     static void deleteOldEntries(Database& db, uint32_t ledgerSeq,
                                  uint32_t count);
+    static void deleteNewerEntries(Database& db, uint32_t ledgerSeq);
 
     static void createQuorumTrackingTable(soci::session& sess);
 };

@@ -7,7 +7,7 @@
 #include "crypto/SecretKey.h"
 #include "herder/LedgerCloseData.h"
 #include "overlay/StellarXDR.h"
-#include "util/optional.h"
+#include <optional>
 
 namespace stellar
 {
@@ -45,19 +45,28 @@ struct ValidationResult
 
 struct SetOptionsArguments
 {
-    optional<int> masterWeight;
-    optional<int> lowThreshold;
-    optional<int> medThreshold;
-    optional<int> highThreshold;
-    optional<Signer> signer;
-    optional<uint32_t> setFlags;
-    optional<uint32_t> clearFlags;
-    optional<AccountID> inflationDest;
-    optional<std::string> homeDomain;
+    std::optional<int> masterWeight;
+    std::optional<int> lowThreshold;
+    std::optional<int> medThreshold;
+    std::optional<int> highThreshold;
+    std::optional<Signer> signer;
+    std::optional<uint32_t> setFlags;
+    std::optional<uint32_t> clearFlags;
+    std::optional<AccountID> inflationDest;
+    std::optional<std::string> homeDomain;
 
     friend SetOptionsArguments operator|(SetOptionsArguments const& x,
                                          SetOptionsArguments const& y);
 };
+
+struct SetTrustLineFlagsArguments
+{
+    uint32_t setFlags = 0;
+    uint32_t clearFlags = 0;
+};
+
+SetTrustLineFlagsArguments operator|(SetTrustLineFlagsArguments const& x,
+                                     SetTrustLineFlagsArguments const& y);
 
 TransactionResult expectedResult(int64_t fee, size_t opsCount,
                                  TransactionResultCode code,
@@ -74,12 +83,12 @@ void validateTxResults(TransactionFramePtr const& tx, Application& app,
 TxSetResultMeta
 closeLedgerOn(Application& app, uint32 ledgerSeq, time_t closeTime,
               std::vector<TransactionFrameBasePtr> const& txs = {},
-              bool skipValid = false);
+              bool strictOrder = false);
 
 TxSetResultMeta
 closeLedgerOn(Application& app, uint32 ledgerSeq, int day, int month, int year,
               std::vector<TransactionFrameBasePtr> const& txs = {},
-              bool skipValid = false);
+              bool strictOrder = false);
 
 SecretKey getRoot(Hash const& networkID);
 
@@ -110,6 +119,9 @@ TransactionFramePtr transactionFromOperations(Application& app,
                                               int fee = 0);
 
 Operation changeTrust(Asset const& asset, int64_t limit);
+
+Operation allowTrust(PublicKey const& trustor, Asset const& asset,
+                     uint32_t authorize);
 
 Operation allowTrust(PublicKey const& trustor, Asset const& asset,
                      uint32_t authorize);
@@ -191,14 +203,24 @@ SetOptionsArguments clearFlags(uint32_t clearFlags);
 SetOptionsArguments setInflationDestination(AccountID inflationDest);
 SetOptionsArguments setHomeDomain(std::string const& homeDomain);
 
+Operation setTrustLineFlags(PublicKey const& trustor, Asset const& asset,
+                            SetTrustLineFlagsArguments const& arguments);
+
+SetTrustLineFlagsArguments setTrustLineFlags(uint32_t setFlags);
+SetTrustLineFlagsArguments clearTrustLineFlags(uint32_t clearFlags);
+
 Operation beginSponsoringFutureReserves(PublicKey const& sponsoredID);
 Operation endSponsoringFutureReserves();
 Operation revokeSponsorship(LedgerKey const& key);
 Operation revokeSponsorship(AccountID const& accID, SignerKey const& key);
 
+Operation clawback(AccountID const& from, Asset const& asset, int64_t amount);
+Operation clawbackClaimableBalance(ClaimableBalanceID const& balanceID);
+
 Asset makeNativeAsset();
 Asset makeInvalidAsset();
 Asset makeAsset(SecretKey const& issuer, std::string const& code);
+Asset makeAssetAlphanum12(SecretKey const& issuer, std::string const& code);
 
 OperationFrame const& getFirstOperationFrame(TransactionFrame const& tx);
 OperationResult const& getFirstResult(TransactionFrame const& tx);

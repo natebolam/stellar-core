@@ -18,10 +18,10 @@
 #include "transactions/TransactionUtils.h"
 #include "util/Decoder.h"
 #include "util/Math.h"
+#include "util/UnorderedSet.h"
 #include "util/XDROperators.h"
 #include "work/WorkScheduler.h"
 #include <random>
-#include <unordered_set>
 #include <vector>
 
 using namespace stellar;
@@ -36,7 +36,7 @@ struct BucketListGenerator
     Application::pointer mAppGenerate;
     Application::pointer mAppApply;
     uint32_t mLedgerSeq;
-    std::unordered_set<LedgerKey> mLiveKeys;
+    UnorderedSet<LedgerKey> mLiveKeys;
 
   public:
     BucketListGenerator()
@@ -59,7 +59,6 @@ struct BucketListGenerator
     {
         std::map<std::string, std::shared_ptr<Bucket>> buckets;
         auto has = getHistoryArchiveState();
-        has.prepareForPublish(*mAppApply);
         auto& wm = mAppApply->getWorkScheduler();
         wm.executeWork<T>(buckets, has,
                           mAppApply->getConfig().LEDGER_PROTOCOL_VERSION,
@@ -133,7 +132,7 @@ struct BucketListGenerator
     virtual std::vector<LedgerKey>
     generateDeadEntries(AbstractLedgerTxn& ltx)
     {
-        std::unordered_set<LedgerKey> live(mLiveKeys);
+        UnorderedSet<LedgerKey> live(mLiveKeys);
         std::vector<LedgerKey> dead;
         while (dead.size() < 2 && !live.empty())
         {
@@ -165,7 +164,7 @@ struct BucketListGenerator
                 BucketOutputIterator out(bmApply.getTmpDir(), keepDead, meta,
                                          mergeCounters, mClock.getIOContext(),
                                          /*doFsync=*/true);
-                for (BucketInputIterator in (level.getCurr()); in; ++in)
+                for (BucketInputIterator in(level.getCurr()); in; ++in)
                 {
                     out.put(*in);
                 }
@@ -175,7 +174,7 @@ struct BucketListGenerator
                 BucketOutputIterator out(bmApply.getTmpDir(), keepDead, meta,
                                          mergeCounters, mClock.getIOContext(),
                                          /*doFsync=*/true);
-                for (BucketInputIterator in (level.getSnap()); in; ++in)
+                for (BucketInputIterator in(level.getSnap()); in; ++in)
                 {
                     out.put(*in);
                 }
@@ -234,7 +233,7 @@ struct SelectBucketListGenerator : public BucketListGenerator
     {
         if (mLedgerSeq == mSelectLedger)
         {
-            std::unordered_set<LedgerKey> filteredKeys(mLiveKeys.size());
+            UnorderedSet<LedgerKey> filteredKeys(mLiveKeys.size());
             std::copy_if(
                 mLiveKeys.begin(), mLiveKeys.end(),
                 std::inserter(filteredKeys, filteredKeys.end()),
@@ -673,6 +672,12 @@ TEST_CASE("BucketListIsConsistentWithDatabase bucket bounds",
                 }
             }
             return entries;
+        }
+
+        virtual std::vector<LedgerKey>
+        generateDeadEntries(AbstractLedgerTxn& ltx)
+        {
+            return {};
         }
     };
 

@@ -8,6 +8,8 @@
 #include "transactions/BumpSequenceOpFrame.h"
 #include "transactions/ChangeTrustOpFrame.h"
 #include "transactions/ClaimClaimableBalanceOpFrame.h"
+#include "transactions/ClawbackClaimableBalanceOpFrame.h"
+#include "transactions/ClawbackOpFrame.h"
 #include "transactions/CreateAccountOpFrame.h"
 #include "transactions/CreateClaimableBalanceOpFrame.h"
 #include "transactions/CreatePassiveSellOfferOpFrame.h"
@@ -22,6 +24,7 @@
 #include "transactions/PaymentOpFrame.h"
 #include "transactions/RevokeSponsorshipOpFrame.h"
 #include "transactions/SetOptionsOpFrame.h"
+#include "transactions/SetTrustLineFlagsOpFrame.h"
 #include "transactions/TransactionFrame.h"
 #include "transactions/TransactionUtils.h"
 #include "util/Logging.h"
@@ -97,6 +100,12 @@ OperationFrame::makeHelper(Operation const& op, OperationResult& res,
                                                                     tx);
     case REVOKE_SPONSORSHIP:
         return std::make_shared<RevokeSponsorshipOpFrame>(op, res, tx);
+    case CLAWBACK:
+        return std::make_shared<ClawbackOpFrame>(op, res, tx);
+    case CLAWBACK_CLAIMABLE_BALANCE:
+        return std::make_shared<ClawbackClaimableBalanceOpFrame>(op, res, tx);
+    case SET_TRUST_LINE_FLAGS:
+        return std::make_shared<SetTrustLineFlagsOpFrame>(op, res, tx);
     default:
         ostringstream err;
         err << "Unknown Tx type: " << op.body.type();
@@ -117,18 +126,12 @@ OperationFrame::apply(SignatureChecker& signatureChecker,
 {
     ZoneScoped;
     bool res;
-    if (Logging::logTrace("Tx"))
-    {
-        CLOG(TRACE, "Tx") << "Operation: " << xdr_to_string(mOperation);
-    }
+    CLOG_TRACE(Tx, "{}", xdr_to_string(mOperation, "Operation"));
     res = checkValid(signatureChecker, ltx, true);
     if (res)
     {
         res = doApply(ltx);
-        if (Logging::logTrace("Tx"))
-        {
-            CLOG(TRACE, "Tx") << "Operation result: " << xdr_to_string(mResult);
-        }
+        CLOG_TRACE(Tx, "{}", xdr_to_string(mResult, "OperationResult"));
     }
 
     return res;
@@ -252,8 +255,7 @@ OperationFrame::resetResultSuccess()
 }
 
 void
-OperationFrame::insertLedgerKeysToPrefetch(
-    std::unordered_set<LedgerKey>& keys) const
+OperationFrame::insertLedgerKeysToPrefetch(UnorderedSet<LedgerKey>& keys) const
 {
     // Do nothing by default
     return;

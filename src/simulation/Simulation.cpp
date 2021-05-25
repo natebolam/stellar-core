@@ -14,6 +14,7 @@
 #include "test/test.h"
 #include "util/Logging.h"
 #include "util/Math.h"
+#include "util/finally.h"
 #include "util/types.h"
 
 #include <fmt/format.h>
@@ -378,6 +379,14 @@ Simulation::crankAllNodes(int nbTicks)
 
     VirtualTimer mainQuantumTimer(*mIdleApp);
 
+    bool debugFmt = Logging::logDebug("Process");
+
+    auto h = gsl::finally([&]() {
+        if (debugFmt)
+        {
+            Logging::setFmt("<test>");
+        }
+    });
     int i = 0;
     do
     {
@@ -436,6 +445,11 @@ Simulation::crankAllNodes(int nbTicks)
                         continue;
                     }
                 }
+                if (debugFmt)
+                {
+                    Logging::setFmt(fmt::format(
+                        "<test-{}>", p.second.mApp->getConfig().PEER_PORT));
+                }
                 crankNode(p.first, nextTime);
             }
         } while (appBehind);
@@ -465,7 +479,8 @@ Simulation::haveAllExternalized(uint32 num, uint32 maxSpread)
     {
         auto app = it->second.mApp;
         auto n = app->getLedgerManager().getLastClosedLedgerNum();
-        LOG(DEBUG) << app->getConfig().PEER_PORT << " @ ledger#: " << n;
+        LOG_DEBUG(DEFAULT_LOG, "{} @ ledger#: {}", app->getConfig().PEER_PORT,
+                  n);
 
         if (n < min)
             min = n;
@@ -499,9 +514,9 @@ Simulation::crankForAtMost(VirtualClock::duration seconds, bool finalCrank)
         ;
 
     if (stop)
-        LOG(INFO) << "Simulation timed out";
+        LOG_INFO(DEFAULT_LOG, "Simulation timed out");
     else
-        LOG(INFO) << "Simulation complete";
+        LOG_INFO(DEFAULT_LOG, "Simulation complete");
 
     if (finalCrank)
     {

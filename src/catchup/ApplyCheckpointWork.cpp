@@ -20,13 +20,15 @@
 #include <fmt/format.h>
 #include <medida/meter.h>
 #include <medida/metrics_registry.h>
+#include <optional>
 
 namespace stellar
 {
 
 ApplyCheckpointWork::ApplyCheckpointWork(Application& app,
                                          TmpDir const& downloadDir,
-                                         LedgerRange const& range)
+                                         LedgerRange const& range,
+                                         OnFailureCallback cb)
     : BasicWork(app,
                 "apply-ledgers-" +
                     fmt::format("{}-{}", range.mFirst, range.limit()),
@@ -35,6 +37,7 @@ ApplyCheckpointWork::ApplyCheckpointWork(Application& app,
     , mLedgerRange(range)
     , mCheckpoint(
           app.getHistoryManager().checkpointContainingLedger(range.mFirst))
+    , mOnFailure(cb)
     , mApplyLedgerSuccess(app.getMetrics().NewMeter(
           {"history", "apply-ledger-chain", "success"}, "event"))
     , mApplyLedgerFailure(app.getMetrics().NewMeter(
@@ -84,10 +87,9 @@ ApplyCheckpointWork::openInputFiles()
     FileTransferInfo hi(mDownloadDir, HISTORY_FILE_TYPE_LEDGER, mCheckpoint);
     FileTransferInfo ti(mDownloadDir, HISTORY_FILE_TYPE_TRANSACTIONS,
                         mCheckpoint);
-    CLOG(DEBUG, "History") << "Replaying ledger headers from "
-                           << hi.localPath_nogz();
-    CLOG(DEBUG, "History") << "Replaying transactions from "
-                           << ti.localPath_nogz();
+    CLOG_DEBUG(History, "Replaying ledger headers from {}",
+               hi.localPath_nogz());
+    CLOG_DEBUG(History, "Replaying transactions from {}", ti.localPath_nogz());
     mHdrIn.open(hi.localPath_nogz());
     mTxIn.open(ti.localPath_nogz());
     mTxHistoryEntry = TransactionHistoryEntry();
@@ -110,8 +112,8 @@ ApplyCheckpointWork::getCurrentTxSet()
     {
         if (mTxHistoryEntry.ledgerSeq < seq)
         {
-            CLOG(DEBUG, "History")
-                << "Skipping txset for ledger " << mTxHistoryEntry.ledgerSeq;
+            CLOG_DEBUG(History, "Skipping txset for ledger {}",
+                       mTxHistoryEntry.ledgerSeq);
         }
         else if (mTxHistoryEntry.ledgerSeq > seq)
         {
@@ -120,13 +122,13 @@ ApplyCheckpointWork::getCurrentTxSet()
         else
         {
             assert(mTxHistoryEntry.ledgerSeq == seq);
-            CLOG(DEBUG, "History") << "Loaded txset for ledger " << seq;
+            CLOG_DEBUG(History, "Loaded txset for ledger {}", seq);
             return std::make_shared<TxSetFrame>(mApp.getNetworkID(),
                                                 mTxHistoryEntry.txSet);
         }
     } while (mTxIn && mTxIn.readOne(mTxHistoryEntry));
 
-    CLOG(DEBUG, "History") << "Using empty txset for ledger " << seq;
+    CLOG_DEBUG(History, "Using empty txset for ledger {}", seq);
     return std::make_shared<TxSetFrame>(lm.getLastClosedLedgerHeader().hash);
 }
 
@@ -148,8 +150,7 @@ ApplyCheckpointWork::getNextLedgerCloseData()
     // If we are >1 before LCL, skip
     if (header.ledgerSeq + 1 < lclHeader.header.ledgerSeq)
     {
-        CLOG(DEBUG, "History")
-            << "Catchup skipping old ledger " << header.ledgerSeq;
+        CLOG_DEBUG(History, "Catchup skipping old ledger {}", header.ledgerSeq);
         return nullptr;
     }
 
@@ -166,8 +167,8 @@ ApplyCheckpointWork::getNextLedgerCloseData()
                                 lclHeader.header.ledgerSeq - 1,
                                 lclHeader.header.previousLedgerHash)));
         }
-        CLOG(DEBUG, "History") << "Catchup at 1-before LCL ("
-                               << header.ledgerSeq << "), hash correct";
+        CLOG_DEBUG(History, "Catchup at 1-before LCL ({}), hash correct",
+                   header.ledgerSeq);
         return nullptr;
     }
 
@@ -182,8 +183,8 @@ ApplyCheckpointWork::getNextLedgerCloseData()
                             LedgerManager::ledgerAbbrev(mHeaderHistoryEntry),
                             LedgerManager::ledgerAbbrev(lclHeader)));
         }
-        CLOG(DEBUG, "History")
-            << "Catchup at LCL=" << header.ledgerSeq << ", hash correct";
+        CLOG_DEBUG(History, "Catchup at LCL={}, hash correct",
+                   header.ledgerSeq);
         return nullptr;
     }
 
@@ -208,8 +209,8 @@ ApplyCheckpointWork::getNextLedgerCloseData()
     }
 
     auto txset = getCurrentTxSet();
-    CLOG(DEBUG, "History") << "Ledger " << header.ledgerSeq << " has "
-                           << txset->sizeTx() << " transactions";
+    CLOG_DEBUG(History, "Ledger {} has {} transactions", header.ledgerSeq,
+               txset->sizeTx());
 
     // We've verified the ledgerHeader (in the "trusted part of history"
     // sense) in CATCHUP_VERIFY phase; we now need to check that the
@@ -230,17 +231,18 @@ ApplyCheckpointWork::getNextLedgerCloseData()
             .ARTIFICIALLY_REPLAY_WITH_NEWEST_BUCKET_LOGIC_FOR_TESTING)
     {
         auto& bm = mApp.getBucketManager();
-        CLOG(INFO, "History")
-            << "Forcing bucket manager to use version "
-            << Config::CURRENT_LEDGER_PROTOCOL_VERSION << " with hash "
-            << hexAbbrev(header.bucketListHash);
+        CLOG_INFO(History,
+                  "Forcing bucket manager to use version {} with hash {}",
+                  Config::CURRENT_LEDGER_PROTOCOL_VERSION,
+                  hexAbbrev(header.bucketListHash));
         bm.setNextCloseVersionAndHashForTesting(
             Config::CURRENT_LEDGER_PROTOCOL_VERSION, header.bucketListHash);
     }
 #endif
 
-    return std::make_shared<LedgerCloseData>(header.ledgerSeq, txset,
-                                             header.scpValue);
+    return std::make_shared<LedgerCloseData>(
+        header.ledgerSeq, txset, header.scpValue,
+        std::make_optional<Hash>(mHeaderHistoryEntry.hash));
 }
 
 BasicWork::State
@@ -257,12 +259,12 @@ ApplyCheckpointWork::onRun()
             {
                 auto& lm = mApp.getLedgerManager();
 
-                CLOG(DEBUG, "History")
-                    << "LedgerManager LCL:\n"
-                    << xdr_to_string(lm.getLastClosedLedgerHeader());
+                CLOG_DEBUG(History, "{}",
+                           xdr_to_string(lm.getLastClosedLedgerHeader(),
+                                         "LedgerManager LCL"));
 
-                CLOG(DEBUG, "History") << "Replay header:\n"
-                                       << xdr_to_string(mHeaderHistoryEntry);
+                CLOG_DEBUG(History, "{}",
+                           xdr_to_string(mHeaderHistoryEntry, "Replay header"));
                 if (lm.getLastClosedLedgerHeader().hash !=
                     mHeaderHistoryEntry.hash)
                 {
@@ -323,17 +325,17 @@ ApplyCheckpointWork::onRun()
     catch (InvariantDoesNotHold&)
     {
         // already displayed e.what()
-        CLOG(ERROR, "History") << "Replay failed";
+        CLOG_ERROR(History, "Replay failed");
         throw;
     }
     catch (FileSystemException&)
     {
-        CLOG(ERROR, "History") << POSSIBLY_CORRUPTED_LOCAL_FS;
+        CLOG_ERROR(History, "{}", POSSIBLY_CORRUPTED_LOCAL_FS);
         return State::WORK_FAILURE;
     }
     catch (std::exception& e)
     {
-        CLOG(ERROR, "History") << "Replay failed: " << e.what();
+        CLOG_ERROR(History, "Replay failed: {}", e.what());
         return State::WORK_FAILURE;
     }
 }
@@ -359,5 +361,14 @@ ApplyCheckpointWork::onAbort()
         return false;
     }
     return true;
+}
+
+void
+ApplyCheckpointWork::onFailureRaise()
+{
+    if (mOnFailure)
+    {
+        mOnFailure();
+    }
 }
 }

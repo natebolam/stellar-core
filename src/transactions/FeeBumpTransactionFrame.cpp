@@ -138,8 +138,7 @@ FeeBumpTransactionFrame::checkSignature(SignatureChecker& signatureChecker,
     }
     signers.insert(signers.end(), acc.signers.begin(), acc.signers.end());
 
-    return signatureChecker.checkSignature(acc.accountID, signers,
-                                           neededWeight);
+    return signatureChecker.checkSignature(signers, neededWeight);
 }
 
 bool
@@ -352,7 +351,7 @@ FeeBumpTransactionFrame::getSourceID() const
 
 void
 FeeBumpTransactionFrame::insertKeysForFeeProcessing(
-    std::unordered_set<LedgerKey>& keys) const
+    UnorderedSet<LedgerKey>& keys) const
 {
     keys.emplace(accountKey(getFeeSourceID()));
     mInnerTx->insertKeysForFeeProcessing(keys);
@@ -360,7 +359,7 @@ FeeBumpTransactionFrame::insertKeysForFeeProcessing(
 
 void
 FeeBumpTransactionFrame::insertKeysForTxApply(
-    std::unordered_set<LedgerKey>& keys) const
+    UnorderedSet<LedgerKey>& keys) const
 {
     mInnerTx->insertKeysForTxApply(keys);
 }
@@ -427,8 +426,7 @@ FeeBumpTransactionFrame::resetResults(LedgerHeader const& header,
 StellarMessage
 FeeBumpTransactionFrame::toStellarMessage() const
 {
-    StellarMessage msg;
-    msg.type(TRANSACTION);
+    StellarMessage msg(TRANSACTION);
     msg.transaction() = mEnvelope;
     return msg;
 }

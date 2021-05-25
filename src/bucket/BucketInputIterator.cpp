@@ -69,7 +69,8 @@ BucketInputIterator::operator bool() const
     return mEntryPtr != nullptr;
 }
 
-BucketEntry const& BucketInputIterator::operator*()
+BucketEntry const&
+BucketInputIterator::operator*()
 {
     return *mEntryPtr;
 }
@@ -98,8 +99,8 @@ BucketInputIterator::BucketInputIterator(std::shared_ptr<Bucket const> bucket)
     mMetadata.ledgerVersion = 0;
     if (!mBucket->getFilename().empty())
     {
-        CLOG(TRACE, "Bucket") << "BucketInputIterator opening file to read: "
-                              << mBucket->getFilename();
+        CLOG_TRACE(Bucket, "BucketInputIterator opening file to read: {}",
+                   mBucket->getFilename());
         mIn.open(mBucket->getFilename());
         loadEntry();
     }
@@ -110,7 +111,8 @@ BucketInputIterator::~BucketInputIterator()
     mIn.close();
 }
 
-BucketInputIterator& BucketInputIterator::operator++()
+BucketInputIterator&
+BucketInputIterator::operator++()
 {
     if (mIn)
     {

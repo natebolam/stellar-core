@@ -44,17 +44,45 @@ signatures. For both modes, there is still much room for improvement in regards 
 
 ## Installing AFL
 
+### Packages
+
+Pre-packaged versions of AFL may be available.
+
+For example, Ubuntu provides `AFL++` that can be installed with
+```
+  apt-get install afl++
+```
+
+### From source
+
 Go to the [AFL repo][0], download the [tarball][2], unpack and run `make`, `make -C llvm_mode`
 then `sudo make install`. This will install both `afl-fuzz`, the fuzzer itself, and `afl-gcc`,
 `afl-clang`, and `afl-clang-fast`, which are compiler-wrappers that instrument binaries they
 compile with the fuzzer's branch-tracking machinery (the later being necessary for `llvm_mode`
 improvements described above).
 
+note: you may have to provide a default clang/clang++, this can be done in many ways.
+
+For example, this makes clang-10 the default:
+
+```
+sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-10   81 --slave /usr/bin/clang++ clang++ /usr/bin/clang++-10    --slave /usr/share/man/man1/clang.1.gz clang.1.gz /usr/share/man/man1/clang-10.1.gz --slave /usr/bin/clang-tidy clang-tidy /usr/bin/clang-tidy-10  --slave /usr/bin/clang-format clang-format /usr/bin/clang-format-10 --slave /usr/bin/llvm-config llvm-config /usr/bin/llvm-config-10
+```
 
 ## Building an instrumented stellar-core
 
-Start with a clean workspace, `make clean` or cleaner; then just do `./configure
---enable-afl && make` and make sure you have not enabled `asan` and `ccache`;
+Start with a clean workspace, `make clean` or cleaner; then just do
+
+```
+# or any compile flags that you like
+export CFLAGS='-O3 -g1' ; export CXXFLAGS="$CFLAGS"
+
+# or any compiler that you want
+export CC='clang' ; export CXX='clang++'
+./autogen.sh && ./configure --enable-extrachecks --disable-postgres --enable-afl && make
+```
+
+make sure you have not enabled `asan` and `ccache`;
 the former is incompatible, and the latter doesn't interoperate with the
 compiler wrappers.
 
@@ -73,10 +101,28 @@ to `overlay` and then `make fuzz`; this will do the following:
   - Create a directory `fuzz-findings` for storing crash-producing inputs
   - Run `afl-fuzz` on `stellar-core fuzz`, using those corpus directories
 
+If `stellar-core fuzz` (or `afl-fuzz`) produces output such as 'Warning: AFL++
+tools will need to set AFL_MAP_SIZE to 757616 to be able to run this
+instrumented program!', then you can set this environment variable to something
+sufficient, such as `export AFL_MAP_SIZE=786432`.
+
 You should get a nice old-school textmode TUI to monitor the fuzzer's progress;
 it might be partly hidden depending on the color scheme of your terminal, as it
 makes use of bold color highlighting. There are a lot of [interesting statistics][12]
 displayed here.
+
+When evaluating changes or posting a PR, include screenshots of the TUI
+after similar runtimes from before and after the changes.  We've seen
+~15% variability in metrics such as "total paths" after 10 minutes, so
+you should choose a time significantly longer than that.  The [user guide][13]
+documents interpretation of the many metrics.  At a minimum, we're interested
+in:
+
+- Exec speed
+- Total paths
+- Stability
+- Whether the TUI displays any metrics in red (indicating values it considers
+undesirable)
 
 While it runs, it will write new crashes to files in `fuzz-findings`; before
 pouncing on these as definite evidence of a flaw, you should confirm the crash
@@ -155,3 +201,5 @@ part of staging-tests", here are some directions I think we should take fuzzing:
 [10]: https://github.com/trailofbits/deepstate
 [11]: https://llvm.org/docs/LibFuzzer.html
 [12]: https://github.com/google/AFL/blob/master/docs/status_screen.txt
+[13]: https://afl-1.readthedocs.io/en/latest/user_guide.html
+

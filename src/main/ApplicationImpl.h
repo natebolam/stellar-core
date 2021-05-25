@@ -10,8 +10,8 @@
 #include "medida/timer_context.h"
 #include "util/MetricResetter.h"
 #include "util/Timer.h"
-#include "util/optional.h"
 #include "xdr/Stellar-ledger-entries.h"
+#include <optional>
 #include <thread>
 
 namespace medida
@@ -43,6 +43,8 @@ class ApplicationImpl : public Application
     virtual ~ApplicationImpl() override;
 
     virtual void initialize(bool newDB) override;
+
+    virtual void resetLedgerState() override;
 
     virtual uint64_t timeNow() override;
 
@@ -94,9 +96,11 @@ class ApplicationImpl : public Application
     // returns.
     virtual void joinAllThreads() override;
 
+    virtual void validateAndLogConfig() override;
+
     virtual std::string
-    manualClose(optional<uint32_t> const& manualLedgerSeq,
-                optional<TimePoint> const& manualCloseTime) override;
+    manualClose(std::optional<uint32_t> const& manualLedgerSeq,
+                std::optional<TimePoint> const& manualCloseTime) override;
 
 #ifdef BUILD_TESTS
     virtual void generateLoad(bool isCreate, uint32_t nAccounts,
@@ -119,6 +123,8 @@ class ApplicationImpl : public Application
     virtual Hash const& getNetworkID() const override;
 
     virtual AbstractLedgerTxnParent& getLedgerTxnRoot() override;
+
+    virtual void resetDBForInMemoryMode() override;
 
   protected:
     std::unique_ptr<LedgerManager>
@@ -143,9 +149,9 @@ class ApplicationImpl : public Application
     asio::io_context mWorkerIOContext;
     std::unique_ptr<asio::io_context::work> mWork;
 
+    std::unique_ptr<BucketManager> mBucketManager;
     std::unique_ptr<Database> mDatabase;
     std::unique_ptr<OverlayManager> mOverlayManager;
-    std::unique_ptr<BucketManager> mBucketManager;
     std::unique_ptr<CatchupManager> mCatchupManager;
     std::unique_ptr<HerderPersistence> mHerderPersistence;
     std::unique_ptr<HistoryArchiveManager> mHistoryArchiveManager;
@@ -195,7 +201,6 @@ class ApplicationImpl : public Application
     Hash mNetworkID;
 
     void newDB();
-    void upgradeDB();
 
     void shutdownMainIOContext();
     void shutdownWorkScheduler();
@@ -209,10 +214,10 @@ class ApplicationImpl : public Application
     virtual std::unique_ptr<Database> createDatabase();
 
     uint32_t targetManualCloseLedgerSeqNum(
-        optional<uint32_t> const& explicitlyProvidedSeqNum);
+        std::optional<uint32_t> const& explicitlyProvidedSeqNum);
 
     void setManualCloseVirtualTime(
-        optional<TimePoint> const& explicitlyProvidedCloseTime);
+        std::optional<TimePoint> const& explicitlyProvidedCloseTime);
 
     void
     advanceToLedgerBeforeManualCloseTarget(uint32_t const& targetLedgerSeq);

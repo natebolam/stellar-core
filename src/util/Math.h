@@ -19,7 +19,9 @@ double closest_cluster(double p, std::set<double> const& centers);
 
 bool rand_flip();
 
-extern std::default_random_engine gRandomEngine;
+typedef std::minstd_rand stellar_default_random_engine;
+
+extern stellar_default_random_engine gRandomEngine;
 
 template <typename T>
 T
@@ -31,6 +33,17 @@ rand_uniform(T lo, T hi)
 template <typename T>
 T const&
 rand_element(std::vector<T> const& v)
+{
+    if (v.size() == 0)
+    {
+        throw std::range_error("rand_element on empty vector");
+    }
+    return v.at(rand_uniform<size_t>(0, v.size() - 1));
+}
+
+template <typename T>
+T&
+rand_element(std::vector<T>& v)
 {
     if (v.size() == 0)
     {

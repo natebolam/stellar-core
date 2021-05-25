@@ -5,7 +5,9 @@
 #include "SurveyManager.h"
 #include "herder/Herder.h"
 #include "main/Application.h"
+#include "main/ErrorMessages.h"
 #include "overlay/OverlayManager.h"
+#include "util/GlobalChecks.h"
 #include "util/Logging.h"
 #include "xdrpp/marshal.h"
 
@@ -46,7 +48,7 @@ SurveyManager::startSurvey(SurveyMessageCommandType type,
     mPeersToSurvey.clear();
     mPeersToSurveyQueue = std::queue<NodeID>();
 
-    mRunningSurveyType = make_optional<SurveyMessageCommandType>(type);
+    mRunningSurveyType = std::make_optional<SurveyMessageCommandType>(type);
 
     mCurve25519SecretKey = curve25519RandomSecret();
     mCurve25519PublicKey = curve25519DerivePublic(mCurve25519SecretKey);
@@ -72,8 +74,7 @@ SurveyManager::stopSurvey()
 
     clearCurve25519Keys(mCurve25519PublicKey, mCurve25519SecretKey);
 
-    CLOG(INFO, "Overlay") << "SurveyResults "
-                          << getJsonResults().toStyledString();
+    CLOG_INFO(Overlay, "SurveyResults {}", getJsonResults().toStyledString());
 }
 
 void
@@ -110,12 +111,9 @@ SurveyManager::relayOrProcessResponse(StellarMessage const& msg,
         return;
     }
 
-    // mMessageLimiter doesn't filter out responses for the requesting node, so
-    // it's possible for this message to be a duplicate.
-    if (!mApp.getOverlayManager().recvFloodedMsg(msg, peer))
-    {
-        return;
-    }
+    // mMessageLimiter filters out duplicates, so here we are guaranteed
+    // to record the message for the first time
+    mApp.getOverlayManager().recvFloodedMsg(msg, peer);
 
     if (response.surveyorPeerID == mApp.getConfig().NODE_SEED.getPublicKey())
     {
@@ -136,8 +134,8 @@ SurveyManager::relayOrProcessResponse(StellarMessage const& msg,
             }
             catch (std::exception const& e)
             {
-                CLOG(ERROR, "Overlay")
-                    << "processing survey response failed: " << e.what();
+                CLOG_ERROR(Overlay, "processing survey response failed: {}",
+                           e.what());
 
                 mBadResponseNodes.emplace(response.surveyedPeerID);
                 return;
@@ -162,29 +160,44 @@ SurveyManager::relayOrProcessRequest(StellarMessage const& msg,
 
     SurveyRequestMessage const& request = signedRequest.request;
 
-    // perform all validation checks before signature validation so we don't
-    // waste time verifying signatures
-    auto const& surveyorKeys = mApp.getConfig().SURVEYOR_KEYS;
-    if (surveyorKeys.empty())
+    auto surveyorIsSelf =
+        request.surveyorPeerID == mApp.getConfig().NODE_SEED.getPublicKey();
+    if (!surveyorIsSelf)
     {
-        auto const& quorumMap = mApp.getHerder().getCurrentlyTrackedQuorum();
-        if (quorumMap.count(request.surveyorPeerID) == 0)
+        releaseAssert(peer);
+
+        // perform all validation checks before signature validation so we don't
+        // waste time verifying signatures
+        auto const& surveyorKeys = mApp.getConfig().SURVEYOR_KEYS;
+
+        if (surveyorKeys.empty())
         {
-            return;
+            auto const& quorumMap =
+                mApp.getHerder().getCurrentlyTrackedQuorum();
+            if (quorumMap.count(request.surveyorPeerID) == 0)
+            {
+                return;
+            }
         }
-    }
-    else
-    {
-        if (surveyorKeys.count(request.surveyorPeerID) == 0)
+        else
         {
-            return;
+            if (surveyorKeys.count(request.surveyorPeerID) == 0)
+            {
+                return;
+            }
         }
     }
 
     auto onSuccessValidation = [&]() -> bool {
-        return dropPeerIfSigInvalid(request.surveyorPeerID,
-                                    signedRequest.requestSignature,
-                                    xdr::xdr_to_opaque(request), peer);
+        auto res = dropPeerIfSigInvalid(request.surveyorPeerID,
+                                        signedRequest.requestSignature,
+                                        xdr::xdr_to_opaque(request), peer);
+        if (!res && surveyorIsSelf)
+        {
+            CLOG_ERROR(Overlay, "Unexpected invalid survey request: {} ",
+                       REPORT_INTERNAL_BUG);
+        }
+        return res;
     };
 
     if (!mMessageLimiter.addAndValidateRequest(request, onSuccessValidation))
@@ -192,7 +205,10 @@ SurveyManager::relayOrProcessRequest(StellarMessage const& msg,
         return;
     }
 
-    mApp.getOverlayManager().recvFloodedMsg(msg, peer);
+    if (peer)
+    {
+        mApp.getOverlayManager().recvFloodedMsg(msg, peer);
+    }
 
     if (request.surveyedPeerID == mApp.getConfig().NODE_SEED.getPublicKey())
     {
@@ -204,8 +220,8 @@ SurveyManager::relayOrProcessRequest(StellarMessage const& msg,
     }
 }
 
-void
-SurveyManager::sendTopologyRequest(NodeID const& nodeToSurvey) const
+StellarMessage
+SurveyManager::makeSurveyRequest(NodeID const& nodeToSurvey) const
 {
     StellarMessage newMsg;
     newMsg.type(SURVEY_REQUEST);
@@ -223,7 +239,14 @@ SurveyManager::sendTopologyRequest(NodeID const& nodeToSurvey) const
     auto sigBody = xdr::xdr_to_opaque(request);
     signedRequest.requestSignature = mApp.getConfig().NODE_SEED.sign(sigBody);
 
-    broadcast(newMsg);
+    return newMsg;
+}
+
+void
+SurveyManager::sendTopologyRequest(NodeID const& nodeToSurvey)
+{
+    // Record the request in message limiter and broadcast
+    relayOrProcessRequest(makeSurveyRequest(nodeToSurvey), nullptr);
 }
 
 void
@@ -249,9 +272,8 @@ SurveyManager::processTopologyResponse(NodeID const& surveyedPeerID,
 void
 SurveyManager::processTopologyRequest(SurveyRequestMessage const& request) const
 {
-    CLOG(TRACE, "Overlay") << "Responding to Topology request from "
-                           << mApp.getConfig().toShortString(
-                                  request.surveyorPeerID);
+    CLOG_TRACE(Overlay, "Responding to Topology request from {}",
+               mApp.getConfig().toShortString(request.surveyorPeerID));
 
     StellarMessage newMsg;
     newMsg.type(SURVEY_RESPONSE);
@@ -292,7 +314,7 @@ SurveyManager::processTopologyRequest(SurveyRequestMessage const& request) const
     }
     catch (std::exception const& e)
     {
-        CLOG(ERROR, "Overlay") << "curve25519Encrypt failed: " << e.what();
+        CLOG_ERROR(Overlay, "curve25519Encrypt failed: {}", e.what());
         return;
     }
 
@@ -398,7 +420,7 @@ SurveyManager::clearOldLedgers(uint32_t lastClosedledgerSeq)
 Json::Value const&
 SurveyManager::getJsonResults()
 {
-    mResults["surveyInProgress"] = mRunningSurveyType != nullptr;
+    mResults["surveyInProgress"] = mRunningSurveyType.has_value();
 
     auto& jsonBacklog = mResults["backlog"];
     jsonBacklog.clear();
@@ -528,7 +550,7 @@ SurveyManager::dropPeerIfSigInvalid(PublicKey const& key,
 {
     bool success = PubKeyUtils::verifySig(key, signature, bin);
 
-    if (!success)
+    if (!success && peer)
     {
         // we drop the connection to keep a bad peer from pegging the CPU with
         // signature verification

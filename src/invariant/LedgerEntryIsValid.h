@@ -5,7 +5,7 @@
 // of this distribution or at http://www.apache.org/licenses/LICENSE-2.0
 
 #include "invariant/Invariant.h"
-#include "ledger/GeneralizedLedgerEntry.h"
+#include "ledger/InternalLedgerEntry.h"
 #include "xdr/Stellar-ledger-entries.h"
 #include <memory>
 
@@ -33,14 +33,15 @@ class LedgerEntryIsValid : public Invariant
                           LedgerTxnDelta const& ltxDelta) override;
 
   private:
-    std::string checkIsValid(
-        GeneralizedLedgerEntry const& le,
-        std::shared_ptr<GeneralizedLedgerEntry const> const& genPrevious,
-        uint32_t ledgerSeq, uint32 version) const;
+    std::string
+    checkIsValid(InternalLedgerEntry const& le,
+                 std::shared_ptr<InternalLedgerEntry const> const& genPrevious,
+                 uint32_t ledgerSeq, uint32 version) const;
     std::string checkIsValid(LedgerEntry const& le, LedgerEntry const* previous,
                              uint32_t ledgerSeq, uint32 version) const;
     std::string checkIsValid(AccountEntry const& ae, uint32 version) const;
-    std::string checkIsValid(TrustLineEntry const& tl, uint32 version) const;
+    std::string checkIsValid(TrustLineEntry const& tl,
+                             LedgerEntry const* previous, uint32 version) const;
     std::string checkIsValid(OfferEntry const& oe, uint32 version) const;
     std::string checkIsValid(DataEntry const& de, uint32 version) const;
     std::string checkIsValid(LedgerEntry const& le, LedgerEntry const* previous,

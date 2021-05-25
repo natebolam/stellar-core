@@ -65,7 +65,7 @@ void
 ApplyBucketsWork::onReset()
 {
     ZoneScoped;
-    CLOG(INFO, "History") << "Applying buckets";
+    CLOG_INFO(History, "Applying buckets");
 
     mTotalBuckets = 0;
     mAppliedBuckets = 0;
@@ -77,6 +77,10 @@ ApplyBucketsWork::onReset()
 
     if (!isAborting())
     {
+        // clear ledgerTxn state of all ledger entries in preparation of bucket
+        // apply
+        mApp.resetLedgerState();
+
         auto addBucket = [this](std::shared_ptr<Bucket const> const& bucket) {
             if (bucket->getSize() > 0)
             {
@@ -107,32 +111,20 @@ ApplyBucketsWork::startLevel()
     ZoneScoped;
     assert(isLevelComplete());
 
-    CLOG(DEBUG, "History") << "ApplyBuckets : starting level " << mLevel;
+    CLOG_DEBUG(History, "ApplyBuckets : starting level {}", mLevel);
     auto& level = getBucketLevel(mLevel);
     HistoryStateBucket const& i = mApplyState.currentBuckets.at(mLevel);
 
     bool applySnap = (i.snap != binToHex(level.getSnap()->getHash()));
     bool applyCurr = (i.curr != binToHex(level.getCurr()->getHash()));
 
-    if (!mApplying && !mApp.getConfig().MODE_USES_IN_MEMORY_LEDGER &&
-        (applySnap || applyCurr))
-    {
-        uint32_t oldestLedger = applySnap
-                                    ? BucketList::oldestLedgerInSnap(
-                                          mApplyState.currentLedger, mLevel)
-                                    : BucketList::oldestLedgerInCurr(
-                                          mApplyState.currentLedger, mLevel);
-        auto& lsRoot = mApp.getLedgerTxnRoot();
-        lsRoot.deleteObjectsModifiedOnOrAfterLedger(oldestLedger);
-    }
-
     if (mApplying || applySnap)
     {
         mSnapBucket = getBucket(i.snap);
         mSnapApplicator = std::make_unique<BucketApplicator>(
             mApp, mMaxProtocolVersion, mSnapBucket);
-        CLOG(DEBUG, "History") << "ApplyBuckets : starting level[" << mLevel
-                               << "].snap = " << i.snap;
+        CLOG_DEBUG(History, "ApplyBuckets : starting level[{}].snap = {}",
+                   mLevel, i.snap);
         mApplying = true;
         mBucketApplyStart.Mark();
     }
@@ -141,8 +133,8 @@ ApplyBucketsWork::startLevel()
         mCurrBucket = getBucket(i.curr);
         mCurrApplicator = std::make_unique<BucketApplicator>(
             mApp, mMaxProtocolVersion, mCurrBucket);
-        CLOG(DEBUG, "History") << "ApplyBuckets : starting level[" << mLevel
-                               << "].curr = " << i.curr;
+        CLOG_DEBUG(History, "ApplyBuckets : starting level[{}].curr = {}",
+                   mLevel, i.curr);
         mApplying = true;
         mBucketApplyStart.Mark();
     }
@@ -152,15 +144,6 @@ BasicWork::State
 ApplyBucketsWork::onRun()
 {
     ZoneScoped;
-    if (!mHaveCheckedApplyStateValidity && mLevel == BucketList::kNumLevels - 1)
-    {
-        if (!mApplyState.containsValidBuckets(mApp))
-        {
-            CLOG(ERROR, "History") << "Malformed HAS: unable to apply buckets";
-            return State::WORK_FAILURE;
-        }
-        mHaveCheckedApplyStateValidity = true;
-    }
 
     // Check if we're at the beginning of the new level
     if (isLevelComplete())
@@ -204,12 +187,11 @@ ApplyBucketsWork::onRun()
     if (mLevel != 0)
     {
         --mLevel;
-        CLOG(DEBUG, "History")
-            << "ApplyBuckets : starting next level: " << mLevel;
+        CLOG_DEBUG(History, "ApplyBuckets : starting next level: {}", mLevel);
         return State::WORK_RUNNING;
     }
 
-    CLOG(INFO, "History") << "ApplyBuckets : done, restarting merges";
+    CLOG_INFO(History, "ApplyBuckets : done, restarting merges");
     mApp.getBucketManager().assumeState(mApplyState, mMaxProtocolVersion);
 
     return State::WORK_SUCCESS;
@@ -251,11 +233,10 @@ ApplyBucketsWork::advance(std::string const& bucketName,
 
     if (log)
     {
-        CLOG(INFO, "Bucket")
-            << "Bucket-apply: " << mAppliedEntries << " entries in "
-            << formatSize(mAppliedSize) << "/" << formatSize(mTotalSize)
-            << " in " << mAppliedBuckets << "/" << mTotalBuckets << " files ("
-            << (100 * mAppliedSize / mTotalSize) << "%)";
+        CLOG_INFO(
+            Bucket, "Bucket-apply: {} entries in {}/{} in {}/{} files ({}%)",
+            mAppliedEntries, formatSize(mAppliedSize), formatSize(mTotalSize),
+            mAppliedBuckets, mTotalBuckets, (100 * mAppliedSize / mTotalSize));
     }
 }
 

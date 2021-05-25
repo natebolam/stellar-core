@@ -171,8 +171,7 @@ class BulkUpsertAccountsOperation : public DatabaseTypeSpecificOperation<void>
         for (auto const& e : entries)
         {
             assert(e.entryExists());
-            assert(e.entry().type() ==
-                   GeneralizedLedgerEntryType::LEDGER_ENTRY);
+            assert(e.entry().type() == InternalLedgerEntryType::LEDGER_ENTRY);
             auto const& le = e.entry().ledgerEntry();
             assert(le.data.type() == ACCOUNT);
             auto const& account = le.data.account();
@@ -376,7 +375,7 @@ class BulkDeleteAccountsOperation : public DatabaseTypeSpecificOperation<void>
         for (auto const& e : entries)
         {
             assert(!e.entryExists());
-            assert(e.key().type() == GeneralizedLedgerEntryType::LEDGER_ENTRY);
+            assert(e.key().type() == InternalLedgerEntryType::LEDGER_ENTRY);
             assert(e.key().ledgerKey().type() == ACCOUNT);
             auto const& account = e.key().ledgerKey().account();
             mAccountIDs.emplace_back(KeyUtils::toStrKey(account.accountID));
@@ -460,7 +459,7 @@ LedgerTxnRoot::Impl::dropAccounts()
 {
     throwIfChild();
     mEntryCache.clear();
-    mBestOffersCache.clear();
+    mBestOffers.clear();
 
     mDatabase.getSession() << "DROP TABLE IF EXISTS accounts;";
     mDatabase.getSession() << "DROP TABLE IF EXISTS signers;";
@@ -583,8 +582,7 @@ class BulkLoadAccountsOperation
     }
 
   public:
-    BulkLoadAccountsOperation(Database& db,
-                              std::unordered_set<LedgerKey> const& keys)
+    BulkLoadAccountsOperation(Database& db, UnorderedSet<LedgerKey> const& keys)
         : mDb(db)
     {
         mAccountIDs.reserve(keys.size());
@@ -651,9 +649,8 @@ class BulkLoadAccountsOperation
 #endif
 };
 
-std::unordered_map<LedgerKey, std::shared_ptr<LedgerEntry const>>
-LedgerTxnRoot::Impl::bulkLoadAccounts(
-    std::unordered_set<LedgerKey> const& keys) const
+UnorderedMap<LedgerKey, std::shared_ptr<LedgerEntry const>>
+LedgerTxnRoot::Impl::bulkLoadAccounts(UnorderedSet<LedgerKey> const& keys) const
 {
     ZoneScoped;
     ZoneValue(static_cast<int64_t>(keys.size()));

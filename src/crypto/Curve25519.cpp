@@ -3,6 +3,7 @@
 // of this distribution or at http://www.apache.org/licenses/LICENSE-2.0
 
 #include "crypto/Curve25519.h"
+#include "crypto/CryptoError.h"
 #include "crypto/SHA.h"
 #include "util/HashOfHash.h"
 #include <Tracy.hpp>
@@ -102,8 +103,8 @@ curve25519Decrypt(Curve25519Secret const& localSecret,
 namespace std
 {
 size_t
-hash<stellar::Curve25519Public>::
-operator()(stellar::Curve25519Public const& k) const noexcept
+hash<stellar::Curve25519Public>::operator()(
+    stellar::Curve25519Public const& k) const noexcept
 {
     return std::hash<stellar::uint256>()(k.key);
 }

@@ -3,10 +3,11 @@
 // of this distribution or at http://www.apache.org/licenses/LICENSE-2.0
 
 #include "crypto/SecretKey.h"
+#include "crypto/BLAKE2.h"
+#include "crypto/CryptoError.h"
 #include "crypto/Curve25519.h"
 #include "crypto/Hex.h"
 #include "crypto/KeyUtils.h"
-#include "crypto/SHA.h"
 #include "crypto/StrKey.h"
 #include "main/Config.h"
 #include "transactions/SignatureUtils.h"
@@ -44,7 +45,7 @@ verifySigCacheKey(PublicKey const& key, Signature const& signature,
 {
     assert(key.type() == PUBLIC_KEY_TYPE_ED25519);
 
-    SHA256 hasher;
+    BLAKE2 hasher;
     hasher.add(key.ed25519());
     hasher.add(signature);
     hasher.add(bin);
@@ -153,15 +154,21 @@ SecretKey::random()
 }
 
 #ifdef BUILD_TESTS
-static SecretKey
-pseudoRandomForTestingFromPRNG(std::default_random_engine& engine)
+static std::vector<uint8_t>
+getPRNGBytes(size_t n, stellar_default_random_engine& engine)
 {
     std::vector<uint8_t> bytes;
-    for (size_t i = 0; i < crypto_sign_SEEDBYTES; ++i)
+    for (size_t i = 0; i < n; ++i)
     {
         bytes.push_back(static_cast<uint8_t>(engine()));
     }
-    return SecretKey::fromSeed(bytes);
+    return bytes;
+}
+
+static SecretKey
+pseudoRandomForTestingFromPRNG(stellar_default_random_engine& engine)
+{
+    return SecretKey::fromSeed(getPRNGBytes(crypto_sign_SEEDBYTES, engine));
 }
 
 SecretKey
@@ -179,7 +186,7 @@ SecretKey::pseudoRandomForTestingFromSeed(unsigned int seed)
     // Reminder: this is not cryptographic randomness or even particularly hard
     // to guess PRNG-ness. It's intended for _deterministic_ use, when you want
     // "slightly random-ish" keys, for test-data generation.
-    std::default_random_engine tmpEngine(seed);
+    stellar_default_random_engine tmpEngine(seed);
     return pseudoRandomForTestingFromPRNG(tmpEngine);
 }
 #endif
@@ -354,6 +361,14 @@ PubKeyUtils::random()
     return pk;
 }
 
+#ifdef BUILD_TESTS
+PublicKey
+PubKeyUtils::pseudoRandomForTesting()
+{
+    return SecretKey::pseudoRandomForTesting().getPublicKey();
+}
+#endif
+
 static void
 logPublicKey(std::ostream& s, PublicKey const& pk)
 {
@@ -421,6 +436,20 @@ HashUtils::random()
     randombytes_buf(res.data(), res.size());
     return res;
 }
+
+#ifdef BUILD_TESTS
+Hash
+HashUtils::pseudoRandomForTesting()
+{
+    Hash res;
+    auto bytes = getPRNGBytes(res.size(), gRandomEngine);
+    for (size_t i = 0; i < bytes.size(); ++i)
+    {
+        res[i] = bytes[i];
+    }
+    return res;
+}
+#endif
 }
 
 namespace std

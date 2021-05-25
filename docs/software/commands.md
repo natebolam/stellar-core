@@ -29,8 +29,6 @@ Command options can only by placed after command.
   Option **--trusted-checkpoint-hashes <FILE-NAME>** checks the destination
   ledger hash against the provided reference list of trusted hashes. See the
   command verify-checkpoints for details.
-* **check-quorum**:   Check quorum intersection from history to ensure there is
-  closure over all the validators in the network.
 * **convert-id <ID>**: Will output the passed ID in all known forms and then
   exit. Useful for determining the public key that corresponds to a given
   private key. For example:
@@ -47,7 +45,6 @@ Command options can only by placed after command.
 
 `$ stellar-core http-command info`
 
-* **infer-quorum**:   Print a potential quorum set inferred from history.
 * **load-xdr <FILE-NAME>**:  Load an XDR bucket file, for testing.
 * **new-db**: Clears the local database and resets it to the genesis ledger. If
   you connect to the network after that it will catch up from scratch.
@@ -80,6 +77,8 @@ Command options can only by placed after command.
 * **sec-to-pub**:  Reads a secret key on standard input and outputs the
   corresponding public key.  Both keys are in Stellar's standard
   base-32 ASCII format.
+* **self-check**: Perform history-related sanity checks, and it is planned
+  to support other kinds of sanity checks in the future.
 * **sign-transaction <FILE-NAME>**:  Add a digital signature to a transaction
   envelope stored in binary format in <FILE-NAME>, and send the result to
   standard output (which should be redirected to a file or piped through a tool
@@ -115,13 +114,15 @@ Command options can only by placed after command.
   Option **--output-filename <FILE-NAME>** is mandatory and specifies the file
   to write the trusted checkpoint hashes to.
 * **version**: Print version info and then exit.
-* **write-quorum**: Print a quorum set graph from history.
 
 ## HTTP Commands
 By default stellar-core listens for connections from localhost on port 11626. 
 You can send commands to stellar-core via a web browser, curl, or using the --c 
 command line option (see above). Most commands return their results in JSON
 format.
+
+* **self-check**: Perform history-related sanity checks, and it is planned
+  to support other kinds of sanity checks in the future.
 
 * **bans**
   List current active bans
@@ -268,7 +269,7 @@ format.
 
 * **getsurveyresult**
   `getsurveyresult`<br>
-  Returns the current survey results. The results will be reset everytime a new survey
+  Returns the current survey results. The results will be reset every time a new survey
   is started
 
 ### The following HTTP commands are exposed on test instances

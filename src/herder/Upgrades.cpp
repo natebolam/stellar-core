@@ -3,6 +3,8 @@
 // of this distribution or at http://www.apache.org/licenses/LICENSE-2.0
 
 #include "herder/Upgrades.h"
+#include "crypto/Hex.h"
+#include "crypto/SHA.h"
 #include "database/Database.h"
 #include "database/DatabaseUtils.h"
 #include "ledger/LedgerTxn.h"
@@ -20,7 +22,10 @@
 #include <Tracy.hpp>
 #include <cereal/archives/json.hpp>
 #include <cereal/cereal.hpp>
+#include <cereal/types/optional.hpp>
 #include <fmt/format.h>
+#include <optional>
+#include <regex>
 #include <xdrpp/marshal.h>
 
 namespace cereal
@@ -29,6 +34,9 @@ template <class Archive>
 void
 save(Archive& ar, stellar::Upgrades::UpgradeParameters const& p)
 {
+    // NB: See 'rewriteOptionalFieldKeys' below before adding any new fields to
+    // this type, and in particular avoid using field names "has" or "val",
+    // or serializing any text fields that might have embedded/quoted JSON.
     ar(make_nvp("time", stellar::VirtualClock::to_time_t(p.mUpgradeTime)));
     ar(make_nvp("version", p.mProtocolVersion));
     ar(make_nvp("fee", p.mBaseFee));
@@ -66,10 +74,50 @@ Upgrades::UpgradeParameters::toJson() const
     return out.str();
 }
 
+static std::string
+rewriteOptionalFieldKeys(std::string s)
+{
+    // When transitioning from C++14 to C++17, we migrated from a custom
+    // implementation of 'optional' types, to using std::optional.
+    //
+    // Unfortunately our previous optional-type serialized like this:
+    //
+    //   {
+    //     "has": true,
+    //     "val": 12345
+    //   }
+    //
+    // Whereas cereal's built-in support for (de)serializing std::optional will
+    // write the same content like this, with the sense of the flag inverted and
+    // the names of both fields changed:
+    //
+    //   {
+    //     "nullopt": false,
+    //     "data": 12345
+    //   }
+    //
+    // We therefore do a very crude (but safe) string-level rewrite of the
+    // former into the latter here. This is safe since none of the fields
+    // serialized in the upgrades structure can collide with the string values
+    // being substituted, and this is the only structure in the entire program
+    // that has this issue.
+    //
+    // Once this code has been in the field long enough to have processed any
+    // pending upgrades deserialized from a database, it should be removed.
+
+    s = std::regex_replace(s, std::regex("\"has\": false"),
+                           "\"nullopt\": true");
+    s = std::regex_replace(s, std::regex("\"has\": true"),
+                           "\"nullopt\": false");
+    s = std::regex_replace(s, std::regex("\"val\":"), "\"data\":");
+    return s;
+}
+
 void
 Upgrades::UpgradeParameters::fromJson(std::string const& s)
 {
-    std::istringstream in(s);
+    std::string s1 = rewriteOptionalFieldKeys(s);
+    std::istringstream in(s1);
     {
         cereal::JSONInputArchive ar(in);
         cereal::load(ar, *this);
@@ -182,7 +230,8 @@ Upgrades::toString() const
     std::stringstream r;
     bool first = true;
 
-    auto appendInfo = [&](std::string const& s, optional<uint32> const& o) {
+    auto appendInfo = [&](std::string const& s,
+                          std::optional<uint32> const& o) {
         if (o)
         {
             if (first)
@@ -217,7 +266,7 @@ Upgrades::removeUpgrades(std::vector<UpgradeType>::const_iterator beginUpdates,
     if (res.mUpgradeTime + Upgrades::UPDGRADE_EXPIRATION_HOURS <=
         VirtualClock::from_time_t(closeTime))
     {
-        auto resetParamIfSet = [&](optional<uint32>& o) {
+        auto resetParamIfSet = [&](std::optional<uint32>& o) {
             if (o)
             {
                 o.reset();
@@ -233,7 +282,7 @@ Upgrades::removeUpgrades(std::vector<UpgradeType>::const_iterator beginUpdates,
         return res;
     }
 
-    auto resetParam = [&](optional<uint32>& o, uint32 v) {
+    auto resetParam = [&](std::optional<uint32>& o, uint32 v) {
         if (o && *o == v)
         {
             o.reset();
@@ -429,6 +478,14 @@ Upgrades::deleteOldEntries(Database& db, uint32_t ledgerSeq, uint32_t count)
                                           "upgradehistory", "ledgerseq");
 }
 
+void
+Upgrades::deleteNewerEntries(Database& db, uint32_t ledgerSeq)
+{
+    ZoneScoped;
+    DatabaseUtils::deleteNewerEntriesHelper(db.getSession(), ledgerSeq,
+                                            "upgradehistory", "ledgerseq");
+}
+
 static void
 addLiabilities(std::map<Asset, std::unique_ptr<int64_t>>& liabilities,
                AccountID const& accountID, Asset const& asset, int64_t delta)
@@ -611,12 +668,12 @@ updateOffer(
     return res;
 }
 
-static std::unordered_map<AccountID, int64_t>
+static UnorderedMap<AccountID, int64_t>
 getOfferAccountMinBalances(
     AbstractLedgerTxn& ltx, LedgerTxnHeader const& header,
     std::map<AccountID, std::vector<LedgerTxnEntry>> const& offersByAccount)
 {
-    std::unordered_map<AccountID, int64_t> minBalanceMap;
+    UnorderedMap<AccountID, int64_t> minBalanceMap;
     for (auto const& accountOffers : offersByAccount)
     {
         auto const& accountID = accountOffers.first;
@@ -635,10 +692,11 @@ getOfferAccountMinBalances(
 }
 
 static void
-eraseOfferWithPossibleSponsorship(
-    AbstractLedgerTxn& ltx, LedgerTxnHeader const& header,
-    LedgerTxnEntry& offerEntry, LedgerTxnEntry& accountEntry,
-    std::unordered_set<AccountID>& changedAccounts)
+eraseOfferWithPossibleSponsorship(AbstractLedgerTxn& ltx,
+                                  LedgerTxnHeader const& header,
+                                  LedgerTxnEntry& offerEntry,
+                                  LedgerTxnEntry& accountEntry,
+                                  UnorderedSet<AccountID>& changedAccounts)
 {
     LedgerEntry::_ext_t extension = offerEntry.current().ext;
     bool isSponsored = extension.v() == 1 && extension.v1().sponsoringID;
@@ -678,11 +736,11 @@ eraseOfferWithPossibleSponsorship(
 static void
 prepareLiabilities(AbstractLedgerTxn& ltx, LedgerTxnHeader const& header)
 {
-    CLOG(INFO, "Ledger") << "Starting prepareLiabilities";
+    CLOG_INFO(Ledger, "Starting prepareLiabilities");
 
     auto offersByAccount = ltx.loadAllOffers();
 
-    std::unordered_set<AccountID> changedAccounts;
+    UnorderedSet<AccountID> changedAccounts;
     uint64_t nChangedTrustLines = 0;
 
     std::map<UpdateOfferResult, uint64_t> nUpdatedOffers;
@@ -695,7 +753,7 @@ prepareLiabilities(AbstractLedgerTxn& ltx, LedgerTxnHeader const& header)
     for (auto& accountOffers : offersByAccount)
     {
         // The purpose of std::unique_ptr here is to have a special value
-        // (nullptr) to indicate that an integer overflow would have occured.
+        // (nullptr) to indicate that an integer overflow would have occurred.
         // Overflow is possible here because existing offers were not
         // constrainted to have int64_t liabilities. This must be carefully
         // handled in what follows.
@@ -767,8 +825,7 @@ prepareLiabilities(AbstractLedgerTxn& ltx, LedgerTxnHeader const& header)
                 default:
                     throw std::runtime_error("Unknown UpdateOfferResult");
                 }
-                CLOG(DEBUG, "Ledger")
-                    << "Offer with offerID=" << offerID << message;
+                CLOG_DEBUG(Ledger, "Offer with offerID={}{}", offerID, message);
             }
         }
 
@@ -833,15 +890,59 @@ prepareLiabilities(AbstractLedgerTxn& ltx, LedgerTxnHeader const& header)
         }
     }
 
-    CLOG(INFO, "Ledger") << "prepareLiabilities completed with "
-                         << changedAccounts.size() << " accounts modified, "
-                         << nChangedTrustLines << " trustlines modified, "
-                         << nUpdatedOffers[UpdateOfferResult::Adjusted]
-                         << " offers adjusted, "
-                         << nUpdatedOffers[UpdateOfferResult::AdjustedToZero]
-                         << " offers adjusted to zero, and "
-                         << nUpdatedOffers[UpdateOfferResult::Erase]
-                         << " offers erased";
+    CLOG_INFO(Ledger,
+              "prepareLiabilities completed with {} accounts modified, {} "
+              "trustlines modified, {} offers adjusted, {} offers adjusted to "
+              "zero, and {} offers erased",
+              changedAccounts.size(), nChangedTrustLines,
+              nUpdatedOffers[UpdateOfferResult::Adjusted],
+              nUpdatedOffers[UpdateOfferResult::AdjustedToZero],
+              nUpdatedOffers[UpdateOfferResult::Erase]);
+}
+
+static void
+upgradeFromProtocol15To16(AbstractLedgerTxn& ltx)
+{
+    if (gIsProductionNetwork)
+    {
+        auto const sellerStrKey =
+            "GBGP52VDS2U3F4VZHEMD4MDDM7YIODXLYVGOZLYSTAD6PZK45JXILTAX";
+        auto const offerID = 289733046;
+
+        auto const sellerID = KeyUtils::fromStrKey<PublicKey>(sellerStrKey);
+        auto seller = stellar::loadAccountWithoutRecord(ltx, sellerID);
+        auto offer = stellar::loadOffer(ltx, sellerID, offerID);
+
+        if (offer)
+        {
+            // Seller exists if offer exists
+            auto const& ae = seller.current().data.account();
+            if (ae.ext.v() == 1 && ae.ext.v1().ext.v() == 2)
+            {
+                CLOG_ERROR(Ledger,
+                           "Account {} has AccountEntryExtensionV2, cannot "
+                           "complete upgrade",
+                           sellerStrKey);
+                return;
+            }
+
+            auto const sponsorStrKey =
+                "GAS3CQSW3HE27IF5KDWKCM7K6FG6AHRHWOUVBUWIRV4ZGTJMPBXNGATF";
+            auto const sponsorID =
+                KeyUtils::fromStrKey<PublicKey>(sponsorStrKey);
+            auto const& le = offer.current();
+            if (le.ext.v() == 1 && le.ext.v1().sponsoringID &&
+                *le.ext.v1().sponsoringID == sponsorID)
+            {
+                offer.current().ext.v(0);
+                CLOG_ERROR(Ledger, "Sponsorship removed from offer {}",
+                           offerID);
+                return;
+            }
+        }
+
+        CLOG_ERROR(Ledger, "Offer {} does not exist", offerID);
+    }
 }
 
 void
@@ -854,6 +955,10 @@ Upgrades::applyVersionUpgrade(AbstractLedgerTxn& ltx, uint32_t newVersion)
     if (header.current().ledgerVersion >= 10 && prevVersion < 10)
     {
         prepareLiabilities(ltx, header);
+    }
+    else if (header.current().ledgerVersion == 16 && prevVersion == 15)
+    {
+        upgradeFromProtocol15To16(ltx);
     }
 }
 

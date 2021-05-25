@@ -7,10 +7,10 @@
 #include "ledger/LedgerHashUtils.h"
 #include "overlay/StellarXDR.h"
 #include "transactions/TransactionFrame.h"
-#include "util/optional.h"
+#include "util/UnorderedMap.h"
 #include <deque>
 #include <functional>
-#include <unordered_map>
+#include <optional>
 
 namespace stellar
 {
@@ -41,11 +41,11 @@ class AbstractTxSetFrameForApply
 
 class TxSetFrame : public AbstractTxSetFrameForApply
 {
-    optional<Hash> mHash{nullptr};
+    std::optional<Hash> mHash;
 
     // mValid caches both the last app LCL that we checked
     // vaidity for, and the result of that validity check.
-    optional<std::pair<Hash, bool>> mValid{nullptr};
+    std::optional<std::pair<Hash, bool>> mValid;
 
     Hash mPreviousLedgerHash;
 
@@ -56,8 +56,7 @@ class TxSetFrame : public AbstractTxSetFrameForApply
                      bool justCheck, uint64_t lowerBoundCloseTimeOffset,
                      uint64_t upperBoundCloseTimeOffset);
 
-    std::unordered_map<AccountID, AccountTransactionQueue>
-    buildAccountTxQueues();
+    UnorderedMap<AccountID, AccountTransactionQueue> buildAccountTxQueues();
     friend struct SurgeCompare;
 
   public:
@@ -78,7 +77,7 @@ class TxSetFrame : public AbstractTxSetFrameForApply
     Hash& previousLedgerHash();
     Hash const& previousLedgerHash() const override;
 
-    void sortForHash();
+    virtual void sortForHash();
 
     std::vector<TransactionFrameBasePtr> sortForApply() override;
 

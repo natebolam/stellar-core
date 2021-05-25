@@ -2,14 +2,15 @@
 
 AM_CPPFLAGS = -isystem "$(top_srcdir)" -I"$(top_srcdir)/src" -I"$(top_builddir)/src"
 AM_CPPFLAGS += $(libsodium_CFLAGS) $(xdrpp_CFLAGS) $(libmedida_CFLAGS)	\
-	$(soci_CFLAGS) $(sqlite3_CFLAGS) $(libasio_CFLAGS)
+	$(soci_CFLAGS) $(sqlite3_CFLAGS) $(libasio_CFLAGS) $(libunwind_CFLAGS)
 AM_CPPFLAGS += -isystem "$(top_srcdir)/lib"             \
 	-isystem "$(top_srcdir)/lib/autocheck/include"      \
 	-isystem "$(top_srcdir)/lib/cereal/include"         \
 	-isystem "$(top_srcdir)/lib/util"                   \
 	-isystem "$(top_srcdir)/lib/fmt/include"            \
 	-isystem "$(top_srcdir)/lib/soci/src/core"          \
-	-isystem "$(top_srcdir)/lib/tracy"
+	-isystem "$(top_srcdir)/lib/tracy"                  \
+	-isystem "$(top_srcdir)/lib/spdlog/include"
 
 if USE_POSTGRES
 AM_CPPFLAGS += -DUSE_POSTGRES=1 $(libpq_CFLAGS)
@@ -28,6 +29,10 @@ if BUILD_TESTS
 AM_CPPFLAGS += -DBUILD_TESTS=1
 endif # BUILD_TESTS
 
-if USE_EASYLOGGING
-AM_CPPFLAGS += -DUSE_EASYLOGGING
-endif # USE_EASYLOGGING
+if USE_SPDLOG
+AM_CPPFLAGS += -DUSE_SPDLOG
+endif # USE_SPDLOG
+
+if ENABLE_NEXT_PROTOCOL_VERSION_UNSAFE_FOR_PRODUCTION
+AM_CPPFLAGS += -DENABLE_NEXT_PROTOCOL_VERSION_UNSAFE_FOR_PRODUCTION
+endif # ENABLE_NEXT_PROTOCOL_VERSION_UNSAFE_FOR_PRODUCTION

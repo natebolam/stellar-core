@@ -10,10 +10,10 @@
 #include "herder/TransactionQueue.h"
 #include "herder/Upgrades.h"
 #include "util/Timer.h"
+#include "util/UnorderedMap.h"
 #include "util/XDROperators.h"
 #include <deque>
 #include <memory>
-#include <unordered_map>
 #include <vector>
 
 namespace medida
@@ -105,6 +105,11 @@ class HerderImpl : public Herder
                                                     bool fullKeys) override;
     QuorumTracker::QuorumMap const& getCurrentlyTrackedQuorum() const override;
 
+    virtual StellarValue
+    makeStellarValue(Hash const& txSetHash, uint64_t closeTime,
+                     xdr::xvector<UpgradeType, 6> const& upgrades,
+                     SecretKey const& s) override;
+
 #ifdef BUILD_TESTS
     // used for testing
     PendingEnvelopes& getPendingEnvelopes();
@@ -119,8 +124,6 @@ class HerderImpl : public Herder
 
     // helper function to verify SCPValues are signed
     bool verifyStellarValueSignature(StellarValue const& sv);
-    // helper function to sign SCPValues
-    void signStellarValue(SecretKey const& s, StellarValue& sv);
 
   private:
     // return true if values referenced by envelope have a valid close time:
@@ -212,6 +215,9 @@ class HerderImpl : public Herder
     // Check that the quorum map intersection state is up to date, and if not
     // run a background job that re-analyzes the current quorum map.
     void checkAndMaybeReanalyzeQuorumMap();
+
+    // erase all data for ledgers strictly less than ledgerSeq
+    void eraseBelow(uint32 ledgerSeq);
 
     struct QuorumMapIntersectionState
     {

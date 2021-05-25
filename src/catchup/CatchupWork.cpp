@@ -22,6 +22,7 @@
 #include "ledger/LedgerManager.h"
 #include "main/Application.h"
 #include "util/Logging.h"
+#include "work/WorkWithCallback.h"
 #include <Tracy.hpp>
 #include <fmt/format.h>
 
@@ -43,8 +44,8 @@ CatchupWork::CatchupWork(Application& app,
 {
     if (mArchive)
     {
-        CLOG(INFO, "History")
-            << "CatchupWork: selected archive " << mArchive->getName();
+        CLOG_INFO(History, "CatchupWork: selected archive {}",
+                  mArchive->getName());
     }
 }
 
@@ -89,8 +90,8 @@ CatchupWork::doReset()
     mGetHistoryArchiveStateWork.reset();
     mApplyBufferedLedgersWork.reset();
     auto const& lcl = mApp.getLedgerManager().getLastClosedLedgerHeader();
-    mLastClosedLedgerHashPair =
-        LedgerNumHashPair(lcl.header.ledgerSeq, make_optional<Hash>(lcl.hash));
+    mLastClosedLedgerHashPair = LedgerNumHashPair(
+        lcl.header.ledgerSeq, std::make_optional<Hash>(lcl.hash));
     mCatchupSeq.reset();
     mGetBucketStateWork.reset();
     mVerifyTxResults.reset();
@@ -157,13 +158,25 @@ CatchupWork::downloadApplyBuckets()
     ZoneScoped;
     auto const& has = mGetBucketStateWork->getHistoryArchiveState();
     std::vector<std::string> hashes = has.differingBuckets(mLocalState);
+
     auto getBuckets = std::make_shared<DownloadBucketsWork>(
         mApp, mBuckets, hashes, *mDownloadDir, mArchive);
 
+    auto verifyHASCallback = [has](Application& app) {
+        if (!has.containsValidBuckets(app))
+        {
+            CLOG_ERROR(History, "Malformed HAS: invalid buckets");
+            return false;
+        }
+        return true;
+    };
+    auto verifyHAS = std::make_shared<WorkWithCallback>(mApp, "verify-has",
+                                                        verifyHASCallback);
     auto applyBuckets = std::make_shared<ApplyBucketsWork>(
         mApp, mBuckets, has, mVerifiedLedgerRangeStart.header.ledgerVersion);
 
-    std::vector<std::shared_ptr<BasicWork>> seq{getBuckets, applyBuckets};
+    std::vector<std::shared_ptr<BasicWork>> seq{getBuckets, verifyHAS,
+                                                applyBuckets};
     return std::make_shared<WorkSequence>(mApp, "download-verify-apply-buckets",
                                           seq, RETRY_NEVER);
 }
@@ -177,9 +190,9 @@ CatchupWork::assertBucketState()
     // point to the same ledger and the same BucketList.
     if (has.currentLedger != mVerifiedLedgerRangeStart.header.ledgerSeq)
     {
-        CLOG(ERROR, "History")
-            << "Caught up to wrong ledger: wanted " << has.currentLedger
-            << ", got " << mVerifiedLedgerRangeStart.header.ledgerSeq;
+        CLOG_ERROR(History, "Caught up to wrong ledger: wanted {}, got {}",
+                   has.currentLedger,
+                   mVerifiedLedgerRangeStart.header.ledgerSeq);
     }
     assert(has.currentLedger == mVerifiedLedgerRangeStart.header.ledgerSeq);
     assert(has.getBucketListHash() ==
@@ -219,12 +232,11 @@ CatchupWork::runCatchupStep()
         auto toLedger = mCatchupConfiguration.toLedger() == 0
                             ? "CURRENT"
                             : std::to_string(mCatchupConfiguration.toLedger());
-        CLOG(INFO, "History")
-            << "Starting catchup with configuration:\n"
-            << "  lastClosedLedger: "
-            << mApp.getLedgerManager().getLastClosedLedgerNum() << "\n"
-            << "  toLedger: " << toLedger << "\n"
-            << "  count: " << mCatchupConfiguration.count();
+        CLOG_INFO(History,
+                  "Starting catchup with configuration:\n  lastClosedLedger: "
+                  "{}\n  toLedger: {}\n  count: {}",
+                  mApp.getLedgerManager().getLastClosedLedgerNum(), toLedger,
+                  mCatchupConfiguration.count());
 
         auto toCheckpoint =
             mCatchupConfiguration.toLedger() == CatchupConfiguration::CURRENT
@@ -247,36 +259,37 @@ CatchupWork::runCatchupStep()
     if (!has.networkPassphrase.empty() &&
         has.networkPassphrase != mApp.getConfig().NETWORK_PASSPHRASE)
     {
-        CLOG(ERROR, "History")
-            << "The network passphrase of the application does not match "
-            << "that of the history archive state";
+        CLOG_ERROR(History, "The network passphrase of the "
+                            "application does not match that of the "
+                            "history archive state");
         return State::WORK_FAILURE;
     }
 
     // Step 2: Compare local and remote states
     if (!hasAnyLedgersToCatchupTo())
     {
-        CLOG(INFO, "History") << "*";
-        CLOG(INFO, "History")
-            << "* Target ledger " << has.currentLedger
-            << " is not newer than last closed ledger "
-            << mLastClosedLedgerHashPair.first << " - nothing to do";
+        CLOG_INFO(History, "*");
+        CLOG_INFO(
+            History,
+            "* Target ledger {} is not newer than last closed ledger {} - "
+            "nothing to do",
+            has.currentLedger, mLastClosedLedgerHashPair.first);
 
         if (mCatchupConfiguration.toLedger() == CatchupConfiguration::CURRENT)
         {
-            CLOG(INFO, "History")
-                << "* Wait until next checkpoint before retrying";
+            CLOG_INFO(History, "* Wait until next checkpoint before retrying");
         }
         else
         {
-            CLOG(INFO, "History") << "* If you really want to catchup to "
-                                  << mCatchupConfiguration.toLedger()
-                                  << " run stellar-core new-db";
+            CLOG_INFO(
+                History,
+                "* If you really want to catchup to {} run stellar-core new-db",
+                mCatchupConfiguration.toLedger());
         }
 
-        CLOG(INFO, "History") << "*";
+        CLOG_INFO(History, "*");
 
-        CLOG(ERROR, "History") << "Nothing to catchup to ";
+        CLOG_ERROR(History, "Nothing to catchup to ");
 
         return State::WORK_FAILURE;
     }
@@ -446,14 +459,14 @@ CatchupWork::doWork()
 void
 CatchupWork::onFailureRaise()
 {
-    CLOG(WARNING, "History") << "Catchup failed";
+    CLOG_WARNING(History, "Catchup failed");
     Work::onFailureRaise();
 }
 
 void
 CatchupWork::onSuccess()
 {
-    CLOG(INFO, "History") << "Catchup finished";
+    CLOG_INFO(History, "Catchup finished");
     Work::onSuccess();
 }
 }

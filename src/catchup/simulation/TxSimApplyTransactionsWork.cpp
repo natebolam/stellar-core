@@ -17,6 +17,7 @@
 #include "transactions/TransactionBridge.h"
 #include "transactions/TransactionSQL.h"
 #include "transactions/TransactionUtils.h"
+#include "util/HashOfHash.h"
 #include "util/XDRCereal.h"
 #include <fmt/format.h>
 
@@ -66,10 +67,9 @@ checkOperationResults(xdr::xvector<OperationResult> const& expected,
     {
         if (expected[i].code() != actual[i].code())
         {
-            CLOG(ERROR, "History")
-                << fmt::format("Expected operation result {} but got {}",
-                               xdr_to_string(expected[i].code()),
-                               xdr_to_string(actual[i].code()));
+            CLOG_ERROR(History, "Expected {} but got {}",
+                       xdr_to_string(expected[i].code(), "OperationResultCode"),
+                       xdr_to_string(actual[i].code(), "OperationResultCode"));
             continue;
         }
 
@@ -155,10 +155,10 @@ checkOperationResults(xdr::xvector<OperationResult> const& expected,
 
         if (!match)
         {
-            CLOG(ERROR, "History") << fmt::format(
-                "Expected operation result: {}", xdr_to_string(expectedOpRes));
-            CLOG(ERROR, "History") << fmt::format("Actual operation result: {}",
-                                                  xdr_to_string(actualOpRes));
+            CLOG_ERROR(History, "Expected {}",
+                       xdr_to_string(expectedOpRes, "OperationResult"));
+            CLOG_ERROR(History, "Actual {}",
+                       xdr_to_string(actualOpRes, "OperationResult"));
         }
     }
 }
@@ -179,9 +179,10 @@ checkResults(Application& app, uint32_t ledger,
 
         if (dbRes.code() != archiveRes.code())
         {
-            CLOG(ERROR, "History") << fmt::format(
-                "Expected result code {} does not agree with {} for tx {}",
-                xdr_to_string(archiveRes.code()), xdr_to_string(dbRes.code()),
+            CLOG_ERROR(
+                History, "Expected {} does not agree with {} for tx {}",
+                xdr_to_string(archiveRes.code(), "TransactionResultCode"),
+                xdr_to_string(dbRes.code(), "TransactionResultCode"),
                 binToHex(results[i].transactionHash));
         }
         else if (dbRes.code() == txFEE_BUMP_INNER_FAILED ||
@@ -191,12 +192,15 @@ checkResults(Application& app, uint32_t ledger,
             if (dbRes.innerResultPair().result.result.code() !=
                 archiveRes.innerResultPair().result.result.code())
             {
-                CLOG(ERROR, "History") << fmt::format(
-                    "Expected result code {} does not agree with {} for "
+                CLOG_ERROR(
+                    History,
+                    "Expected {} does not agree with {} for "
                     "fee-bump inner tx {}",
                     xdr_to_string(
-                        archiveRes.innerResultPair().result.result.code()),
-                    xdr_to_string(dbRes.innerResultPair().result.result.code()),
+                        archiveRes.innerResultPair().result.result.code(),
+                        "TransactionResultCode"),
+                    xdr_to_string(dbRes.innerResultPair().result.result.code(),
+                                  "TransactionResultCode"),
                     binToHex(archiveRes.innerResultPair().transactionHash));
             }
             else if (dbRes.innerResultPair().result.result.code() == txFAILED ||
@@ -398,7 +402,7 @@ TxSimApplyTransactionsWork::getNextLedgerFromHistoryArchive()
                                mResultHistory))
     {
         // Derive transaction apply order from the results
-        std::unordered_map<Hash, TransactionEnvelope> transactions;
+        UnorderedMap<Hash, TransactionEnvelope> transactions;
         for (auto const& tx : mTransactionHistory.txSet.txs)
         {
             auto txFrame = TransactionFrameBase::makeTransactionFromWire(

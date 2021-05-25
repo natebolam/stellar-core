@@ -13,6 +13,7 @@
 #include "util/XDRStream.h"
 #include <Tracy.hpp>
 
+#include <optional>
 #include <soci.h>
 #include <xdrpp/marshal.h>
 
@@ -44,7 +45,7 @@ HerderPersistenceImpl::saveSCPHistory(uint32_t seq,
         return;
     }
 
-    auto usedQSets = std::unordered_map<Hash, SCPQuorumSetPtr>{};
+    auto usedQSets = UnorderedMap<Hash, SCPQuorumSetPtr>{};
     auto& db = mApp.getDatabase();
 
     soci::transaction txscope(db.getSession());
@@ -104,7 +105,7 @@ HerderPersistenceImpl::saveSCPHistory(uint32_t seq,
             // skip node if we don't have its quorum set
             continue;
         }
-        auto qSetH = sha256(xdr::xdr_to_opaque(*(p.second.mQuorumSet)));
+        auto qSetH = xdrSha256(*(p.second.mQuorumSet));
         usedQSets.insert(std::make_pair(qSetH, p.second.mQuorumSet));
 
         std::string nodeIDStrKey = KeyUtils::toStrKey(nodeID);
@@ -221,7 +222,7 @@ HerderPersistence::copySCPHistoryToStream(Database& db, soci::session& sess,
     size_t n = 0;
 
     // all known quorum sets
-    std::unordered_map<Hash, SCPQuorumSet> qSets;
+    UnorderedMap<Hash, SCPQuorumSet> qSets;
 
     for (uint32_t curLedgerSeq = begin; curLedgerSeq < end; curLedgerSeq++)
     {
@@ -296,7 +297,7 @@ HerderPersistence::copySCPHistoryToStream(Database& db, soci::session& sess,
     return n;
 }
 
-optional<Hash>
+std::optional<Hash>
 HerderPersistence::getNodeQuorumSet(Database& db, soci::session& sess,
                                     NodeID const& nodeID)
 {
@@ -311,11 +312,11 @@ HerderPersistence::getNodeQuorumSet(Database& db, soci::session& sess,
 
     st.execute(true);
 
-    optional<Hash> res;
+    std::optional<Hash> res;
     if (st.got_data())
     {
         auto h = hexToBin256(qsethHex);
-        res = make_optional<Hash>(std::move(h));
+        res = std::make_optional<Hash>(std::move(h));
     }
     return res;
 }
@@ -399,5 +400,15 @@ HerderPersistence::deleteOldEntries(Database& db, uint32_t ledgerSeq,
                                           "scphistory", "ledgerseq");
     DatabaseUtils::deleteOldEntriesHelper(db.getSession(), ledgerSeq, count,
                                           "scpquorums", "lastledgerseq");
+}
+
+void
+HerderPersistence::deleteNewerEntries(Database& db, uint32_t ledgerSeq)
+{
+    ZoneScoped;
+    DatabaseUtils::deleteNewerEntriesHelper(db.getSession(), ledgerSeq,
+                                            "scphistory", "ledgerseq");
+    DatabaseUtils::deleteNewerEntriesHelper(db.getSession(), ledgerSeq,
+                                            "scpquorums", "lastledgerseq");
 }
 }

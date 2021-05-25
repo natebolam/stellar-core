@@ -115,9 +115,10 @@ InvariantManagerImpl::checkOnOperationApply(Operation const& operation,
             continue;
         }
 
-        auto message = fmt::format(
-            R"(Invariant "{}" does not hold on operation: {}{}{})",
-            invariant->getName(), result, "\n", xdr_to_string(operation));
+        auto message =
+            fmt::format(R"(Invariant "{}" does not hold on operation: {}{}{})",
+                        invariant->getName(), result, "\n",
+                        xdr_to_string(operation, "Operation"));
         onInvariantFailure(invariant, message,
                            ltxDelta.header.current.ledgerSeq);
     }
@@ -169,7 +170,7 @@ InvariantManagerImpl::enableInvariant(std::string const& invPattern)
             {
                 enabledSome = true;
                 mEnabled.push_back(inv.second);
-                CLOG(INFO, "Invariant") << "Enabled invariant '" << name << "'";
+                CLOG_INFO(Invariant, "Enabled invariant '{}'", name);
             }
             else
             {
@@ -215,16 +216,39 @@ void
 InvariantManagerImpl::handleInvariantFailure(
     std::shared_ptr<Invariant> invariant, std::string const& message) const
 {
+#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+    abort();
+#endif
     if (invariant->isStrict())
     {
-        CLOG(FATAL, "Invariant") << message;
-        CLOG(FATAL, "Invariant") << REPORT_INTERNAL_BUG;
+        CLOG_FATAL(Invariant, "{}", message);
+        CLOG_FATAL(Invariant, "{}", REPORT_INTERNAL_BUG);
         throw InvariantDoesNotHold{message};
     }
     else
     {
-        CLOG(ERROR, "Invariant") << message;
-        CLOG(ERROR, "Invariant") << REPORT_INTERNAL_BUG;
+        CLOG_ERROR(Invariant, "{}", message);
+        CLOG_ERROR(Invariant, "{}", REPORT_INTERNAL_BUG);
     }
 }
+
+#ifdef BUILD_TESTS
+void
+InvariantManagerImpl::snapshotForFuzzer()
+{
+    for (auto const& invariant : mEnabled)
+    {
+        invariant->snapshotForFuzzer();
+    }
+}
+
+void
+InvariantManagerImpl::resetForFuzzer()
+{
+    for (auto const& invariant : mEnabled)
+    {
+        invariant->resetForFuzzer();
+    }
+}
+#endif // BUILD_TESTS
 }
